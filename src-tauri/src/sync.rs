@@ -1,0 +1,309 @@
+//! The sync loop: fetch the per-realm GCS1 import string from the public
+//! GoldCap API on an interval (plus an on-demand "sync now" trigger), and
+//! write it into the WoW addon folder. Errors are logged and reflected in
+//! `SyncStatus` — the loop itself never stops on a failed tick.
+
+use crate::config::Config;
+use crate::logging::Logger;
+use crate::luafile;
+use std::fmt;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
+use tokio::sync::{mpsc, watch};
+
+const IMPORT_STRING_URL: &str = "https://api.goldcap.gg/v1/addon/import-string";
+
+#[derive(Debug)]
+pub enum SyncError {
+    Request(String),
+    BadStatus(u16),
+    InvalidBody,
+    Write(String),
+}
+
+impl fmt::Display for SyncError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SyncError::Request(msg) => write!(f, "request failed: {msg}"),
+            SyncError::BadStatus(code) => write!(f, "unexpected status {code}"),
+            SyncError::InvalidBody => write!(f, "response was not a GCS1 import string"),
+            SyncError::Write(msg) => write!(f, "failed to write addon files: {msg}"),
+        }
+    }
+}
+
+/// Shared, tray-readable snapshot of the last sync attempt.
+#[derive(Debug, Default, Clone)]
+pub struct SyncStatus {
+    pub last_success_at: Option<SystemTime>,
+    pub last_success_realm: Option<String>,
+    pub last_error: Option<String>,
+}
+
+impl SyncStatus {
+    /// Tray label: `"synced dentarg 12m ago"` / `"error: <short>"` /
+    /// `"not synced yet"` before the first attempt completes.
+    pub fn label(&self) -> String {
+        if let Some(err) = &self.last_error {
+            return format!("error: {}", truncate(err, 60));
+        }
+        match (&self.last_success_realm, self.last_success_at) {
+            (Some(realm), Some(at)) => format!("synced {realm} {}", humanize_age(at)),
+            _ => "not synced yet".to_string(),
+        }
+    }
+}
+
+fn truncate(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max_chars.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+fn humanize_age(at: SystemTime) -> String {
+    let elapsed = SystemTime::now()
+        .duration_since(at)
+        .unwrap_or_default()
+        .as_secs();
+    if elapsed < 60 {
+        "just now".to_string()
+    } else if elapsed < 3600 {
+        format!("{}m ago", elapsed / 60)
+    } else if elapsed < 86_400 {
+        format!("{}h ago", elapsed / 3600)
+    } else {
+        format!("{}d ago", elapsed / 86_400)
+    }
+}
+
+pub fn build_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .user_agent(concat!("goldcap-companion/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .expect("reqwest client with only timeout/user-agent set should always build")
+}
+
+/// Fetches the import string for `region`/`realm`. Only a 2xx response
+/// whose body starts with the GCS1 magic prefix counts as success — a
+/// non-200 (including the API's own `realm_not_found`/`no_data` 404 bodies)
+/// or an unexpected body is a `SyncError`, never written to disk.
+pub async fn fetch_import_string(
+    client: &reqwest::Client,
+    region: &str,
+    realm: &str,
+) -> Result<String, SyncError> {
+    let resp = client
+        .get(IMPORT_STRING_URL)
+        .query(&[("region", region), ("realm", realm)])
+        .send()
+        .await
+        .map_err(|e| SyncError::Request(e.to_string()))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(SyncError::BadStatus(status.as_u16()));
+    }
+
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| SyncError::Request(e.to_string()))?;
+    if !luafile::is_valid_gcs1_body(&body) {
+        return Err(SyncError::InvalidBody);
+    }
+    Ok(body)
+}
+
+/// Writes a freshly fetched import string into `{wow_retail_path}/Interface/AddOns/GoldCap_AppData/`.
+pub fn apply_import_string(wow_retail_path: &Path, import_string: &str) -> Result<(), SyncError> {
+    let dir = luafile::addon_dir(wow_retail_path);
+    luafile::ensure_toc(&dir).map_err(|e| SyncError::Write(e.to_string()))?;
+    luafile::write_app_data_lua(&dir, import_string, luafile::now_unix())
+        .map_err(|e| SyncError::Write(e.to_string()))
+}
+
+/// Runs one sync attempt end to end: fetch, write, update `status`, log the
+/// outcome. Never panics or propagates — a bad tick is just a logged error.
+pub async fn sync_once(
+    client: &reqwest::Client,
+    config: &Config,
+    status: &Arc<Mutex<SyncStatus>>,
+    logger: &Logger,
+) {
+    if config.realm_slug.trim().is_empty() || config.wow_retail_path.trim().is_empty() {
+        let msg = "not configured (realm or WoW path missing)".to_string();
+        logger.error(&format!("sync skipped: {msg}"));
+        if let Ok(mut s) = status.lock() {
+            s.last_error = Some(msg);
+        }
+        return;
+    }
+
+    let region = config.region.to_string();
+    let result = fetch_import_string(client, &region, &config.realm_slug)
+        .await
+        .and_then(|body| {
+            apply_import_string(Path::new(&config.wow_retail_path), &body)?;
+            Ok(())
+        });
+
+    let mut s = match status.lock() {
+        Ok(s) => s,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    match result {
+        Ok(()) => {
+            s.last_success_at = Some(SystemTime::now());
+            s.last_success_realm = Some(config.realm_slug.clone());
+            s.last_error = None;
+            logger.info(&format!("synced {} {}", region, config.realm_slug));
+        }
+        Err(e) => {
+            s.last_error = Some(e.to_string());
+            logger.error(&format!(
+                "sync failed for {} {}: {e}",
+                region, config.realm_slug
+            ));
+        }
+    }
+}
+
+/// The sync loop: on every interval tick (recomputed from `config_rx`'s
+/// current `intervalMinutes` whenever it changes) or "sync now" trigger,
+/// runs one `sync_once`. `on_tick` is called after every attempt so the
+/// caller (the tray) can refresh its label without this module depending on
+/// tauri at all — keeping it plain, testable async/std code.
+pub async fn run_loop(
+    client: reqwest::Client,
+    mut config_rx: watch::Receiver<Config>,
+    mut trigger_rx: mpsc::Receiver<()>,
+    status: Arc<Mutex<SyncStatus>>,
+    logger: Arc<Logger>,
+    on_tick: impl Fn() + Send + 'static,
+) {
+    loop {
+        let config = config_rx.borrow().clone();
+        let mut ticker = tokio::time::interval(config.interval());
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {
+                    sync_once(&client, &config, &status, &logger).await;
+                    on_tick();
+                }
+                maybe = trigger_rx.recv() => {
+                    if maybe.is_none() {
+                        return; // sender dropped — app is shutting down
+                    }
+                    sync_once(&client, &config, &status, &logger).await;
+                    on_tick();
+                }
+                changed = config_rx.changed() => {
+                    if changed.is_err() {
+                        return; // sender dropped — app is shutting down
+                    }
+                    break; // restart outer loop with the new config/interval
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn label_before_first_sync() {
+        assert_eq!(SyncStatus::default().label(), "not synced yet");
+    }
+
+    #[test]
+    fn label_reports_error_first() {
+        let status = SyncStatus {
+            last_success_at: Some(SystemTime::now()),
+            last_success_realm: Some("dentarg".into()),
+            last_error: Some("unexpected status 500".into()),
+        };
+        assert_eq!(status.label(), "error: unexpected status 500");
+    }
+
+    #[test]
+    fn label_reports_recent_success() {
+        let status = SyncStatus {
+            last_success_at: Some(SystemTime::now()),
+            last_success_realm: Some("dentarg".into()),
+            last_error: None,
+        };
+        assert_eq!(status.label(), "synced dentarg just now");
+    }
+
+    #[test]
+    fn label_reports_minutes_ago() {
+        let status = SyncStatus {
+            last_success_at: Some(SystemTime::now() - std::time::Duration::from_secs(12 * 60)),
+            last_success_realm: Some("dentarg".into()),
+            last_error: None,
+        };
+        assert_eq!(status.label(), "synced dentarg 12m ago");
+    }
+
+    #[test]
+    fn label_truncates_long_errors() {
+        let status = SyncStatus {
+            last_error: Some("x".repeat(200)),
+            ..SyncStatus::default()
+        };
+        let label = status.label();
+        assert!(label.starts_with("error: "));
+        assert!(label.chars().count() <= "error: ".len() + 60);
+        assert!(label.ends_with('…'));
+    }
+
+    #[tokio::test]
+    async fn sync_once_records_error_when_unconfigured() {
+        let client = build_client();
+        let config = Config::default(); // empty realm_slug + wow_retail_path
+        let status = Arc::new(Mutex::new(SyncStatus::default()));
+        let dir = std::env::temp_dir().join(format!(
+            "goldcap-companion-sync-test-{}",
+            std::process::id()
+        ));
+        let logger = Logger::new(&dir).unwrap();
+
+        sync_once(&client, &config, &status, &logger).await;
+
+        let s = status.lock().unwrap();
+        assert!(s.last_error.is_some());
+        assert!(s.last_success_at.is_none());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn apply_import_string_rejects_are_unreachable_for_invalid_bodies() {
+        // apply_import_string itself trusts its caller to have already
+        // validated the body (fetch_import_string is the gate) — this test
+        // just documents that a valid body writes both files end to end.
+        let dir = std::env::temp_dir().join(format!(
+            "goldcap-companion-apply-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        apply_import_string(&dir, "GCS1;eu;dentarg;1;abc").unwrap();
+
+        let addon_dir = dir.join("Interface").join("AddOns").join("GoldCap_AppData");
+        assert!(addon_dir.join("GoldCap_AppData.toc").exists());
+        assert!(addon_dir.join("AppData.lua").exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
