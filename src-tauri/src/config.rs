@@ -109,32 +109,102 @@ impl Config {
     }
 }
 
-/// Best-effort auto-detect of a standard WoW retail install at the
-/// well-known default path for this platform. Empty string when nothing is
-/// found there — the user fills the path in via Settings.
+/// Accepts a candidate that is either the WoW base install dir or the
+/// `_retail_` dir itself and returns the `_retail_` dir when it exists on
+/// disk. This is what makes registry values usable: Blizzard's keys point
+/// at the base dir on some installs and at `_retail_` on others.
+pub fn normalize_retail_dir(candidate: &Path) -> Option<PathBuf> {
+    if !candidate.is_dir() {
+        return None;
+    }
+    if candidate
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("_retail_"))
+    {
+        return Some(candidate.to_path_buf());
+    }
+    let retail = candidate.join("_retail_");
+    if retail.is_dir() {
+        Some(retail)
+    } else {
+        None
+    }
+}
+
+/// Best-effort auto-detect of a WoW retail install. Windows checks the
+/// registry keys Blizzard/Battle.net write, then a set of common locations
+/// across all drive letters; macOS checks the standard /Applications path.
+/// Empty string when nothing is found — the user fills the path in via
+/// Settings (or the Browse dialog).
 #[cfg(target_os = "windows")]
 pub fn detect_wow_retail_path() -> String {
-    detect_at(r"C:\Program Files (x86)\World of Warcraft\_retail_")
+    use winreg::enums::HKEY_LOCAL_MACHINE;
+    use winreg::RegKey;
+
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    // Registry first: exact answers for non-default install locations.
+    // Blizzard's own InstallPath usually points at ...\_retail_ directly;
+    // the uninstaller's InstallLocation at the base dir — normalize_retail_dir
+    // accepts either shape.
+    for (key, value) in [
+        (
+            r"SOFTWARE\WOW6432Node\Blizzard Entertainment\World of Warcraft",
+            "InstallPath",
+        ),
+        (
+            r"SOFTWARE\Blizzard Entertainment\World of Warcraft",
+            "InstallPath",
+        ),
+        (
+            r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\World of Warcraft",
+            "InstallLocation",
+        ),
+        (
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\World of Warcraft",
+            "InstallLocation",
+        ),
+    ] {
+        if let Ok(subkey) = hklm.open_subkey(key) {
+            if let Ok(path) = subkey.get_value::<String, _>(value) {
+                candidates.push(PathBuf::from(path));
+            }
+        }
+    }
+
+    // Fallback: common locations across every drive letter. is_dir() on a
+    // nonexistent drive fails fast without any UI prompt.
+    for letter in b'C'..=b'Z' {
+        for suffix in [
+            r"Program Files (x86)\World of Warcraft",
+            r"Program Files\World of Warcraft",
+            r"World of Warcraft",
+            r"Games\World of Warcraft",
+            r"Blizzard\World of Warcraft",
+            r"Battle.net\World of Warcraft",
+        ] {
+            candidates.push(PathBuf::from(format!(r"{}:\{}", letter as char, suffix)));
+        }
+    }
+
+    candidates
+        .iter()
+        .find_map(|c| normalize_retail_dir(c))
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 #[cfg(target_os = "macos")]
 pub fn detect_wow_retail_path() -> String {
-    detect_at("/Applications/World of Warcraft/_retail_")
+    normalize_retail_dir(Path::new("/Applications/World of Warcraft"))
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn detect_wow_retail_path() -> String {
     String::new()
-}
-
-#[allow(dead_code)]
-fn detect_at(candidate: &str) -> String {
-    let path = PathBuf::from(candidate);
-    if path.is_dir() {
-        path.to_string_lossy().into_owned()
-    } else {
-        String::new()
-    }
 }
 
 #[cfg(test)]
@@ -257,5 +327,46 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(cfg.interval(), std::time::Duration::from_secs(60));
+    }
+
+    #[test]
+    fn normalize_retail_dir_accepts_the_retail_dir_itself() {
+        let dir =
+            std::env::temp_dir().join(format!("goldcap-companion-norm-a-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let retail = dir.join("World of Warcraft").join("_retail_");
+        fs::create_dir_all(&retail).unwrap();
+
+        assert_eq!(normalize_retail_dir(&retail), Some(retail.clone()));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn normalize_retail_dir_descends_from_the_base_install_dir() {
+        let dir =
+            std::env::temp_dir().join(format!("goldcap-companion-norm-b-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let base = dir.join("World of Warcraft");
+        let retail = base.join("_retail_");
+        fs::create_dir_all(&retail).unwrap();
+
+        assert_eq!(normalize_retail_dir(&base), Some(retail.clone()));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn normalize_retail_dir_rejects_missing_or_classic_only_installs() {
+        let dir =
+            std::env::temp_dir().join(format!("goldcap-companion-norm-c-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let base = dir.join("World of Warcraft");
+        fs::create_dir_all(base.join("_classic_era_")).unwrap();
+
+        assert_eq!(normalize_retail_dir(&base), None);
+        assert_eq!(normalize_retail_dir(&dir.join("nope")), None);
+
+        fs::remove_dir_all(&dir).ok();
     }
 }

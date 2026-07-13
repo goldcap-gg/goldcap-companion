@@ -13,6 +13,22 @@
 
       <form id="settings-form">
         <label>
+          WoW retail install path
+          <div class="row">
+            <input id="wowRetailPath" type="text" placeholder="C:\Program Files (x86)\World of Warcraft\_retail_" />
+            <button type="button" id="detect-btn">Detect</button>
+            <button type="button" id="browse-btn">Browse…</button>
+          </div>
+        </label>
+
+        <label id="game-realms-label" hidden>
+          Realm (found in game files)
+          <select id="gameRealms">
+            <option value="">— pick a realm —</option>
+          </select>
+        </label>
+
+        <label>
           Region
           <select id="region">
             <option value="eu">EU</option>
@@ -23,14 +39,6 @@
         <label>
           Realm slug
           <input id="realmSlug" type="text" placeholder="dentarg" autocomplete="off" />
-        </label>
-
-        <label>
-          WoW retail install path
-          <div class="row">
-            <input id="wowRetailPath" type="text" placeholder="/Applications/World of Warcraft/_retail_" />
-            <button type="button" id="detect-btn">Detect</button>
-          </div>
         </label>
 
         <label>

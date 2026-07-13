@@ -8,6 +8,7 @@ mod luafile;
 mod state;
 mod sync;
 mod tray;
+mod wtf;
 
 use config::Config;
 use state::AppState;
@@ -21,12 +22,16 @@ fn main() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             commands::get_config,
             commands::save_config,
             commands::sync_now,
             commands::get_status_label,
             commands::detect_wow_path,
+            commands::pick_wow_path,
+            commands::detect_game,
+            commands::resolve_realm,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -83,9 +88,14 @@ fn main() {
         .expect("error while building the goldcap companion app")
         .run(|_app_handle, event| {
             // Tray-only app: closing the Settings window must not quit the
-            // process — only the tray menu's "Quit" item does that.
-            if let tauri::RunEvent::ExitRequested { api, .. } = event {
-                api.prevent_exit();
+            // process. A window-close exit request carries code None; an
+            // explicit app.exit(0) (the tray's Quit item) carries Some(0)
+            // and must be allowed through — blocking unconditionally here
+            // is exactly the "Quit does nothing" bug.
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+                if code.is_none() {
+                    api.prevent_exit();
+                }
             }
         });
 }

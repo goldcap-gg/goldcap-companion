@@ -11,7 +11,10 @@ const launchAtStartupEl = document.getElementById("launchAtStartup");
 const feedbackEl = document.getElementById("feedback");
 const statusLineEl = document.getElementById("status-line");
 const detectBtn = document.getElementById("detect-btn");
+const browseBtn = document.getElementById("browse-btn");
 const syncNowBtn = document.getElementById("sync-now-btn");
+const gameRealmsLabel = document.getElementById("game-realms-label");
+const gameRealmsEl = document.getElementById("gameRealms");
 
 function fillForm(config) {
   regionEl.value = config.region;
@@ -31,6 +34,9 @@ async function loadConfig() {
   try {
     const config = await invoke("get_config");
     fillForm(config);
+    if (config.wowRetailPath) {
+      await refreshGameSettings({ autofill: !config.realmSlug });
+    }
   } catch (e) {
     showFeedback(`Failed to load settings: ${e}`, true);
   }
@@ -44,19 +50,83 @@ async function refreshStatus() {
   }
 }
 
+// Reads region + realm names out of the game's own files for the current
+// path and prefills the form. With `autofill` the first (most recently
+// played) realm is resolved to its slug automatically; otherwise the realm
+// dropdown just becomes available for the user to pick from.
+async function refreshGameSettings({ autofill } = { autofill: false }) {
+  const path = wowPathEl.value.trim();
+  gameRealmsLabel.hidden = true;
+  if (!path) return;
+
+  let settings;
+  try {
+    settings = await invoke("detect_game", { wowRetailPath: path });
+  } catch {
+    return; // unreadable path — manual entry still works
+  }
+
+  if (settings.region === "eu" || settings.region === "us") {
+    regionEl.value = settings.region;
+  }
+
+  if (settings.realmNames.length > 0) {
+    gameRealmsEl.replaceChildren(new Option("— pick a realm —", ""));
+    for (const name of settings.realmNames) {
+      gameRealmsEl.add(new Option(name, name));
+    }
+    gameRealmsLabel.hidden = false;
+
+    if (autofill) {
+      gameRealmsEl.value = settings.realmNames[0];
+      await resolveSelectedRealm();
+    }
+  }
+}
+
+async function resolveSelectedRealm() {
+  const name = gameRealmsEl.value;
+  if (!name) return;
+  try {
+    const resolved = await invoke("resolve_realm", { region: regionEl.value, name });
+    realmSlugEl.value = resolved.slug;
+    showFeedback(`${name} → ${resolved.slug}`, false);
+  } catch (e) {
+    showFeedback(String(e), true);
+  }
+}
+
 detectBtn.addEventListener("click", async () => {
   try {
     const detected = await invoke("detect_wow_path");
     if (detected) {
       wowPathEl.value = detected;
       showFeedback("Detected a WoW retail install.", false);
+      await refreshGameSettings({ autofill: !realmSlugEl.value.trim() });
     } else {
-      showFeedback("Couldn't auto-detect a WoW retail install — enter the path manually.", true);
+      showFeedback("Couldn't auto-detect a WoW retail install — use Browse… to point at it.", true);
     }
   } catch (e) {
     showFeedback(`Detect failed: ${e}`, true);
   }
 });
+
+browseBtn.addEventListener("click", async () => {
+  try {
+    const picked = await invoke("pick_wow_path");
+    if (picked) {
+      wowPathEl.value = picked;
+      showFeedback("Path set.", false);
+      await refreshGameSettings({ autofill: !realmSlugEl.value.trim() });
+    }
+  } catch (e) {
+    showFeedback(String(e), true);
+  }
+});
+
+gameRealmsEl.addEventListener("change", resolveSelectedRealm);
+
+wowPathEl.addEventListener("change", () => refreshGameSettings({ autofill: false }));
 
 syncNowBtn.addEventListener("click", async () => {
   try {

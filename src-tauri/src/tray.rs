@@ -79,7 +79,7 @@ pub fn open_settings_window(app: &AppHandle) {
     let result =
         WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings.html".into()))
             .title("GoldCap Companion — Settings")
-            .inner_size(440.0, 560.0)
+            .inner_size(460.0, 640.0)
             .resizable(false)
             .build();
     if let Err(e) = result {
