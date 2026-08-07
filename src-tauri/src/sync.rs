@@ -134,6 +134,7 @@ pub async fn sync_once(
     config: &Config,
     status: &Arc<Mutex<SyncStatus>>,
     logger: &Logger,
+    state_path: &Path,
 ) {
     if config.realm_slug.trim().is_empty() || config.wow_retail_path.trim().is_empty() {
         let msg = "not configured (realm or WoW path missing)".to_string();
@@ -151,6 +152,19 @@ pub async fn sync_once(
             apply_import_string(Path::new(&config.wow_retail_path), &body)?;
             Ok(())
         });
+
+    // Ledger upload rides along on the same tick, but as a passenger: it runs
+    // AFTER the price write and reports through the logger only, so a failed
+    // upload can never turn a good price sync into a red tray label. An
+    // unpaired companion (empty token) is a silent no-op.
+    crate::upload::upload_once(
+        client,
+        &config.companion_token,
+        Path::new(&config.wow_retail_path),
+        &state_path.join(crate::upload::STATE_FILE_NAME),
+        logger,
+    )
+    .await;
 
     let mut s = match status.lock() {
         Ok(s) => s,
@@ -184,6 +198,7 @@ pub async fn run_loop(
     mut trigger_rx: mpsc::Receiver<()>,
     status: Arc<Mutex<SyncStatus>>,
     logger: Arc<Logger>,
+    state_dir: std::path::PathBuf,
     on_tick: impl Fn() + Send + 'static,
 ) {
     loop {
@@ -194,14 +209,14 @@ pub async fn run_loop(
         loop {
             tokio::select! {
                 _ = ticker.tick() => {
-                    sync_once(&client, &config, &status, &logger).await;
+                    sync_once(&client, &config, &status, &logger, &state_dir).await;
                     on_tick();
                 }
                 maybe = trigger_rx.recv() => {
                     if maybe.is_none() {
                         return; // sender dropped — app is shutting down
                     }
-                    sync_once(&client, &config, &status, &logger).await;
+                    sync_once(&client, &config, &status, &logger, &state_dir).await;
                     on_tick();
                 }
                 changed = config_rx.changed() => {
@@ -277,7 +292,7 @@ mod tests {
         ));
         let logger = Logger::new(&dir).unwrap();
 
-        sync_once(&client, &config, &status, &logger).await;
+        sync_once(&client, &config, &status, &logger, &dir).await;
 
         let s = status.lock().unwrap();
         assert!(s.last_error.is_some());

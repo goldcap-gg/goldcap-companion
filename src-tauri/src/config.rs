@@ -56,6 +56,11 @@ pub struct Config {
     pub interval_minutes: u32,
     #[serde(default)]
     pub launch_at_startup: bool,
+    /// Long-lived upload token from pairing with goldcap.gg. Empty until the
+    /// player pairs; an empty token disables upload entirely rather than
+    /// failing a tick, so an unpaired companion still syncs prices normally.
+    #[serde(default)]
+    pub companion_token: String,
 }
 
 impl Default for Config {
@@ -66,6 +71,7 @@ impl Default for Config {
             wow_retail_path: String::new(),
             interval_minutes: default_interval_minutes(),
             launch_at_startup: false,
+            companion_token: String::new(),
         }
     }
 }
@@ -231,7 +237,8 @@ mod tests {
             "realmSlug": "area-52",
             "wowRetailPath": "/Applications/World of Warcraft/_retail_",
             "intervalMinutes": 15,
-            "launchAtStartup": true
+            "launchAtStartup": true,
+            "companionToken": "deadbeef"
         }"#;
         let cfg: Config = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.region, Region::Us);
@@ -242,6 +249,7 @@ mod tests {
         );
         assert_eq!(cfg.interval_minutes, 15);
         assert!(cfg.launch_at_startup);
+        assert_eq!(cfg.companion_token, "deadbeef");
     }
 
     #[test]
@@ -255,6 +263,7 @@ mod tests {
         assert!(json.contains("\"wowRetailPath\""));
         assert!(json.contains("\"intervalMinutes\":30"));
         assert!(json.contains("\"launchAtStartup\":false"));
+        assert!(json.contains("\"companionToken\":\"\""));
     }
 
     #[test]
@@ -284,6 +293,7 @@ mod tests {
             wow_retail_path: "/tmp/wow/_retail_".into(),
             interval_minutes: 45,
             launch_at_startup: true,
+            companion_token: "tok".into(),
         };
         cfg.save_to(&path).unwrap();
         let loaded = Config::load_from(&path).unwrap();

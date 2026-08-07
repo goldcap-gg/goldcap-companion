@@ -15,6 +15,9 @@ const browseBtn = document.getElementById("browse-btn");
 const syncNowBtn = document.getElementById("sync-now-btn");
 const gameRealmsLabel = document.getElementById("game-realms-label");
 const gameRealmsEl = document.getElementById("gameRealms");
+const pairCodeEl = document.getElementById("pairCode");
+const pairBtn = document.getElementById("pair-btn");
+const pairStatusEl = document.getElementById("pair-status");
 
 function fillForm(config) {
   regionEl.value = config.region;
@@ -128,6 +131,39 @@ gameRealmsEl.addEventListener("change", resolveSelectedRealm);
 
 wowPathEl.addEventListener("change", () => refreshGameSettings({ autofill: false }));
 
+async function refreshPairing() {
+  try {
+    const paired = await invoke("is_paired");
+    // The token itself is never shown: there is nothing the window could do
+    // with it except leak it into a screenshot.
+    pairStatusEl.textContent = paired
+      ? "Paired — your ledger uploads on every sync."
+      : "Not paired — nothing is uploaded.";
+  } catch {
+    pairStatusEl.textContent = "";
+  }
+}
+
+pairBtn.addEventListener("click", async () => {
+  const code = pairCodeEl.value.trim();
+  if (!code) {
+    pairStatusEl.textContent = "Enter the code from goldcap.gg/account.";
+    return;
+  }
+  pairBtn.disabled = true;
+  pairStatusEl.textContent = "Pairing…";
+  try {
+    await invoke("pair_with_code", { code });
+    pairCodeEl.value = "";
+    showFeedback("Paired with goldcap.gg.", false);
+  } catch (e) {
+    showFeedback(`Pairing failed: ${e}`, true);
+  } finally {
+    pairBtn.disabled = false;
+    await refreshPairing();
+  }
+});
+
 syncNowBtn.addEventListener("click", async () => {
   try {
     await invoke("sync_now");
@@ -168,5 +204,6 @@ form.addEventListener("submit", async (event) => {
 });
 
 loadConfig();
+refreshPairing();
 refreshStatus();
 setInterval(refreshStatus, 15_000);

@@ -9,6 +9,7 @@ mod savedvars;
 mod state;
 mod sync;
 mod tray;
+mod upload;
 mod wtf;
 
 use config::Config;
@@ -33,6 +34,8 @@ fn main() {
             commands::pick_wow_path,
             commands::detect_game,
             commands::resolve_realm,
+            commands::pair_with_code,
+            commands::is_paired,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -69,6 +72,7 @@ fn main() {
                 trigger_rx,
                 status,
                 logger,
+                config_dir.clone(),
                 move || tray::refresh(&sync_refresh_handle),
             ));
 

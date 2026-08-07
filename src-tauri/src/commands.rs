@@ -135,3 +135,45 @@ fn apply_autostart(app: &AppHandle, state: &State<AppState>, enabled: bool) {
 
 #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 fn apply_autostart(_app: &AppHandle, _state: &State<AppState>, _enabled: bool) {}
+
+/// Trades a pairing code from goldcap.gg/account for a long-lived upload
+/// token and stores it in the config. Reuses save_config so the running sync
+/// loop picks the token up on its next tick without a restart.
+#[tauri::command]
+pub async fn pair_with_code(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    code: String,
+) -> Result<(), String> {
+    let trimmed = code.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("enter the code from goldcap.gg/account".into());
+    }
+
+    // Label the pairing with the machine name so a player with several PCs can
+    // tell them apart when revoking one later.
+    let label = std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "companion".to_string());
+
+    let client = reqwest::Client::new();
+    let token = crate::upload::claim_code(&client, &trimmed, &label).await?;
+
+    let mut config = state.config.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    config.companion_token = token;
+    save_config(app, state, config)
+}
+
+/// Whether this companion is paired. The token itself is never handed back to
+/// the UI — there is nothing the settings window could do with it except leak
+/// it into a screenshot.
+#[tauri::command]
+pub fn is_paired(state: State<AppState>) -> bool {
+    !state
+        .config
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .companion_token
+        .trim()
+        .is_empty()
+}
