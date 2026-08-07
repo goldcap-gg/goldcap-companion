@@ -5,6 +5,7 @@ mod commands;
 mod config;
 mod logging;
 mod luafile;
+mod savedvars;
 mod state;
 mod sync;
 mod tray;
