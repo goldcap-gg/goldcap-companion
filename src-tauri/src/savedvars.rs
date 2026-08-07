@@ -161,6 +161,16 @@ mod tests {
     const REAL_FILE: &str = include_str!("../tests/fixtures/GoldCap.lua");
 
     #[test]
+    fn the_fixture_still_has_the_windows_line_endings_the_game_writes() {
+        // WoW writes SavedVariables with CRLF. An earlier version of this
+        // fixture was copied through a text-mode read that silently converted
+        // them, so the parser was being tested against bytes the game never
+        // produces. Guarded here because a .gitattributes rule, an editor or
+        // a well-meaning formatter could quietly undo it again.
+        assert!(REAL_FILE.contains("\r\n"), "fixture lost its CRLF line endings");
+    }
+
+    #[test]
     fn reads_a_real_savedvariables_file() {
         let data = parse_saved_variables(REAL_FILE).unwrap();
         assert_eq!(data.entries.len(), 2);
