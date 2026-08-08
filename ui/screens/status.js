@@ -14,15 +14,29 @@ const STAGE_TITLES = {
   ledger: "Ledger to the site",
 };
 
-// The hero phrase is the first thing that is wrong, in pipeline order — the
-// earliest broken link is the one worth fixing first.
+const ORDER = ["prices", "addon", "ledger"];
+
+const BROKEN_PHRASE = {
+  prices: "Prices are not updating",
+  addon: "The addon is not receiving prices",
+  ledger: "Ledger is not uploading",
+};
+
+// Not a failure: the pipeline simply does not reach this far yet.
+const IDLE_PHRASE = {
+  prices: "Waiting for the first sync",
+  addon: "No prices written yet",
+  ledger: "Prices are flowing",
+};
+
+// The earliest failing link, in pipeline order — the ones after it may only
+// be failing because of it, so it is the one worth naming.
 function heroPhrase(s) {
   if (!s.configured) return "Not configured";
-  if (s.prices.state === "broken") return "Prices are not updating";
-  if (s.addon.state === "broken") return "The addon is not receiving prices";
-  if (s.ledger.state === "broken") return "Ledger is not uploading";
-  if (s.ledger.state === "notConnected") return "Prices are flowing";
-  if (s.prices.state === "notConnected") return "Waiting for the first sync";
+  const broken = ORDER.find((k) => s[k].state === "broken");
+  if (broken) return BROKEN_PHRASE[broken];
+  const idle = ORDER.find((k) => s[k].state === "notConnected");
+  if (idle) return IDLE_PHRASE[idle];
   return "Everything works";
 }
 
@@ -33,7 +47,10 @@ function heroState(s) {
   return "notConnected";
 }
 
-function stageRow(key, stage, now, ctx) {
+// Structural: title, dot, error line and the Pair button. Returns the
+// detail element alongside the row so the 1-second timer can rewrite just
+// that text without tearing the row (and any focus inside it) down.
+function stageRow(key, stage, ctx, canPair) {
   const row = document.createElement("div");
   row.className = "stage";
 
@@ -51,8 +68,7 @@ function stageRow(key, stage, now, ctx) {
 
   const detail = document.createElement("div");
   detail.className = "stage-detail";
-  const age = relativeTime(stage.at, now);
-  detail.textContent = age ? `${stage.detail} · ${age}` : stage.detail;
+  detail.textContent = stage.detail;
   body.append(detail);
 
   if (stage.error) {
@@ -62,8 +78,10 @@ function stageRow(key, stage, now, ctx) {
     body.append(err);
   }
 
-  // Only the ledger has an action the user can take from here.
-  if (key === "ledger" && stage.state === "notConnected" && stage.detail.includes("Not paired")) {
+  // Only the ledger has an action the user can take from here. Gated on the
+  // snapshot's own `paired` flag rather than sniffing the detail string, so
+  // a reworded Rust message cannot make this button silently vanish.
+  if (key === "ledger" && canPair && stage.state === "notConnected") {
     const pair = document.createElement("button");
     pair.className = "btn btn-primary btn-sm";
     pair.textContent = "Pair";
@@ -72,7 +90,7 @@ function stageRow(key, stage, now, ctx) {
   }
 
   row.append(body);
-  return row;
+  return { row, detailEl: detail };
 }
 
 export function render(el, ctx) {
@@ -112,10 +130,18 @@ export function render(el, ctx) {
   el.append(top, hero, stages, meta, spacer, action, foot);
 
   let snapshot = null;
+  let disposed = false;
+  // One entry per stage row, so the 1-second timer can rewrite just the
+  // detail text instead of rebuilding the row (and evicting focus from it).
+  let stageDetails = [];
 
-  function paint() {
+  // Everything structural: hero, stage rows (titles, dots, errors, the
+  // Pair button), the Sync button's label/disabled state, the version
+  // footer. Runs only when a new snapshot lands — never on the 1-second
+  // timer — so a focused Pair button and the hero dot's animation both
+  // survive between polls.
+  function paintSnapshot() {
     if (!snapshot) return;
-    const now = Math.floor(Date.now() / 1000);
 
     hero.replaceChildren();
     const dot = document.createElement("span");
@@ -132,9 +158,35 @@ export function render(el, ctx) {
     headline.append(dot, phrase);
     hero.append(headline, where);
 
-    stages.replaceChildren(
-      ...["prices", "addon", "ledger"].map((k) => stageRow(k, snapshot[k], now, ctx)),
-    );
+    // Pairing is only offered once there is a realm to pair against — an
+    // unconfigured companion routes to the wizard, not to Settings.
+    const canPair = snapshot.configured && !snapshot.paired;
+    const rows = ORDER.map((k) => {
+      const { row, detailEl } = stageRow(k, snapshot[k], ctx, canPair);
+      return { row, stage: snapshot[k], el: detailEl };
+    });
+    stageDetails = rows.map(({ stage, el }) => ({ stage, el }));
+    stages.replaceChildren(...rows.map(({ row }) => row));
+
+    action.textContent = snapshot.syncing ? "Syncing…" : "Sync now";
+    action.disabled = snapshot.syncing || !snapshot.configured;
+
+    foot.textContent = `v${snapshot.version}`;
+
+    paintTime();
+  }
+
+  // Only the time-derived strings: each stage's relative age and the
+  // countdown. Runs every second, independent of the poll, so times keep
+  // moving between snapshots without touching the DOM nodes above them.
+  function paintTime() {
+    if (!snapshot) return;
+    const now = Math.floor(Date.now() / 1000);
+
+    for (const { stage, el } of stageDetails) {
+      const age = relativeTime(stage.at, now);
+      el.textContent = age ? `${stage.detail} · ${age}` : stage.detail;
+    }
 
     const left = countdown(snapshot.nextTickAt, now);
     meta.textContent = snapshot.syncing
@@ -142,18 +194,25 @@ export function render(el, ctx) {
       : left
         ? `Next sync in ${left}`
         : "";
-
-    action.textContent = snapshot.syncing ? "Syncing…" : "Sync now";
-    action.disabled = snapshot.syncing || !snapshot.configured;
-
-    foot.textContent = `v${snapshot.version}`;
   }
 
   async function refresh() {
     try {
-      snapshot = await ctx.api.getStatus();
-      paint();
+      const s = await ctx.api.getStatus();
+      if (disposed) return;
+      // Most polls land between ticks and report the same thing the last
+      // one did. Rebuilding the stage rows then would evict focus from the
+      // Pair button (or restart the hero dot's pulse) for no reason, so
+      // only run the structural repaint when something actually changed.
+      const unchanged = snapshot && JSON.stringify(s) === JSON.stringify(snapshot);
+      snapshot = s;
+      if (unchanged) {
+        paintTime();
+      } else {
+        paintSnapshot();
+      }
     } catch (e) {
+      if (disposed) return;
       ctx.toast(String(e), true);
     }
   }
@@ -162,14 +221,16 @@ export function render(el, ctx) {
     action.disabled = true;
     try {
       await ctx.api.syncNow();
+      if (disposed) return;
       // Paint the in-flight state immediately rather than waiting up to a
       // full poll for the backend to admit it started.
       if (snapshot) {
         snapshot = { ...snapshot, syncing: true };
-        paint();
+        paintSnapshot();
       }
       setTimeout(refresh, 1200);
     } catch (e) {
+      if (disposed) return;
       ctx.toast(String(e), true);
       action.disabled = false;
     }
@@ -179,10 +240,11 @@ export function render(el, ctx) {
   const poll = setInterval(refresh, POLL_MS);
   // Independent of the poll so relative times and the countdown keep moving
   // even while a request is in flight.
-  const tick = setInterval(paint, 1000);
+  const tick = setInterval(paintTime, 1000);
 
   return {
     dispose() {
+      disposed = true;
       clearInterval(poll);
       clearInterval(tick);
     },

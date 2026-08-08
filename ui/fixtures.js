@@ -105,4 +105,26 @@ export const FIXTURES = {
       ledger: stage("broken", NOW - 90000, "Upload was refused", "unexpected status 503"),
     },
   },
+
+  "addon has no file yet": {
+    config: configured,
+    status: {
+      configured: true, paired: true, region: "eu", realmSlug: "dentarg",
+      syncing: false, nextTickAt: NOW + 700, intervalMinutes: 30, version: "1.2.0",
+      prices: stage("ok", NOW - 90, "Fetched from goldcap.gg"),
+      addon: stage("notConnected", null, "No price file written yet"),
+      ledger: stage("ok", NOW - 90, "142 rows sent · queue empty"),
+    },
+  },
+
+  "configured, never synced, unpaired": {
+    config: { ...configured, companionToken: "" },
+    status: {
+      configured: true, paired: false, region: "eu", realmSlug: "dentarg",
+      syncing: false, nextTickAt: NOW + 1800, intervalMinutes: 30, version: "1.2.0",
+      prices: stage("notConnected", null, "No sync yet"),
+      addon: stage("notConnected", null, "No price file written yet"),
+      ledger: stage("notConnected", null, "Not paired — nothing is uploaded"),
+    },
+  },
 };
