@@ -8,6 +8,7 @@ mod logging;
 mod luafile;
 mod savedvars;
 mod state;
+mod status;
 mod sync;
 mod tray;
 mod upload;
@@ -31,6 +32,7 @@ fn main() {
             commands::save_config,
             commands::sync_now,
             commands::get_status_label,
+            commands::get_status,
             commands::detect_wow_path,
             commands::pick_wow_path,
             commands::detect_game,
@@ -52,6 +54,17 @@ fn main() {
             let (config_tx, config_rx) = watch::channel(initial_config.clone());
             let (trigger_tx, trigger_rx) = mpsc::channel::<()>(4);
             let status = Arc::new(Mutex::new(sync::SyncStatus::default()));
+
+            // Counters live on disk next to the dedupe keys; without this the
+            // Status screen would show "0 rows sent" until the first upload of
+            // every session.
+            {
+                let persisted = upload::UploadState::load_from(
+                    &config_dir.join(upload::STATE_FILE_NAME),
+                );
+                status.lock().unwrap_or_else(|p| p.into_inner()).upload =
+                    persisted.stats().clone();
+            }
 
             let tray_handles = tray::build(&handle)?;
 

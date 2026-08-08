@@ -96,6 +96,24 @@ pub fn get_status_label(state: State<AppState>) -> String {
         .label()
 }
 
+/// The whole pipeline as data, for the Status screen. `get_status_label` is
+/// kept alongside it because the tray menu still renders a single line.
+#[tauri::command]
+pub fn get_status(state: State<AppState>) -> crate::status::StatusSnapshot {
+    let config = state
+        .config
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    let status = state
+        .status
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    let health = crate::health::inspect(Path::new(&config.wow_retail_path));
+    crate::status::build(&config, &status, &health, crate::luafile::now_unix())
+}
+
 #[tauri::command]
 pub fn sync_now(state: State<AppState>) -> Result<(), String> {
     state.trigger_tx.try_send(()).map_err(|e| e.to_string())
