@@ -1,9 +1,13 @@
 import { truncateMiddle, formatPairCode } from "../lib/format.js";
 
-// Three steps. Pairing is the third and is genuinely optional — "Later" is a
-// full-weight sibling of "Pair", not a small link, because leaving the ledger
-// unconnected is a legitimate choice. The Status screen keeps the invitation.
-const STEPS = ["Game", "Realm", "Pairing"];
+// The install path, region and realm all come out of the game's own files —
+// see detect() below — so the stepped flow is only ever entered for
+// whichever part detection could not answer. Steps 0 (Game) and 1 (Realm)
+// are unchanged from the three-step wizard; step 2 (Connect) is both the
+// pairing screen and, once detection lands, the very first thing the user
+// sees. "Later" stays a full-weight sibling of "Pair" — leaving the ledger
+// unconnected is a legitimate choice.
+const STEPS = ["Game", "Realm", "Connect"];
 
 export function render(el, ctx) {
   el.classList.add("screen-wizard");
@@ -17,15 +21,63 @@ export function render(el, ctx) {
     companionToken: "",
   };
   let realmNames = [];
-  let step = 0;
+  let step = 2;
+
+  // Whether the stepped flow (Game/Realm) has ever been entered this visit.
+  // The progress bar has nothing to show a part-way-through position for
+  // until it has — a pure-detection run never sees it at all.
+  let enteredStepped = false;
 
   const progress = document.createElement("div");
   progress.className = "progress";
+  progress.hidden = true;
   for (const name of STEPS) {
     const seg = document.createElement("span");
     seg.className = "progress-seg";
     seg.title = name;
     progress.append(seg);
+  }
+
+  // The Connect screen's confirmation card. It is a persistent element (not
+  // rebuilt per step, unlike bodyEl) because detect() paints it before any
+  // step even exists — visible from the very first frame, in a quiet
+  // "looking" state, and settles into the real verdict in place. That is
+  // what keeps the detecting phase from flashing: there is only ever one
+  // card, its content changes, the layout around it does not.
+  const confirm = document.createElement("div");
+  confirm.className = "card verdict connect-confirm";
+  confirm.hidden = true;
+  confirm.tabIndex = -1;
+  const confirmHead = document.createElement("div");
+  confirmHead.className = "row";
+  const confirmDot = document.createElement("span");
+  confirmDot.className = "dot dot-ok";
+  const confirmLine = document.createElement("p");
+  confirmHead.append(confirmDot, confirmLine);
+  const confirmSub = document.createElement("p");
+  confirmSub.className = "muted connect-confirm-sub";
+  const change = document.createElement("button");
+  change.className = "link connect-change";
+  change.type = "button";
+  change.textContent = "change";
+  change.addEventListener("click", () => go(0));
+  confirm.append(confirmHead, confirmSub, change);
+
+  // Reflects `draft` onto the confirmation card. "Ready" is exactly the
+  // condition that lets a config be saved (both path and slug present) —
+  // before that it renders as the quiet placeholder line instead, with no
+  // dot, no sub-line and no way to "change" a value that was never shown.
+  function paintConfirm() {
+    const ready = draft.realmSlug.trim() !== "" && draft.wowRetailPath.trim() !== "";
+    confirm.classList.toggle("verdict-ok", ready);
+    confirmDot.hidden = !ready;
+    change.hidden = !ready;
+    confirmLine.classList.toggle("mono", ready);
+    confirmLine.classList.toggle("muted", !ready);
+    confirmLine.textContent = ready
+      ? `${draft.realmSlug} · ${draft.region.toUpperCase()}`
+      : "Looking for World of Warcraft…";
+    confirmSub.textContent = ready ? "Prices are already on their way to your addon." : "";
   }
 
   const head = document.createElement("div");
@@ -37,13 +89,21 @@ export function render(el, ctx) {
   const nav = document.createElement("div");
   nav.className = "wizard-nav row";
 
-  el.append(progress, head, bodyEl, Object.assign(document.createElement("div"), { className: "spacer" }), nav);
+  el.append(
+    progress,
+    confirm,
+    head,
+    bodyEl,
+    Object.assign(document.createElement("div"), { className: "spacer" }),
+    nav,
+  );
 
   function paintProgress() {
     [...progress.children].forEach((seg, i) => {
       seg.classList.toggle("done", i < step);
       seg.classList.toggle("current", i === step);
     });
+    progress.hidden = !enteredStepped;
   }
 
   // Set by setHead on every step, then focused by go() once the step has
@@ -65,8 +125,19 @@ export function render(el, ctx) {
     headingEl = h;
   }
 
+  // Bumped on every navigation, including detect()'s own. detect() is a
+  // single chain of sequential awaits with nothing else on screen to click
+  // during it, so in practice nothing can outrace it today — but the same
+  // discipline stepRealm's resolves already use is cheap to apply here too,
+  // and it means a future escape hatch out of the detecting phase can't
+  // reintroduce the class of bug this guards against.
+  let requestGen = 0;
+
   function go(next) {
+    requestGen++;
+    if (next === 0 || next === 1) enteredStepped = true;
     step = next;
+    confirm.hidden = next !== 2;
     bodyEl.classList.remove("step-in");
     render_step();
     paintProgress();
@@ -77,7 +148,85 @@ export function render(el, ctx) {
     requestAnimationFrame(() => bodyEl.classList.add("step-in"));
   }
 
-  // ---- step 1: the game --------------------------------------------------
+  // ---- detecting: runs on entry, before any step exists ------------------
+  //
+  // Everything the stepped flow would otherwise ask the user to confirm is
+  // read straight out of the game's own files. Silent throughout — a failed
+  // probe here is not an error the user needs to read, it just means the
+  // corresponding step still exists to ask the question by hand.
+  async function detect() {
+    confirm.hidden = false;
+    confirm.focus();
+    paintConfirm();
+
+    const gen = ++requestGen;
+
+    let path = "";
+    try {
+      const config = await ctx.api.getConfig();
+      path = (config.wowRetailPath || "").trim();
+    } catch {
+      // Fall through to auto-detect below, same as an empty saved config.
+    }
+    if (gen !== requestGen) return;
+
+    if (!path) {
+      try {
+        path = (await ctx.api.detectWowPath()) || "";
+      } catch {
+        path = "";
+      }
+    }
+    if (gen !== requestGen) return;
+
+    if (!path) {
+      go(0);
+      return;
+    }
+    draft.wowRetailPath = path;
+
+    let game;
+    try {
+      game = await ctx.api.detectGame(path);
+    } catch {
+      game = { region: null, realmNames: [] };
+    }
+    if (gen !== requestGen) return;
+
+    if (game.region === "eu" || game.region === "us") draft.region = game.region;
+    realmNames = game.realmNames ?? [];
+    // No realm names at all is a failure for this purpose even though
+    // detectGame did not throw — the manual-slug fallback lives in Realm.
+    if (realmNames.length === 0) {
+      go(1);
+      return;
+    }
+
+    try {
+      const r = await ctx.api.resolveRealm(draft.region, realmNames[0]);
+      if (gen !== requestGen) return;
+      draft.realmSlug = r.slug;
+    } catch {
+      if (gen !== requestGen) return;
+      go(1);
+      return;
+    }
+
+    try {
+      await ctx.api.saveConfig({ ...draft });
+    } catch {
+      if (gen !== requestGen) return;
+      // Everything needed to save is already resolved and sitting in
+      // draft; Realm's own Next button will retry the same save.
+      go(1);
+      return;
+    }
+    if (gen !== requestGen) return;
+
+    go(2);
+  }
+
+  // ---- step 0: the game --------------------------------------------------
 
   async function stepGame() {
     setHead("Find World of Warcraft", "The companion writes prices into your addon folder.");
@@ -150,7 +299,7 @@ export function render(el, ctx) {
     }
   }
 
-  // ---- step 2: the realm -------------------------------------------------
+  // ---- step 1: the realm -------------------------------------------------
 
   async function stepRealm() {
     setHead("Pick your realm", "Read out of the game's own files.");
@@ -296,11 +445,20 @@ export function render(el, ctx) {
     await loadRealms();
   }
 
-  // ---- step 3: pairing ---------------------------------------------------
+  // ---- step 2: connect ----------------------------------------------------
 
-  function stepPairing() {
-    setHead("Connect your account", "So your sales show up as profit on goldcap.gg.");
+  function stepConnect() {
+    setHead("Connect to goldcap.gg?", "So your sales show up as profit on the site.");
     bodyEl.replaceChildren();
+    paintConfirm();
+
+    // Whichever way this step was reached, draft is already complete and
+    // saved (detect() saves before calling go(2); Realm's Next above saves
+    // before calling it too) — so a sync can start firing right away rather
+    // than waiting for Pair/Later. Fire-and-forget: the Status screen is
+    // where a failed sync gets reported, not here, and this must not block
+    // the pairing UI from appearing.
+    ctx.api.syncNow().catch(() => {});
 
     const open = document.createElement("button");
     open.className = "btn";
@@ -380,9 +538,9 @@ export function render(el, ctx) {
   function render_step() {
     if (step === 0) stepGame();
     else if (step === 1) stepRealm();
-    else stepPairing();
+    else stepConnect();
   }
 
-  go(0);
+  detect();
   return {};
 }

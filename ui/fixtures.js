@@ -29,6 +29,32 @@ export const FIXTURES = {
     },
   },
 
+  "wizard: no install found": {
+    config: { ...configured, realmSlug: "", wowRetailPath: "", companionToken: "" },
+    detectedPath: "",
+    game: { region: "eu", realmNames: [] },
+    status: {
+      configured: false, paired: false, region: "eu", realmSlug: "",
+      syncing: false, nextTickAt: null, intervalMinutes: 30, version: "1.2.0",
+      prices: stage("notConnected", null, "Waiting for setup"),
+      addon: stage("notConnected", null, "Waiting for setup"),
+      ledger: stage("notConnected", null, "Waiting for setup"),
+    },
+  },
+
+  "wizard: install but no realms": {
+    config: { ...configured, realmSlug: "", wowRetailPath: "", companionToken: "" },
+    detectedPath: "C:\\Program Files (x86)\\World of Warcraft\\_retail_",
+    game: { region: "eu", realmNames: [] },
+    status: {
+      configured: false, paired: false, region: "eu", realmSlug: "",
+      syncing: false, nextTickAt: null, intervalMinutes: 30, version: "1.2.0",
+      prices: stage("notConnected", null, "Waiting for setup"),
+      addon: stage("notConnected", null, "Waiting for setup"),
+      ledger: stage("notConnected", null, "Waiting for setup"),
+    },
+  },
+
   "everything works": {
     config: configured,
     status: {

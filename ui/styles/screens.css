@@ -239,6 +239,42 @@
   word-break: break-all;
 }
 
+/* The Connect screen's confirmation card. Persistent across the detecting
+   phase and step 2 itself (see wizard.js) so the "must not flash" skeleton
+   is one element whose content changes, not a layout swap. */
+.connect-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+/* An explicit `display` on the same element as the native `hidden`
+   attribute needs its own override — [hidden]'s UA-stylesheet `display:
+   none` loses to any author rule that also sets `display`, regardless of
+   selector order, so without this the card would stay visually present
+   (just empty of layout constraints) whenever confirm.hidden is set. */
+.connect-confirm[hidden] {
+  display: none;
+}
+
+.connect-confirm-sub {
+  margin: 0;
+  font-size: 13px;
+}
+
+.connect-change {
+  align-self: flex-end;
+  font-size: 12px;
+}
+
+/* Focused programmatically the instant detection starts (see detect() in
+   wizard.js) so a screen reader announces the "looking" placeholder even
+   though no heading exists yet at that point. Plain :focus only, exactly
+   like .wizard-head h1 below — :focus-visible is untouched. */
+.connect-confirm:focus {
+  outline: none;
+  box-shadow: none;
+}
+
 .resolved {
   margin: 0;
   color: var(--pos);
