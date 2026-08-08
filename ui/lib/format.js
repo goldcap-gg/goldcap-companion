@@ -30,7 +30,7 @@ export function truncateMiddle(text, max) {
 
 export function groupDigits(n) {
   // A thin space, not a comma: the mono digits are already wide enough.
-  return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+  return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, "\u2009");
 }
 
 export function formatPairCode(raw) {
