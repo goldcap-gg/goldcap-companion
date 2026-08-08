@@ -27,6 +27,7 @@ fn main() {
             None,
         ))
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             commands::get_config,
             commands::save_config,
@@ -39,6 +40,8 @@ fn main() {
             commands::resolve_realm,
             commands::pair_with_code,
             commands::is_paired,
+            commands::unpair,
+            commands::open_account_page,
         ])
         .setup(|app| {
             let handle = app.handle().clone();

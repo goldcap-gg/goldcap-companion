@@ -195,3 +195,27 @@ pub fn is_paired(state: State<AppState>) -> bool {
         .trim()
         .is_empty()
 }
+
+/// Drops the upload token. Goes through `save_config` so the running sync
+/// loop stops uploading on its next tick without a restart.
+#[tauri::command]
+pub fn unpair(app: AppHandle, state: State<AppState>) -> Result<(), String> {
+    let mut config = state
+        .config
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    config.companion_token = String::new();
+    save_config(app, state, config)
+}
+
+/// Opens the page that issues pairing codes in the user's browser. The URL is
+/// hard-coded and the opener capability is scoped to goldcap.gg — the window
+/// can never be talked into opening anything else.
+#[tauri::command]
+pub fn open_account_page(app: AppHandle) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_url("https://goldcap.gg/account", None::<&str>)
+        .map_err(|e| e.to_string())
+}
