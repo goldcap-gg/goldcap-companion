@@ -171,3 +171,83 @@
   font-size: 12px;
   text-align: center;
 }
+
+/* ---------- wizard ---------- */
+
+.progress {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.progress-seg {
+  height: 3px;
+  flex: 1;
+  border-radius: 999px;
+  background: var(--border);
+  transition: background var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
+}
+.progress-seg.done {
+  background: var(--gold-lo);
+}
+.progress-seg.current {
+  background: var(--gold);
+  box-shadow: 0 0 12px -2px var(--gold);
+}
+
+.wizard-head h1 {
+  font-size: 20px;
+}
+
+.wizard-sub {
+  margin: 4px 0 0;
+  font-size: 13px;
+}
+
+.wizard-body {
+  opacity: 0;
+  transform: translateX(8px);
+  transition: opacity var(--dur) var(--ease), transform var(--dur) var(--ease);
+}
+
+.wizard-body.step-in {
+  opacity: 1;
+  transform: none;
+}
+
+.verdict {
+  border-color: var(--border-strong);
+}
+
+.verdict-ok {
+  border-color: color-mix(in oklab, var(--pos) 40%, var(--border));
+}
+
+.verdict-path {
+  margin: 0;
+  font-size: 13px;
+  word-break: break-all;
+}
+
+.resolved {
+  margin: 0;
+  color: var(--pos);
+  font-size: 13px;
+  min-height: 18px;
+}
+
+.code-field {
+  letter-spacing: 0.14em;
+  text-align: center;
+  font-size: 18px;
+  font-weight: 500;
+}
+
+.wizard-hint {
+  margin: 0;
+  font-size: 12px;
+}
+
+.wizard-nav {
+  flex: 0 0 auto;
+}
