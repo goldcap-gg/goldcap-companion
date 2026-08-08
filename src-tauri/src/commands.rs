@@ -209,9 +209,13 @@ pub fn unpair(app: AppHandle, state: State<AppState>) -> Result<(), String> {
     save_config(app, state, config)
 }
 
-/// Opens the page that issues pairing codes in the user's browser. The URL is
-/// hard-coded and the opener capability is scoped to goldcap.gg — the window
-/// can never be talked into opening anything else.
+/// Opens the page that issues pairing codes in the user's browser. The URL
+/// is hard-coded and this command takes no argument, so nothing the webview
+/// sends can change where it goes — that, not the capability scope, is what
+/// makes it safe. `OpenerExt::open_url` is an in-process call and never
+/// reaches Tauri's ACL; the scoped `opener:allow-open-url` entry in
+/// capabilities/default.json constrains only direct frontend calls to the
+/// plugin's own IPC command, which nothing here makes.
 #[tauri::command]
 pub fn open_account_page(app: AppHandle) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
