@@ -157,7 +157,7 @@ pub async fn sync_once(
     // AFTER the price write and reports through the logger only, so a failed
     // upload can never turn a good price sync into a red tray label. An
     // unpaired companion (empty token) is a silent no-op.
-    crate::upload::upload_once(
+    let _upload_stats = crate::upload::upload_once(
         client,
         &config.companion_token,
         Path::new(&config.wow_retail_path),

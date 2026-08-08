@@ -17,9 +17,39 @@ pub const STATE_FILE_NAME: &str = "uploaded.json";
 const CLAIM_URL: &str = "https://api.goldcap.gg/v1/companion/claim";
 const UPLOAD_URL: &str = "https://api.goldcap.gg/v1/ledger/upload";
 
+/// What the Status screen shows for the ledger stage. Kept next to the dedupe
+/// keys in the same file so a restart does not reset the counter to zero.
+#[derive(Debug, Default, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadStats {
+    pub total_sent: u64,
+    pub last_upload_at: Option<i64>,
+    /// Rows read out of SavedVariables that the server has not accepted yet.
+    pub pending: u64,
+    pub last_error: Option<String>,
+}
+
+/// The on-disk shape. v1.0.0 wrote a bare array of keys; `load_from` still
+/// accepts that and migrates it on the next successful write.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedState {
+    #[serde(default)]
+    keys: HashSet<String>,
+    #[serde(default)]
+    total_sent: u64,
+    #[serde(default)]
+    last_upload_at: Option<i64>,
+    #[serde(default)]
+    pending: u64,
+    #[serde(default)]
+    last_error: Option<String>,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct UploadState {
     uploaded: HashSet<String>,
+    stats: UploadStats,
 }
 
 impl UploadState {
@@ -31,27 +61,70 @@ impl UploadState {
         let Ok(text) = std::fs::read_to_string(path) else {
             return Self::default();
         };
-        Self {
-            uploaded: serde_json::from_str(&text).unwrap_or_default(),
+        // Object first: the current format. An array can never parse as an
+        // object, so the order is unambiguous.
+        if let Ok(p) = serde_json::from_str::<PersistedState>(&text) {
+            return Self {
+                uploaded: p.keys,
+                stats: UploadStats {
+                    total_sent: p.total_sent,
+                    last_upload_at: p.last_upload_at,
+                    pending: p.pending,
+                    last_error: p.last_error,
+                },
+            };
         }
+        if let Ok(keys) = serde_json::from_str::<HashSet<String>>(&text) {
+            return Self { uploaded: keys, stats: UploadStats::default() };
+        }
+        Self::default()
     }
 
     pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let text = serde_json::to_string(&self.uploaded)?;
+        let persisted = PersistedState {
+            keys: self.uploaded.clone(),
+            total_sent: self.stats.total_sent,
+            last_upload_at: self.stats.last_upload_at,
+            pending: self.stats.pending,
+            last_error: self.stats.last_error.clone(),
+        };
+        let text = serde_json::to_string(&persisted)?;
         std::fs::write(path, text)
+    }
+
+    pub fn stats(&self) -> &UploadStats {
+        &self.stats
+    }
+
+    pub fn record_upload(&mut self, rows: u64, at: i64) {
+        self.stats.total_sent += rows;
+        self.stats.last_upload_at = Some(at);
+    }
+
+    pub fn set_pending(&mut self, pending: u64) {
+        self.stats.pending = pending;
+    }
+
+    pub fn set_last_error(&mut self, error: Option<String>) {
+        self.stats.last_error = error;
     }
 
     pub fn contains(&self, key: &str) -> bool {
         self.uploaded.contains(key)
     }
 
+    // Only the tests below inspect the raw key set directly; production code
+    // goes through `contains`/`stats`. Gated so a non-test build never carries
+    // dead public API for clippy to flag.
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.uploaded.is_empty()
     }
 
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.uploaded.len()
     }
@@ -160,21 +233,24 @@ pub async fn upload_batch(
 ///
 /// Never returns an error: upload is a passenger on the price-sync tick and
 /// must not be able to break it. An unpaired companion (empty token) is a
-/// silent no-op.
+/// silent no-op that still reports whatever it uploaded in the past.
 pub async fn upload_once(
     client: &reqwest::Client,
     token: &str,
     wow_retail_path: &Path,
     state_path: &Path,
     logger: &crate::logging::Logger,
-) {
+) -> UploadStats {
+    let mut state = UploadState::load_from(state_path);
     if token.trim().is_empty() {
-        return;
+        return state.stats().clone();
     }
 
-    let mut state = UploadState::load_from(state_path);
+    let before = state.stats().clone();
     let mut sent = 0usize;
     let mut failed = 0usize;
+    let mut pending_after = 0u64;
+    let mut last_error: Option<String> = None;
 
     for file in crate::savedvars::saved_variables_paths(wow_retail_path) {
         let Ok(source) = std::fs::read_to_string(&file) else {
@@ -186,51 +262,66 @@ pub async fn upload_once(
                 // A file we cannot parse is reported once and skipped; it must
                 // never stop the loop or the other account's ledger.
                 logger.error(&format!("could not read {}: {e}", file.display()));
+                last_error = Some(format!("could not read {}", file.display()));
                 continue;
             }
         };
 
         let (entries, gold) = pending(&data, &state);
-        if entries.is_empty() && gold.is_empty() {
-            continue;
-        }
+        if !entries.is_empty() || !gold.is_empty() {
+            // Gold rides along with the first batch; it is small and immutable.
+            let mut gold_to_send: &[&GoldPoint] = &gold;
+            let batches: Vec<&[&LedgerEntry]> = if entries.is_empty() {
+                vec![&[]]
+            } else {
+                entries.chunks(MAX_BATCH).collect()
+            };
 
-        // Gold rides along with the first batch; it is small and immutable.
-        let mut gold_to_send: &[&GoldPoint] = &gold;
-        let batches: Vec<&[&LedgerEntry]> = if entries.is_empty() {
-            vec![&[]]
-        } else {
-            entries.chunks(MAX_BATCH).collect()
-        };
-
-        for batch in batches {
-            match upload_batch(client, token, batch, gold_to_send).await {
-                Ok(()) => {
-                    state.remember_entries(batch);
-                    state.remember_gold(gold_to_send);
-                    sent += batch.len();
-                    gold_to_send = &[];
-                }
-                Err(e) => {
-                    failed += 1;
-                    logger.error(&format!("ledger upload failed: {e}"));
-                    break; // retry this file's remainder next tick
+            for batch in batches {
+                match upload_batch(client, token, batch, gold_to_send).await {
+                    Ok(()) => {
+                        state.remember_entries(batch);
+                        state.remember_gold(gold_to_send);
+                        sent += batch.len();
+                        gold_to_send = &[];
+                    }
+                    Err(e) => {
+                        failed += 1;
+                        logger.error(&format!("ledger upload failed: {e}"));
+                        last_error = Some(e);
+                        break; // retry this file's remainder next tick
+                    }
                 }
             }
         }
+
+        // Recount against the updated state so "queue empty" is a fact, not a
+        // hope. `data` is already in memory, so this costs no I/O.
+        let (still_entries, still_gold) = pending(&data, &state);
+        pending_after += (still_entries.len() + still_gold.len()) as u64;
     }
 
+    state.set_pending(pending_after);
+    state.set_last_error(last_error);
     if sent > 0 {
+        state.record_upload(sent as u64, crate::luafile::now_unix());
+    }
+
+    if sent > 0 || *state.stats() != before {
         if let Err(e) = state.save_to(state_path) {
             // The rows did land; only our note of it failed. Next tick re-sends
             // them and the server absorbs the duplicates.
             logger.error(&format!("could not persist upload state: {e}"));
         }
+    }
+    if sent > 0 {
         logger.info(&format!("uploaded {sent} ledger rows"));
     }
     if failed > 0 {
         logger.error(&format!("{failed} ledger batches deferred to the next tick"));
     }
+
+    state.stats().clone()
 }
 
 #[cfg(test)]
@@ -405,5 +496,72 @@ mod tests {
         let batches: Vec<_> = entries.chunks(MAX_BATCH).collect();
         assert!(batches.iter().all(|b| b.len() <= MAX_BATCH));
         assert_eq!(batches.iter().map(|b| b.len()).sum::<usize>(), 1200);
+    }
+
+    #[test]
+    fn the_old_bare_array_state_file_still_loads() {
+        // v1.0.0 wrote a bare JSON array of keys. Failing to read it would
+        // re-upload the user's entire ledger on first launch of this build.
+        let dir = std::env::temp_dir().join(format!("goldcap-upload-legacy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(STATE_FILE_NAME);
+        std::fs::write(&path, r#"["a","b"]"#).unwrap();
+
+        let state = UploadState::load_from(&path);
+        assert!(state.contains("a"));
+        assert!(state.contains("b"));
+        assert_eq!(state.stats().total_sent, 0, "the old format carried no counters");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn stats_round_trip_through_disk_alongside_the_keys() {
+        let dir = std::env::temp_dir().join(format!("goldcap-upload-stats-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join(STATE_FILE_NAME);
+
+        let mut state = UploadState::default();
+        state.remember(&["a".to_string()]);
+        state.record_upload(7, 1_785_600_000);
+        state.set_pending(3);
+        state.save_to(&path).unwrap();
+
+        let loaded = UploadState::load_from(&path);
+        assert!(loaded.contains("a"));
+        assert_eq!(loaded.stats().total_sent, 7);
+        assert_eq!(loaded.stats().last_upload_at, Some(1_785_600_000));
+        assert_eq!(loaded.stats().pending, 3);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn recorded_uploads_accumulate_across_passes() {
+        let mut state = UploadState::default();
+        state.record_upload(5, 100);
+        state.record_upload(3, 200);
+        assert_eq!(state.stats().total_sent, 8);
+        assert_eq!(state.stats().last_upload_at, Some(200));
+    }
+
+    #[tokio::test]
+    async fn an_unpaired_pass_returns_the_stored_stats_untouched() {
+        let dir = std::env::temp_dir().join(format!("goldcap-upload-unpaired-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join(STATE_FILE_NAME);
+        let mut state = UploadState::default();
+        state.record_upload(42, 1_785_600_000);
+        state.save_to(&path).unwrap();
+
+        let logger = crate::logging::Logger::new(&dir).unwrap();
+        let client = crate::sync::build_client();
+        let stats =
+            upload_once(&client, "", Path::new("/definitely/not/here"), &path, &logger).await;
+
+        assert_eq!(stats.total_sent, 42, "an unpaired companion still shows its history");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
