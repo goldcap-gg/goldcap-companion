@@ -34,11 +34,20 @@ impl fmt::Display for SyncError {
 }
 
 /// Shared, tray-readable snapshot of the last sync attempt.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct SyncStatus {
     pub last_success_at: Option<SystemTime>,
     pub last_success_realm: Option<String>,
     pub last_error: Option<String>,
+    /// When a tick last ran, successful or not. Distinct from
+    /// `last_success_at`: a run of failures must not look like silence.
+    pub last_attempt_at: Option<SystemTime>,
+    /// A tick is in flight. Drives the pulsing "Syncing…" state in the UI.
+    pub syncing: bool,
+    /// When the interval timer will next fire. Republished whenever the
+    /// interval changes so the countdown never reflects a stale setting.
+    pub next_tick_at: Option<SystemTime>,
+    pub upload: crate::upload::UploadStats,
 }
 
 impl SyncStatus {
@@ -52,6 +61,21 @@ impl SyncStatus {
             (Some(realm), Some(at)) => format!("synced {realm} {}", humanize_age(at)),
             _ => "not synced yet".to_string(),
         }
+    }
+}
+
+/// Publishes the next scheduled tick. Free function rather than a method so
+/// the loop can call it while holding nothing else.
+pub fn schedule_next_tick(status: &Arc<Mutex<SyncStatus>>, at: SystemTime) {
+    let mut s = status.lock().unwrap_or_else(|p| p.into_inner());
+    s.next_tick_at = Some(at);
+}
+
+fn set_syncing(status: &Arc<Mutex<SyncStatus>>, syncing: bool) {
+    let mut s = status.lock().unwrap_or_else(|p| p.into_inner());
+    s.syncing = syncing;
+    if syncing {
+        s.last_attempt_at = Some(SystemTime::now());
     }
 }
 
@@ -136,12 +160,15 @@ pub async fn sync_once(
     logger: &Logger,
     state_path: &Path,
 ) {
+    set_syncing(status, true);
+
     if config.realm_slug.trim().is_empty() || config.wow_retail_path.trim().is_empty() {
         let msg = "not configured (realm or WoW path missing)".to_string();
         logger.error(&format!("sync skipped: {msg}"));
         if let Ok(mut s) = status.lock() {
             s.last_error = Some(msg);
         }
+        set_syncing(status, false);
         return;
     }
 
@@ -157,7 +184,7 @@ pub async fn sync_once(
     // AFTER the price write and reports through the logger only, so a failed
     // upload can never turn a good price sync into a red tray label. An
     // unpaired companion (empty token) is a silent no-op.
-    let _upload_stats = crate::upload::upload_once(
+    let upload_stats = crate::upload::upload_once(
         client,
         &config.companion_token,
         Path::new(&config.wow_retail_path),
@@ -170,6 +197,8 @@ pub async fn sync_once(
         Ok(s) => s,
         Err(poisoned) => poisoned.into_inner(),
     };
+    s.upload = upload_stats;
+    s.syncing = false;
     match result {
         Ok(()) => {
             s.last_success_at = Some(SystemTime::now());
@@ -203,12 +232,14 @@ pub async fn run_loop(
 ) {
     loop {
         let config = config_rx.borrow().clone();
-        let mut ticker = tokio::time::interval(config.interval());
+        let interval = config.interval();
+        let mut ticker = tokio::time::interval(interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
             tokio::select! {
                 _ = ticker.tick() => {
+                    schedule_next_tick(&status, SystemTime::now() + interval);
                     sync_once(&client, &config, &status, &logger, &state_dir).await;
                     on_tick();
                 }
@@ -245,6 +276,7 @@ mod tests {
             last_success_at: Some(SystemTime::now()),
             last_success_realm: Some("dentarg".into()),
             last_error: Some("unexpected status 500".into()),
+            ..SyncStatus::default()
         };
         assert_eq!(status.label(), "error: unexpected status 500");
     }
@@ -255,6 +287,7 @@ mod tests {
             last_success_at: Some(SystemTime::now()),
             last_success_realm: Some("dentarg".into()),
             last_error: None,
+            ..SyncStatus::default()
         };
         assert_eq!(status.label(), "synced dentarg just now");
     }
@@ -265,6 +298,7 @@ mod tests {
             last_success_at: Some(SystemTime::now() - std::time::Duration::from_secs(12 * 60)),
             last_success_realm: Some("dentarg".into()),
             last_error: None,
+            ..SyncStatus::default()
         };
         assert_eq!(status.label(), "synced dentarg 12m ago");
     }
@@ -279,6 +313,43 @@ mod tests {
         assert!(label.starts_with("error: "));
         assert!(label.chars().count() <= "error: ".len() + 60);
         assert!(label.ends_with('…'));
+    }
+
+    #[test]
+    fn a_fresh_status_is_idle_with_no_schedule() {
+        let s = SyncStatus::default();
+        assert!(!s.syncing);
+        assert_eq!(s.next_tick_at, None);
+        assert_eq!(s.last_attempt_at, None);
+        assert_eq!(s.upload, crate::upload::UploadStats::default());
+    }
+
+    #[tokio::test]
+    async fn an_unconfigured_attempt_still_clears_the_syncing_flag() {
+        // The button must not be able to get stuck on "Syncing…" just because
+        // the config is incomplete.
+        let client = build_client();
+        let config = Config::default();
+        let status = Arc::new(Mutex::new(SyncStatus { syncing: true, ..SyncStatus::default() }));
+        let dir = std::env::temp_dir()
+            .join(format!("goldcap-companion-syncing-flag-{}", std::process::id()));
+        let logger = Logger::new(&dir).unwrap();
+
+        sync_once(&client, &config, &status, &logger, &dir).await;
+
+        let s = status.lock().unwrap();
+        assert!(!s.syncing);
+        assert!(s.last_attempt_at.is_some(), "a refused attempt is still an attempt");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn scheduling_the_next_tick_publishes_it() {
+        let status = Arc::new(Mutex::new(SyncStatus::default()));
+        let at = SystemTime::now() + std::time::Duration::from_secs(1800);
+        schedule_next_tick(&status, at);
+        assert_eq!(status.lock().unwrap().next_tick_at, Some(at));
     }
 
     #[tokio::test]
