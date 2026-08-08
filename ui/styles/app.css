@@ -176,7 +176,7 @@ h3 {
   transition: border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
 }
 
-:where(.btn, .field, a, select):focus-visible {
+:where(.btn, .field, .link, a, select, input, button):focus-visible {
   outline: none;
   box-shadow: var(--glow-focus);
 }

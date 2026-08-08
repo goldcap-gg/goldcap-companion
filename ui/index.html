@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>GoldCap Companion</title>
+    <link rel="stylesheet" href="styles/tokens.css" />
+    <link rel="stylesheet" href="styles/app.css" />
+    <link rel="stylesheet" href="styles/screens.css" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <p id="toast" class="toast glass" role="status" aria-live="polite"></p>
+    <script type="module">
+      import { mount } from "./app.js";
+      import * as api from "./lib/api.js";
+      mount(document.getElementById("root"), api);
+    </script>
+  </body>
+</html>

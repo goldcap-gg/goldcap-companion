@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>GoldCap Companion — fixtures</title>
+    <link rel="stylesheet" href="styles/tokens.css" />
+    <link rel="stylesheet" href="styles/app.css" />
+    <link rel="stylesheet" href="styles/screens.css" />
+    <style>
+      /* The harness chrome is deliberately unstyled — it must never be
+         mistaken for part of the app. */
+      body { overflow: auto; }
+      .harness { padding: 16px; font-family: var(--font-body); }
+      .harness select, .harness button { font: inherit; margin-right: 8px; }
+      .frame {
+        width: 480px; height: 660px; margin-top: 12px;
+        border: 1px solid var(--border-strong); border-radius: 14px;
+        overflow: hidden; position: relative; background: var(--bg);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="harness">
+      <label>Fixture
+        <select id="fixture"></select>
+      </label>
+      <label>Screen
+        <select id="screen">
+          <option value="status">status</option>
+          <option value="wizard">wizard</option>
+          <option value="settings">settings</option>
+        </select>
+      </label>
+      <div class="frame"><div id="root"></div></div>
+    </div>
+    <p id="toast" class="toast glass" role="status" aria-live="polite"></p>
+
+    <script type="module">
+      import { mount, show } from "./app.js";
+      import { FIXTURES } from "./fixtures.js";
+
+      const fixtureSel = document.getElementById("fixture");
+      const screenSel = document.getElementById("screen");
+      for (const name of Object.keys(FIXTURES)) {
+        fixtureSel.add(new Option(name, name));
+      }
+
+      function apiFor(name) {
+        const f = structuredClone(FIXTURES[name]);
+        const delay = (v) => new Promise((r) => setTimeout(() => r(v), 120));
+        return {
+          getConfig: () => delay(f.config),
+          saveConfig: (config) => { Object.assign(f.config, config); return delay(); },
+          getStatus: () => delay(f.status),
+          syncNow: () => delay(),
+          detectWowPath: () => delay(f.detectedPath ?? ""),
+          pickWowPath: () => delay(f.detectedPath ?? ""),
+          detectGame: () => delay(f.game ?? { region: "eu", realmNames: [] }),
+          resolveRealm: (region, name) =>
+            delay({ slug: name.toLowerCase().replace(/\s+/g, "-"), nameEn: name }),
+          pairWithCode: () => delay(),
+          isPaired: () => delay(f.status.paired),
+          unpair: () => delay(),
+          openAccountPage: () => delay(),
+        };
+      }
+
+      function reload() {
+        mount(document.getElementById("root"), apiFor(fixtureSel.value)).then(
+          () => show(screenSel.value),
+        );
+      }
+      fixtureSel.addEventListener("change", reload);
+      screenSel.addEventListener("change", () => show(screenSel.value));
+      reload();
+    </script>
+  </body>
+</html>
