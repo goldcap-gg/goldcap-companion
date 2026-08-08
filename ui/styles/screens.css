@@ -199,6 +199,16 @@
   font-size: 20px;
 }
 
+/* The heading is focused programmatically after every step transition (see
+   go() in wizard.js) so keyboard/screen-reader users land on the new step
+   instead of <body> — it is never reachable by Tab itself, so this only
+   ever suppresses the plain-focus ring on that one programmatic case, not
+   :focus-visible anywhere. */
+.wizard-head h1:focus {
+  outline: none;
+  box-shadow: none;
+}
+
 .wizard-sub {
   margin: 4px 0 0;
   font-size: 13px;

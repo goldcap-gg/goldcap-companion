@@ -46,14 +46,23 @@ export function render(el, ctx) {
     });
   }
 
+  // Set by setHead on every step, then focused by go() once the step has
+  // rendered — the standard wizard pattern: the keyboard cursor and a
+  // screen reader's attention both land on the new step's heading instead
+  // of falling through to <body> when nav.replaceChildren() below removes
+  // whatever button the user just activated.
+  let headingEl = null;
+
   function setHead(title, sub) {
     head.replaceChildren();
     const h = document.createElement("h1");
     h.textContent = title;
+    h.tabIndex = -1;
     const p = document.createElement("p");
     p.className = "muted wizard-sub";
     p.textContent = sub;
     head.append(h, p);
+    headingEl = h;
   }
 
   function go(next) {
@@ -61,6 +70,10 @@ export function render(el, ctx) {
     bodyEl.classList.remove("step-in");
     render_step();
     paintProgress();
+    // render_step() runs each stepX() function synchronously up to its
+    // first await, and setHead() is always the first thing each one does —
+    // so by this point the new heading already exists in the live DOM.
+    headingEl?.focus();
     requestAnimationFrame(() => bodyEl.classList.add("step-in"));
   }
 
@@ -146,8 +159,10 @@ export function render(el, ctx) {
     const regionLabel = document.createElement("label");
     regionLabel.className = "label";
     regionLabel.textContent = "Region";
+    regionLabel.htmlFor = "wizard-region";
     const region = document.createElement("select");
     region.className = "field";
+    region.id = "wizard-region";
     region.add(new Option("EU", "eu"));
     region.add(new Option("US", "us"));
     region.value = draft.region;
@@ -155,15 +170,19 @@ export function render(el, ctx) {
     const realmLabel = document.createElement("label");
     realmLabel.className = "label";
     realmLabel.textContent = "Realm";
+    realmLabel.htmlFor = "wizard-realm";
     const realm = document.createElement("select");
     realm.className = "field";
+    realm.id = "wizard-realm";
 
     const resolved = document.createElement("p");
     resolved.className = "mono resolved";
 
     const manual = document.createElement("input");
+    manual.id = "wizard-realm-slug";
     manual.className = "field mono";
     manual.placeholder = "realm slug, e.g. dentarg";
+    manual.setAttribute("aria-label", "Realm slug");
     manual.hidden = true;
 
     const manualToggle = document.createElement("button");
@@ -187,13 +206,24 @@ export function render(el, ctx) {
       next.disabled = !ok;
     }
 
+    // Bumped by anything that supersedes an in-flight lookup: picking a
+    // different realm or region, switching to manual entry, or leaving the
+    // step via Back/Next. A resolve (or the detectGame load below) that was
+    // already in flight checks its own captured value against the current
+    // one before writing anything, so a late response can never overwrite
+    // what the user has done since.
+    let realmRequest = 0;
+
     async function resolveSelected() {
       const name = realm.value;
       if (!name) return;
+      const request = ++realmRequest;
       try {
         const r = await ctx.api.resolveRealm(region.value, name);
+        if (request !== realmRequest) return;
         draft.realmSlug = r.slug;
       } catch (e) {
+        if (request !== realmRequest) return;
         draft.realmSlug = "";
         ctx.toast(String(e), true);
       }
@@ -201,15 +231,18 @@ export function render(el, ctx) {
     }
 
     async function loadRealms() {
+      const request = ++realmRequest;
       realm.replaceChildren(new Option("— pick a realm —", ""));
       try {
         const game = await ctx.api.detectGame(draft.wowRetailPath);
+        if (request !== realmRequest) return;
         if (game.region === "eu" || game.region === "us") {
           draft.region = game.region;
           region.value = game.region;
         }
         realmNames = game.realmNames ?? [];
       } catch {
+        if (request !== realmRequest) return;
         realmNames = [];
       }
       for (const name of realmNames) realm.add(new Option(name, name));
@@ -231,6 +264,9 @@ export function render(el, ctx) {
     });
     realm.addEventListener("change", resolveSelected);
     manual.addEventListener("input", () => {
+      // The user has taken manual control — a resolve started before this
+      // point must not land afterward and stomp what they typed.
+      realmRequest++;
       draft.realmSlug = manual.value.trim();
       paintResolved();
     });
@@ -239,7 +275,10 @@ export function render(el, ctx) {
       manualToggle.hidden = true;
       manual.focus();
     });
-    back.addEventListener("click", () => go(0));
+    back.addEventListener("click", () => {
+      realmRequest++;
+      go(0);
+    });
     next.addEventListener("click", async () => {
       try {
         await ctx.api.saveConfig({ ...draft });
@@ -247,6 +286,7 @@ export function render(el, ctx) {
         ctx.toast(String(e), true);
         return;
       }
+      realmRequest++;
       go(2);
     });
 
@@ -271,8 +311,10 @@ export function render(el, ctx) {
     const label = document.createElement("label");
     label.className = "label";
     label.textContent = "Pairing code";
+    label.htmlFor = "wizard-pair-code";
 
     const code = document.createElement("input");
+    code.id = "wizard-pair-code";
     code.className = "field mono code-field";
     code.placeholder = "ABCD-1234";
     code.autocomplete = "off";
