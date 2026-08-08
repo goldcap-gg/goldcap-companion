@@ -83,6 +83,13 @@ impl Config {
         std::time::Duration::from_secs(self.interval_minutes.max(1) as u64 * 60)
     }
 
+    /// Whether this config can actually sync. Also decides which screen the
+    /// window opens on — an incomplete config means the first-run wizard —
+    /// so no separate "onboarded" flag is persisted.
+    pub fn is_complete(&self) -> bool {
+        !self.realm_slug.trim().is_empty() && !self.wow_retail_path.trim().is_empty()
+    }
+
     pub fn load_from(path: &Path) -> io::Result<Config> {
         let text = fs::read_to_string(path)?;
         serde_json::from_str(&text).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
@@ -378,5 +385,42 @@ mod tests {
         assert_eq!(normalize_retail_dir(&dir.join("nope")), None);
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_default_config_is_not_complete() {
+        assert!(!Config::default().is_complete());
+    }
+
+    #[test]
+    fn a_config_missing_either_half_is_not_complete() {
+        let realm_only = Config { realm_slug: "dentarg".into(), ..Config::default() };
+        assert!(!realm_only.is_complete());
+
+        let path_only = Config {
+            wow_retail_path: "/tmp/wow/_retail_".into(),
+            ..Config::default()
+        };
+        assert!(!path_only.is_complete());
+    }
+
+    #[test]
+    fn whitespace_does_not_count_as_configured() {
+        let cfg = Config {
+            realm_slug: "  ".into(),
+            wow_retail_path: "  ".into(),
+            ..Config::default()
+        };
+        assert!(!cfg.is_complete());
+    }
+
+    #[test]
+    fn a_config_with_both_halves_is_complete() {
+        let cfg = Config {
+            realm_slug: "dentarg".into(),
+            wow_retail_path: "/tmp/wow/_retail_".into(),
+            ..Config::default()
+        };
+        assert!(cfg.is_complete());
     }
 }

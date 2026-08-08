@@ -3,6 +3,7 @@
 
 mod commands;
 mod config;
+mod health;
 mod logging;
 mod luafile;
 mod savedvars;
