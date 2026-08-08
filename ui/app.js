@@ -24,12 +24,30 @@ export function toast(message, isError = false) {
 /// on teardown, which is what the returned disposer is for.
 export function show(screen) {
   if (current?.dispose) current.dispose();
+  // Cleared before the swap: if the render below throws, the next show()
+  // must not dispose a screen that is already gone.
+  current = null;
+
   const root = ctx.root;
   root.replaceChildren();
   const section = document.createElement("section");
   section.className = `screen screen-${screen}`;
   root.append(section);
-  current = SCREENS[screen](section, ctx) ?? {};
+
+  try {
+    current = SCREENS[screen](section, ctx) ?? {};
+  } catch (e) {
+    // A half-built screen is worse than none: replace it with something
+    // that says what happened, so the window is never silently dead.
+    current = {};
+    section.replaceChildren();
+    const failure = document.createElement("p");
+    failure.className = "muted";
+    failure.textContent = `Could not open this screen: ${e}`;
+    section.append(failure);
+    toast(String(e), true);
+  }
+
   // Re-trigger the enter transition on every swap.
   requestAnimationFrame(() => section.classList.add("screen-in"));
 }
