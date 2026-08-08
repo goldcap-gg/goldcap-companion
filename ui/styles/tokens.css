@@ -1,0 +1,92 @@
+/* Palette, type and motion. Values are copied verbatim from the site's
+   design tokens (apps/web/app/globals.css) so the desktop app and the web
+   app cannot drift apart. */
+
+@font-face {
+  font-family: "Rubik";
+  src: url("../fonts/rubik-500.woff2") format("woff2");
+  font-weight: 500;
+  font-display: block;
+}
+@font-face {
+  font-family: "Rubik";
+  src: url("../fonts/rubik-600.woff2") format("woff2");
+  font-weight: 600;
+  font-display: block;
+}
+@font-face {
+  font-family: "Nunito";
+  src: url("../fonts/nunito-400.woff2") format("woff2");
+  font-weight: 400;
+  font-display: block;
+}
+@font-face {
+  font-family: "Nunito";
+  src: url("../fonts/nunito-600.woff2") format("woff2");
+  font-weight: 600;
+  font-display: block;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("../fonts/ibm-plex-mono-400.woff2") format("woff2");
+  font-weight: 400;
+  font-display: block;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("../fonts/ibm-plex-mono-500.woff2") format("woff2");
+  font-weight: 500;
+  font-display: block;
+}
+
+:root {
+  color-scheme: dark;
+
+  --bg: #0a0912;
+  --bg-elev: #100d20;
+  --surface: #15131f;
+  --surface-2: #221f38;
+  --border: #2a2842;
+  --border-strong: #3a3756;
+
+  /* Gold is brand and action. It is never a health state. */
+  --gold: #f5c542;
+  --gold-hi: #ffe08a;
+  --gold-lo: #9a751f;
+  --gold-soft: rgba(245, 197, 66, 0.16);
+  --gold-faint: rgba(245, 197, 66, 0.08);
+
+  --pos: #7fe0a0;
+  --neg: #ff6b5e;
+  --info: #949ecd;
+
+  --fg: #f2f0fb;
+  --fg-muted: #a09cbe;
+  --fg-dim: #918db4;
+
+  --font-display: "Rubik", system-ui, sans-serif;
+  --font-body: "Nunito", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+
+  --radius: 12px;
+  --radius-sm: 8px;
+
+  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --dur-fast: 200ms;
+  --dur: 320ms;
+  --dur-slow: 480ms;
+
+  --glow-rest: 0 0 0 1px var(--gold-faint), 0 8px 32px -12px rgba(245, 197, 66, 0.1);
+  --glow-focus: 0 0 0 2px var(--gold), 0 0 24px -4px var(--gold-soft);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+}
