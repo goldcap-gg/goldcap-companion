@@ -113,7 +113,7 @@ pub fn build(
         stage(
             StageHealth::NotConnected,
             None,
-            "No ledger yet — Launch WoW with GoldCap",
+            "No ledger yet — launch WoW with GoldCap",
             None,
         )
     } else {
@@ -253,7 +253,7 @@ mod tests {
 
         let snap = build(&config, &SyncStatus::default(), &health, NOW);
         assert_eq!(snap.ledger.state, StageHealth::NotConnected);
-        assert!(snap.ledger.detail.contains("Launch WoW"));
+        assert!(snap.ledger.detail.contains("launch WoW"));
     }
 
     #[test]
