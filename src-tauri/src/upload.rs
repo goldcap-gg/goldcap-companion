@@ -61,10 +61,29 @@ impl UploadState {
         let Ok(text) = std::fs::read_to_string(path) else {
             return Self::default();
         };
-        // Object first: the current format. An array can never parse as an
-        // object, so the order is unambiguous.
-        if let Ok(p) = serde_json::from_str::<PersistedState>(&text) {
-            return Self {
+        // The two on-disk shapes are told apart by the first non-whitespace
+        // byte, not by which one happens to parse first: v1.0.0 wrote a bare
+        // JSON array of keys, the current format a JSON object. Trying
+        // PersistedState (an object) first and falling back to a bare
+        // HashSet on error is NOT unambiguous — serde's derived
+        // Deserialize accepts a JSON array against any struct positionally
+        // (visit_seq), so a legacy array can parse straight into
+        // PersistedState if its elements happen to fit the struct's fields
+        // in order. That only failed to bite here because `keys` (a
+        // HashSet<String>) is field 0: a bare string element can never
+        // satisfy it. Reorder the fields, or add one whose type a string
+        // could satisfy, and the try-object-first approach would start
+        // silently parsing legacy arrays as an object with every key
+        // dropped — a full ledger re-upload. Branching on the leading byte
+        // makes that impossible by construction instead of by luck.
+        if text.trim_start().starts_with('[') {
+            return match serde_json::from_str::<HashSet<String>>(&text) {
+                Ok(keys) => Self { uploaded: keys, stats: UploadStats::default() },
+                Err(_) => Self::default(),
+            };
+        }
+        match serde_json::from_str::<PersistedState>(&text) {
+            Ok(p) => Self {
                 uploaded: p.keys,
                 stats: UploadStats {
                     total_sent: p.total_sent,
@@ -72,12 +91,9 @@ impl UploadState {
                     pending: p.pending,
                     last_error: p.last_error,
                 },
-            };
+            },
+            Err(_) => Self::default(),
         }
-        if let Ok(keys) = serde_json::from_str::<HashSet<String>>(&text) {
-            return Self { uploaded: keys, stats: UploadStats::default() };
-        }
-        Self::default()
     }
 
     pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
@@ -511,6 +527,28 @@ mod tests {
         let state = UploadState::load_from(&path);
         assert!(state.contains("a"));
         assert!(state.contains("b"));
+        assert_eq!(state.stats().total_sent, 0, "the old format carried no counters");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_single_element_legacy_array_still_round_trips_its_key() {
+        // The specific case the old try-object-first guard only got right by
+        // luck: PersistedState's field 0 is `keys: HashSet<String>`, and a
+        // bare string element can never satisfy that type, so the object
+        // parse happened to fail and fall through. The leading-byte branch
+        // gets this right on purpose instead.
+        let dir = std::env::temp_dir()
+            .join(format!("goldcap-upload-legacy-one-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(STATE_FILE_NAME);
+        std::fs::write(&path, r#"["a"]"#).unwrap();
+
+        let state = UploadState::load_from(&path);
+        assert!(state.contains("a"));
+        assert_eq!(state.len(), 1);
         assert_eq!(state.stats().total_sent, 0, "the old format carried no counters");
 
         std::fs::remove_dir_all(&dir).ok();
