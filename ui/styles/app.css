@@ -164,6 +164,18 @@ h3 {
   color: var(--fg-muted);
 }
 
+/* A destructive variant — border and text only, same as the other two
+   modifiers above. The surface stays .btn's, so this never reads as
+   .btn-primary's gold, which is brand/action only, never a health state. */
+.btn-danger {
+  border-color: var(--neg);
+  color: var(--neg);
+}
+.btn-danger:hover:not(:disabled) {
+  border-color: var(--neg);
+  color: var(--neg);
+}
+
 .field {
   width: 100%;
   font: inherit;

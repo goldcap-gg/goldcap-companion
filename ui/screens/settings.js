@@ -419,6 +419,14 @@ export function render(el, ctx) {
         drop.textContent = "Unpair";
 
         function disarm() {
+          // Disabling a focused button fires `blur` in Chromium and
+          // Firefox — without this guard, the confirming click above
+          // (which disables `drop` for the duration of the request) would
+          // revert its own label via this same handler, for the in-flight
+          // moment before the request resolves. The confirm was accepted,
+          // not cancelled; `drop.disabled = false` in the catch below
+          // clears this guard before calling disarm() for real.
+          if (drop.disabled) return;
           clearTimeout(unpairArmTimer);
           unpairArmTimer = null;
           drop.classList.remove("btn-danger");

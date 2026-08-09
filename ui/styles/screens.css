@@ -422,17 +422,3 @@
   outline: none;
   box-shadow: none;
 }
-
-/* The armed state of the Unpair button — a modifier alongside .btn, not a
-   replacement for it, so every other .btn rule (padding, radius, hover
-   transition timing) still applies. Only border and text read as
-   destructive; the surface stays the same so this never gets mistaken for
-   .btn-primary's gold, which is brand/action only. */
-.btn-danger {
-  border-color: var(--neg);
-  color: var(--neg);
-}
-.btn-danger:hover:not(:disabled) {
-  border-color: var(--neg);
-  color: var(--neg);
-}
