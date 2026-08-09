@@ -532,11 +532,9 @@ export function render(el, ctx) {
 
     // Whichever way this step was reached, draft is already complete and
     // saved (detect() saves before calling go(2); Realm's Next above saves
-    // before calling it too) — so a sync can start firing right away rather
-    // than waiting for Pair/Later. Fire-and-forget: the Status screen is
-    // where a failed sync gets reported, not here, and this must not block
-    // the pairing UI from appearing.
-    ctx.api.syncNow().catch(() => {});
+    // before calling it too) — but the sync itself waits for finish()
+    // below, once the user actually leaves (Pair or Later), rather than
+    // firing again here the instant this step merely renders.
 
     const open = document.createElement("button");
     open.className = "btn";
