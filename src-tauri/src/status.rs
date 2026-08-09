@@ -5,7 +5,7 @@
 
 use crate::config::Config;
 use crate::health::GameHealth;
-use crate::sync::SyncStatus;
+use crate::sync::{SyncErrorStage, SyncStatus};
 use serde::Serialize;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -65,12 +65,15 @@ pub fn build(
 
     let prices = if !configured {
         stage(StageHealth::NotConnected, None, "Waiting for setup", None)
-    } else if let Some(err) = &status.last_error {
+    } else if status.last_error_stage == Some(SyncErrorStage::Prices) {
+        // A broken link is still a link that worked at some point — keep
+        // showing when, the same way the ledger stage below does, rather
+        // than dropping it the moment this tick fails.
         stage(
             StageHealth::Broken,
-            None,
+            status.last_success_at.and_then(unix),
             "Could not reach goldcap.gg",
-            Some(err.clone()),
+            status.last_error.clone(),
         )
     } else if let Some(at) = status.last_success_at.and_then(unix) {
         stage(StageHealth::Ok, Some(at), "Fetched from goldcap.gg", None)
@@ -86,6 +89,24 @@ pub fn build(
             None,
             "The GoldCap addon is not installed",
             None,
+        )
+    } else if status.last_error_stage == Some(SyncErrorStage::Addon) {
+        // The fetch worked (that is exactly what puts an error in this
+        // stage instead of Prices) — this is a write problem specifically.
+        // `install_ok` (WTF/Account exists) separates a real, played
+        // install that just failed to write from a folder that was never
+        // actually run: the former is worth troubleshooting as a broken
+        // link, the latter is more likely the wrong folder entirely.
+        let detail = if health.install_ok {
+            "Could not write price data"
+        } else {
+            "This doesn't look like a played WoW install"
+        };
+        stage(
+            StageHealth::Broken,
+            health.app_data_written_at,
+            detail,
+            status.last_error.clone(),
         )
     } else if let Some(at) = health.app_data_written_at {
         stage(StageHealth::Ok, Some(at), "Written to GoldCap_AppData", None)
@@ -150,7 +171,7 @@ mod tests {
     use super::*;
     use crate::config::{Config, Region};
     use crate::health::GameHealth;
-    use crate::sync::SyncStatus;
+    use crate::sync::{SyncErrorStage, SyncStatus};
     use std::time::{Duration, SystemTime};
 
     const NOW: i64 = 1_785_600_000;
@@ -215,6 +236,7 @@ mod tests {
         config.companion_token = "tok".into();
         let status = SyncStatus {
             last_error: Some("unexpected status 500".into()),
+            last_error_stage: Some(SyncErrorStage::Prices),
             upload: crate::upload::UploadStats { total_sent: 1, ..Default::default() },
             ..SyncStatus::default()
         };
@@ -224,6 +246,68 @@ mod tests {
         assert_eq!(snap.prices.error.as_deref(), Some("unexpected status 500"));
         assert_eq!(snap.addon.state, StageHealth::Ok, "a stale file is still a written file");
         assert_eq!(snap.ledger.state, StageHealth::Ok);
+    }
+
+    #[test]
+    fn a_write_failure_attributes_to_the_addon_stage_not_prices() {
+        // The fetch succeeded this tick — apply_import_string is what threw
+        // — so prices must read as fine and the failure must land on addon.
+        let mut config = configured();
+        config.companion_token = "tok".into();
+        let status = SyncStatus {
+            last_success_at: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(NOW as u64 - 30)),
+            last_success_realm: Some("dentarg".into()),
+            last_error: Some("failed to write addon files: permission denied".into()),
+            last_error_stage: Some(SyncErrorStage::Addon),
+            ..SyncStatus::default()
+        };
+
+        let snap = build(&config, &status, &healthy(), NOW);
+        assert_eq!(
+            snap.prices.state,
+            StageHealth::Ok,
+            "the site was reached fine — only the addon write failed"
+        );
+        assert_eq!(snap.addon.state, StageHealth::Broken);
+        assert!(snap.addon.error.as_deref().unwrap().contains("permission denied"));
+    }
+
+    #[test]
+    fn a_write_failure_on_a_never_played_folder_says_so() {
+        let mut config = configured();
+        config.companion_token = "tok".into();
+        let health = GameHealth { install_ok: false, ..healthy() };
+        let status = SyncStatus {
+            last_success_at: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(NOW as u64 - 30)),
+            last_error: Some("failed to write addon files: not found".into()),
+            last_error_stage: Some(SyncErrorStage::Addon),
+            ..SyncStatus::default()
+        };
+
+        let snap = build(&config, &status, &health, NOW);
+        assert_eq!(snap.addon.state, StageHealth::Broken);
+        assert!(snap.addon.detail.contains("played"));
+    }
+
+    #[test]
+    fn a_broken_prices_stage_still_reports_its_last_good_timestamp() {
+        let config = configured();
+        let last_good = NOW - 5_000;
+        let status = SyncStatus {
+            last_success_at: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(last_good as u64)),
+            last_success_realm: Some("dentarg".into()),
+            last_error: Some("request failed: connection refused".into()),
+            last_error_stage: Some(SyncErrorStage::Prices),
+            ..SyncStatus::default()
+        };
+
+        let snap = build(&config, &status, &healthy(), NOW);
+        assert_eq!(snap.prices.state, StageHealth::Broken);
+        assert_eq!(
+            snap.prices.at,
+            Some(last_good),
+            "a broken link should still show when it last worked, same as the ledger stage does"
+        );
     }
 
     #[test]

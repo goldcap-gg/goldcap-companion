@@ -33,12 +33,38 @@ impl fmt::Display for SyncError {
     }
 }
 
+/// Which leg of the pipeline a `SyncError` belongs to — the Status screen
+/// attributes a broken tick to exactly one of its three stage rows, and a
+/// write failure and a fetch failure are different rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncErrorStage {
+    /// The problem was reaching goldcap.gg: the request itself, its status
+    /// code, or a body that was not a GCS1 import string.
+    Prices,
+    /// The fetch succeeded; writing the result into the addon folder failed.
+    Addon,
+}
+
+impl SyncError {
+    pub fn stage(&self) -> SyncErrorStage {
+        match self {
+            SyncError::Write(_) => SyncErrorStage::Addon,
+            SyncError::Request(_) | SyncError::BadStatus(_) | SyncError::InvalidBody => {
+                SyncErrorStage::Prices
+            }
+        }
+    }
+}
+
 /// Shared, tray-readable snapshot of the last sync attempt.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct SyncStatus {
     pub last_success_at: Option<SystemTime>,
     pub last_success_realm: Option<String>,
     pub last_error: Option<String>,
+    /// Which stage `last_error` belongs to. `None` whenever `last_error` is
+    /// — the two are only ever set together, by the same tick.
+    pub last_error_stage: Option<SyncErrorStage>,
     /// When a tick last ran, successful or not. Distinct from
     /// `last_success_at`: a run of failures must not look like silence.
     pub last_attempt_at: Option<SystemTime>,
@@ -167,18 +193,26 @@ pub async fn sync_once(
         logger.error(&format!("sync skipped: {msg}"));
         if let Ok(mut s) = status.lock() {
             s.last_error = Some(msg);
+            s.last_error_stage = Some(SyncErrorStage::Prices);
         }
         set_syncing(status, false);
         return;
     }
 
     let region = config.region.to_string();
-    let result = fetch_import_string(client, &region, &config.realm_slug)
-        .await
-        .and_then(|body| {
-            apply_import_string(Path::new(&config.wow_retail_path), &body)?;
-            Ok(())
-        });
+    let fetch_result = fetch_import_string(client, &region, &config.realm_slug).await;
+
+    // Fetching and writing are attributed separately from here on: a write
+    // failure after a successful fetch must not make the prices stage look
+    // broken (the site was reached fine), and must not erase the fact that
+    // this tick's fetch really did just succeed.
+    let (fetched_ok, sync_error) = match fetch_result {
+        Ok(body) => match apply_import_string(Path::new(&config.wow_retail_path), &body) {
+            Ok(()) => (true, None),
+            Err(e) => (true, Some(e)),
+        },
+        Err(e) => (false, Some(e)),
+    };
 
     // Ledger upload rides along on the same tick, but as a passenger: it runs
     // AFTER the price write and reports through the logger only, so a failed
@@ -199,14 +233,18 @@ pub async fn sync_once(
     };
     s.upload = upload_stats;
     s.syncing = false;
-    match result {
-        Ok(()) => {
-            s.last_success_at = Some(SystemTime::now());
-            s.last_success_realm = Some(config.realm_slug.clone());
+    if fetched_ok {
+        s.last_success_at = Some(SystemTime::now());
+        s.last_success_realm = Some(config.realm_slug.clone());
+    }
+    match &sync_error {
+        None => {
             s.last_error = None;
+            s.last_error_stage = None;
             logger.info(&format!("synced {} {}", region, config.realm_slug));
         }
-        Err(e) => {
+        Some(e) => {
+            s.last_error_stage = Some(e.stage());
             s.last_error = Some(e.to_string());
             logger.error(&format!(
                 "sync failed for {} {}: {e}",
@@ -268,6 +306,24 @@ mod tests {
     #[test]
     fn label_before_first_sync() {
         assert_eq!(SyncStatus::default().label(), "not synced yet");
+    }
+
+    #[test]
+    fn a_write_failure_attributes_to_the_addon_stage() {
+        assert_eq!(
+            SyncError::Write("permission denied".into()).stage(),
+            SyncErrorStage::Addon
+        );
+    }
+
+    #[test]
+    fn a_fetch_failure_attributes_to_the_prices_stage() {
+        assert_eq!(
+            SyncError::Request("timed out".into()).stage(),
+            SyncErrorStage::Prices
+        );
+        assert_eq!(SyncError::BadStatus(500).stage(), SyncErrorStage::Prices);
+        assert_eq!(SyncError::InvalidBody.stage(), SyncErrorStage::Prices);
     }
 
     #[test]
