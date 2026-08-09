@@ -12,12 +12,18 @@ const STEPS = ["Game", "Realm", "Connect"];
 export function render(el, ctx) {
   el.classList.add("screen-wizard");
 
+  // Fallback shape only — matches Config::default() on the Rust side. The
+  // very first thing detect() does is overwrite every one of these fields
+  // from the actually-saved config (see below), so this is only what a
+  // config load that outright fails (not "empty", an IPC error) leaves
+  // behind. Nothing here should be read as "the default a fresh wizard
+  // writes" — a fresh wizard writes whatever was already on disk.
   const draft = {
     region: "eu",
     realmSlug: "",
     wowRetailPath: "",
     intervalMinutes: 30,
-    launchAtStartup: true,
+    launchAtStartup: false,
     companionToken: "",
   };
   let realmNames = [];
@@ -189,15 +195,33 @@ export function render(el, ctx) {
 
     const gen = ++requestGen;
 
-    let path = "";
+    let config = null;
     try {
-      const config = await ctx.api.getConfig();
-      path = (config.wowRetailPath || "").trim();
+      config = await ctx.api.getConfig();
     } catch {
       // Fall through to auto-detect below, same as an empty saved config.
     }
     if (gen !== requestGen) return;
 
+    // Seed everything the wizard never asks about — interval, launch-at-
+    // startup, and any pairing token already on disk — from what is
+    // actually saved, before detection (or the stepped flow it falls back
+    // to) touches anything. Only wowRetailPath, region and realmSlug are
+    // ever overwritten below, and only once something has actually
+    // determined them. Without this, a config from a previous run that this
+    // pass reopens for — say, a realm that could not be detected — would
+    // have every one of these silently reset the moment it saves: a paired
+    // token wiped, launch-at-startup flipped on, back to a 30-minute
+    // interval.
+    if (config) {
+      draft.intervalMinutes = config.intervalMinutes;
+      draft.launchAtStartup = config.launchAtStartup;
+      draft.companionToken = config.companionToken;
+      draft.region = config.region;
+      draft.realmSlug = config.realmSlug;
+    }
+
+    let path = (config?.wowRetailPath || "").trim();
     if (!path) {
       try {
         path = (await ctx.api.detectWowPath()) || "";

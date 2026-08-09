@@ -55,6 +55,33 @@ export const FIXTURES = {
     },
   },
 
+  // The default production first run, not an edge case: Config::load_or_init
+  // auto-detects wowRetailPath and persists it before the wizard ever opens,
+  // so a wholly-empty config is actually the rare case. This one also pairs
+  // a config the user never finished — companionToken already set, interval
+  // and startup already changed from their defaults — before an earlier
+  // session hit "Later" (or just quit) with the realm still unresolved. The
+  // wizard reopening on realmSlug being empty must not wipe any of that.
+  "wizard: upgrade with a token": {
+    config: {
+      region: "eu",
+      realmSlug: "",
+      wowRetailPath: "C:\\Program Files (x86)\\World of Warcraft\\_retail_",
+      intervalMinutes: 45,
+      launchAtStartup: false,
+      companionToken: "tok",
+    },
+    detectedPath: "C:\\Program Files (x86)\\World of Warcraft\\_retail_",
+    game: { region: "eu", realmNames: ["Tarren Mill", "Ravencrest"] },
+    status: {
+      configured: false, paired: true, region: "eu", realmSlug: "",
+      syncing: false, nextTickAt: null, intervalMinutes: 45, version: "1.2.0",
+      prices: stage("notConnected", null, "Waiting for setup"),
+      addon: stage("notConnected", null, "Waiting for setup"),
+      ledger: stage("notConnected", null, "Waiting for setup"),
+    },
+  },
+
   "everything works": {
     config: configured,
     status: {
