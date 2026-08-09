@@ -38,7 +38,6 @@ fn main() {
             commands::detect_game,
             commands::resolve_realm,
             commands::pair_with_code,
-            commands::is_paired,
             commands::unpair,
             commands::open_account_page,
         ])
@@ -115,7 +114,7 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while building the goldcap companion app")
         .run(|_app_handle, event| {
-            // Tray-only app: closing the Settings window must not quit the
+            // Tray-only app: closing the companion window must not quit the
             // process. A window-close exit request carries code None; an
             // explicit app.exit(0) (the tray's Quit item) carries Some(0)
             // and must be allowed through — blocking unconditionally here

@@ -63,7 +63,6 @@
             f.status.paired = true;
             return delay();
           },
-          isPaired: () => delay(f.status.paired),
           unpair: () => {
             f.config.companionToken = "";
             f.status.paired = false;

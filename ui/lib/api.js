@@ -13,6 +13,5 @@ export const pickWowPath = () => invoke("pick_wow_path");
 export const detectGame = (wowRetailPath) => invoke("detect_game", { wowRetailPath });
 export const resolveRealm = (region, name) => invoke("resolve_realm", { region, name });
 export const pairWithCode = (code) => invoke("pair_with_code", { code });
-export const isPaired = () => invoke("is_paired");
 export const unpair = () => invoke("unpair");
 export const openAccountPage = () => invoke("open_account_page");

@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capabilities for the main window — the app is otherwise tray-only with no auto-created windows.",
+  "description": "Capabilities for the main window — the app is tray-only otherwise, opening this window on its own only on first run, when the config is incomplete.",
   "windows": ["main"],
   "permissions": [
     "core:default",

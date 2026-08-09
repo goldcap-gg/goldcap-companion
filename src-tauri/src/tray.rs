@@ -1,6 +1,6 @@
-//! Tray icon + menu: a disabled status line, "Sync now", "Settings…", and
-//! "Quit" — the entire visible surface of this app outside the Settings
-//! window.
+//! Tray icon + menu: a disabled status line, "Sync now", "Open Companion…",
+//! and "Quit" — the entire visible surface of this app outside the
+//! companion window itself.
 
 use crate::state::AppState;
 use tauri::{
@@ -26,7 +26,8 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
     let status_item =
         MenuItem::with_id(app, STATUS_ITEM_ID, "not synced yet", false, None::<&str>)?;
     let sync_now_item = MenuItem::with_id(app, SYNC_NOW_ITEM_ID, "Sync now", true, None::<&str>)?;
-    let settings_item = MenuItem::with_id(app, SETTINGS_ITEM_ID, "Settings…", true, None::<&str>)?;
+    let settings_item =
+        MenuItem::with_id(app, SETTINGS_ITEM_ID, "Open Companion…", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, QUIT_ITEM_ID, "Quit", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
 

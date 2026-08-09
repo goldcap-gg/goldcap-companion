@@ -1,4 +1,5 @@
-//! Tauri commands invoked from the Settings window.
+//! Tauri commands invoked from the companion window (Wizard, Status, and
+//! Settings screens).
 
 use crate::config::{self, Config};
 use crate::state::AppState;
@@ -15,14 +16,14 @@ pub fn get_config(state: State<AppState>) -> Config {
         .clone()
 }
 
-/// Backs the Settings window's "Detect" button — re-runs the same
+/// Backs the Settings screen's "Detect" button — re-runs the same
 /// auto-detect used on first run, without touching the saved config.
 #[tauri::command]
 pub fn detect_wow_path() -> String {
     config::detect_wow_retail_path()
 }
 
-/// Backs the Settings window's "Browse…" button: a native folder picker.
+/// Backs the Settings screen's "Browse…" button: a native folder picker.
 /// Accepts either the WoW base dir or `_retail_` itself and hands back the
 /// normalized `_retail_` path (empty answer = user cancelled; an error =
 /// the picked folder is not a WoW retail install).
@@ -171,20 +172,6 @@ pub async fn pair_with_code(
     let mut config = state.config.lock().unwrap_or_else(|p| p.into_inner()).clone();
     config.companion_token = token;
     save_config(app, state, config)
-}
-
-/// Whether this companion is paired. The token itself is never handed back to
-/// the UI — there is nothing the settings window could do with it except leak
-/// it into a screenshot.
-#[tauri::command]
-pub fn is_paired(state: State<AppState>) -> bool {
-    !state
-        .config
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .companion_token
-        .trim()
-        .is_empty()
 }
 
 /// Drops the upload token. Goes through `save_config` so the running sync
