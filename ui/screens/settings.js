@@ -22,6 +22,15 @@ export function render(el, ctx) {
   el.classList.add("screen-settings", "screen-scroll");
 
   let config = null;
+  // Set by dispose(). Every async handler below checks this right after its
+  // own await(s) — the same rule status.js's refresh()/action click use —
+  // so a save, detect, or pair that resolves after the user has already
+  // navigated to another screen cannot toast, repaint, or persist over top
+  // of it. A flat flag rather than wizard.js's requestGen counter: unlike
+  // the wizard's single navigating sequence, these are independent
+  // per-control operations with nothing to generation-number against each
+  // other, exactly the shape status.js's own handlers are in.
+  let disposed = false;
   // The one timer this screen owns: the Unpair confirm window. Shared across
   // paintAccount's closures so any rebuild of the Account group (or disposal
   // of the whole screen) can cancel a pending one — see buildAccount below.
@@ -46,17 +55,32 @@ export function render(el, ctx) {
 
   el.append(top, body);
 
-  // Merges `patch` into `config` only once saveConfig actually succeeds —
-  // a rejected save must never leave `config` (or, via the paintX()
-  // functions below, the screen) claiming a value that was not persisted.
+  // Applies `patch` on top of `config` immediately, synchronously, before
+  // the save even goes out — not after it resolves. Two edits fired close
+  // together (click "60 min", then toggle "Launch at startup" before the
+  // first save returns) must both land: with the merge only happening after
+  // await, the second call would build its patch from the pre-edit
+  // snapshot and its save would overwrite the first edit right back out,
+  // even though both saves reported success. Applying optimistically means
+  // the second call's `next` already carries the first call's change.
+  //
+  // A rejected save unwinds only its own patch, and only if nothing newer
+  // has been layered on top of it since (`config === next` — reference
+  // equality, since `next` is a fresh object every call). A newer edit that
+  // has already superseded this one must not be reverted by this one's
+  // failure.
   async function persist(patch) {
+    const previous = config;
     const next = { ...config, ...patch };
+    config = next;
     try {
       await ctx.api.saveConfig(next);
-      config = next;
+      if (disposed) return true;
       ctx.toast("Saved");
       return true;
     } catch (e) {
+      if (disposed) return false;
+      if (config === next) config = previous;
       ctx.toast(String(e), true);
       return false;
     }
@@ -133,14 +157,16 @@ export function render(el, ctx) {
     change.addEventListener("click", async () => {
       try {
         const picked = await ctx.api.pickWowPath();
-        if (!picked) return;
+        if (disposed || !picked) return;
         const ok = await persist({ wowRetailPath: picked });
+        if (disposed) return;
         paintPath();
         // Only worth re-reading the game's realm list when the path that
         // was actually saved changed — a rejected save leaves config (and
         // so the path detectGame would read) exactly where it was.
         if (ok) loadRealmNames(config.wowRetailPath);
       } catch (e) {
+        if (disposed) return;
         ctx.toast(String(e), true);
       }
     });
@@ -148,14 +174,17 @@ export function render(el, ctx) {
     detect.addEventListener("click", async () => {
       try {
         const found = await ctx.api.detectWowPath();
+        if (disposed) return;
         if (!found) {
           ctx.toast("No install found", true);
           return;
         }
         const ok = await persist({ wowRetailPath: found });
+        if (disposed) return;
         paintPath();
         if (ok) loadRealmNames(config.wowRetailPath);
       } catch (e) {
+        if (disposed) return;
         ctx.toast(String(e), true);
       }
     });
@@ -172,6 +201,7 @@ export function render(el, ctx) {
 
     region.addEventListener("change", async () => {
       await persist({ region: region.value });
+      if (disposed) return;
       // Re-synced from config either way: on success this is a no-op (the
       // select already shows what was just picked), on rejection it snaps
       // the dropdown back rather than leaving it showing an unsaved region.
@@ -206,11 +236,13 @@ export function render(el, ctx) {
       if (!realm.value) return;
       try {
         const r = await ctx.api.resolveRealm(region.value, realm.value);
+        if (disposed) return;
         await persist({ realmSlug: r.slug });
       } catch (e) {
+        if (disposed) return;
         ctx.toast(String(e), true);
       } finally {
-        paintRealm();
+        if (!disposed) paintRealm();
       }
     });
 
@@ -221,6 +253,7 @@ export function render(el, ctx) {
         return;
       }
       await persist({ realmSlug: value });
+      if (disposed) return;
       paintRealm();
     });
 
@@ -235,9 +268,10 @@ export function render(el, ctx) {
       realm.replaceChildren(new Option("— from game files —", ""));
       try {
         const g = await ctx.api.detectGame(path);
-        if (gen !== realmRequest) return;
+        if (disposed || gen !== realmRequest) return;
         for (const name of g.realmNames ?? []) realm.add(new Option(name, name));
       } catch {
+        if (disposed || gen !== realmRequest) return;
         // An unreadable install just leaves the dropdown at its placeholder;
         // the slug field next to it is always usable.
       }
@@ -289,6 +323,7 @@ export function render(el, ctx) {
       seg.dataset.minutes = String(minutes);
       seg.addEventListener("click", async () => {
         await persist({ intervalMinutes: minutes });
+        if (disposed) return;
         paintInterval();
       });
       segs.append(seg);
@@ -319,6 +354,7 @@ export function render(el, ctx) {
         return;
       }
       await persist({ intervalMinutes: minutes });
+      if (disposed) return;
       paintInterval();
     });
 
@@ -352,6 +388,7 @@ export function render(el, ctx) {
     startupBox.id = "settings-launch-startup";
     startupBox.addEventListener("change", async () => {
       await persist({ launchAtStartup: startupBox.checked });
+      if (disposed) return;
       paintStartup();
     });
     startup.append(startupBox, document.createTextNode("Launch at startup"));
@@ -448,10 +485,12 @@ export function render(el, ctx) {
           drop.disabled = true;
           try {
             await ctx.api.unpair();
+            if (disposed) return;
             config = { ...config, companionToken: "" };
             ctx.toast("Unpaired");
             paintAccount(true);
           } catch (e) {
+            if (disposed) return;
             ctx.toast(String(e), true);
             drop.disabled = false;
             disarm();
@@ -487,12 +526,15 @@ export function render(el, ctx) {
           pair.disabled = true;
           try {
             await ctx.api.pairWithCode(code.value);
+            if (disposed) return;
             // The real token never round-trips back into the UI's own
             // patches, so a full getConfig() is the only way to see it.
             config = await ctx.api.getConfig();
+            if (disposed) return;
             ctx.toast("Paired with goldcap.gg");
             paintAccount(true);
           } catch (e) {
+            if (disposed) return;
             ctx.toast(String(e), true);
             pair.disabled = false;
           }
@@ -510,19 +552,27 @@ export function render(el, ctx) {
   ctx.api
     .getConfig()
     .then((c) => {
+      if (disposed) return;
       config = c;
       buildGame();
       buildSync();
       buildAccount();
     })
-    .catch((e) => ctx.toast(String(e), true));
+    .catch((e) => {
+      if (disposed) return;
+      ctx.toast(String(e), true);
+    });
 
   return {
     // The Unpair confirm window is the only timer this screen ever owns.
     // Without this, navigating away (back arrow → Status) while armed would
     // leave a stray setTimeout pointed at a detached button — harmless in
-    // practice, but not something a screen should leave running.
+    // practice, but not something a screen should leave running. `disposed`
+    // is what stops every other pending async handler (persist, detect,
+    // pair, unpair, the initial load) from acting on this screen once it's
+    // gone — see the declaration above.
     dispose() {
+      disposed = true;
       clearTimeout(unpairArmTimer);
     },
   };
