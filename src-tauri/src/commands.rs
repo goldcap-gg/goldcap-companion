@@ -131,6 +131,26 @@ pub fn save_config(app: AppHandle, state: State<AppState>, config: Config) -> Re
 fn apply_autostart(app: &AppHandle, state: &State<AppState>, enabled: bool) {
     use tauri_plugin_autostart::ManagerExt;
     let autostart = app.autolaunch();
+
+    // Only act on an actual change. `disable()` deletes the registry value
+    // outright (auto-launch's Windows impl calls `delete_value`), so calling
+    // it when autostart was never enabled fails with "cannot find the file
+    // specified" — every save with the toggle off logged an ERROR for a
+    // no-op, and a real autostart failure would have been indistinguishable
+    // from that noise. Reading the current state first also spares the
+    // registry a write on every save.
+    match autostart.is_enabled() {
+        Ok(current) if current == enabled => return,
+        Ok(_) => {}
+        Err(e) => {
+            // Unreadable state is itself worth knowing about; fall through
+            // and let the enable/disable below report what it hits.
+            state
+                .logger
+                .error(&format!("could not read launch-at-startup state: {e}"));
+        }
+    }
+
     let result = if enabled {
         autostart.enable()
     } else {
