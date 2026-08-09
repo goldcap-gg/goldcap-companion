@@ -14,10 +14,18 @@ const PRESET_INTERVALS = [15, 30, 60];
 // keeps a keystroke in the custom-interval field, or a click on a segment,
 // from throwing focus back to <body> the way a full body.replaceChildren()
 // would.
+// How long the "Unpair — click to confirm" armed state stays live before it
+// reverts on its own.
+const UNPAIR_CONFIRM_MS = 5000;
+
 export function render(el, ctx) {
   el.classList.add("screen-settings", "screen-scroll");
 
   let config = null;
+  // The one timer this screen owns: the Unpair confirm window. Shared across
+  // paintAccount's closures so any rebuild of the Account group (or disposal
+  // of the whole screen) can cancel a pending one — see buildAccount below.
+  let unpairArmTimer = null;
 
   const top = document.createElement("div");
   top.className = "topbar glass topbar-sticky";
@@ -376,6 +384,14 @@ export function render(el, ctx) {
     account.append(accountBody);
 
     paintAccount = (focus = false) => {
+      // Any rebuild — pair, unpair, or the initial paint — cancels a pending
+      // Unpair confirm window. The button it belonged to is about to be torn
+      // down either way; a control that stays armed after the user has
+      // navigated elsewhere (or after the very unpair it was arming for has
+      // already happened) is a trap.
+      clearTimeout(unpairArmTimer);
+      unpairArmTimer = null;
+
       accountBody.replaceChildren();
       const paired = config.companionToken.trim() !== "";
 
@@ -388,12 +404,39 @@ export function render(el, ctx) {
       accountBody.append(state);
 
       if (paired) {
+        // Unpairing is silent and not fully recoverable — the ledger the
+        // addon is holding is capped and WoW rewrites SavedVariables at
+        // logout, so an accidental unpair left unnoticed for long enough
+        // loses real data, not just a setting. No modal exists anywhere in
+        // this design, so the confirm is inline: the button becomes its own
+        // confirmation. The button's visible text IS its accessible name
+        // (no separate aria-label) specifically so the armed state is
+        // announced the same way it's shown — nothing to keep in sync by
+        // hand.
         const drop = document.createElement("button");
         drop.className = "btn";
         drop.type = "button";
         drop.textContent = "Unpair";
-        drop.setAttribute("aria-label", "Unpair from goldcap.gg");
+
+        function disarm() {
+          clearTimeout(unpairArmTimer);
+          unpairArmTimer = null;
+          drop.classList.remove("btn-danger");
+          drop.textContent = "Unpair";
+        }
+
+        drop.addEventListener("blur", disarm);
+
         drop.addEventListener("click", async () => {
+          if (unpairArmTimer === null) {
+            drop.classList.add("btn-danger");
+            drop.textContent = "Unpair — click to confirm";
+            unpairArmTimer = setTimeout(disarm, UNPAIR_CONFIRM_MS);
+            return;
+          }
+
+          clearTimeout(unpairArmTimer);
+          unpairArmTimer = null;
           drop.disabled = true;
           try {
             await ctx.api.unpair();
@@ -403,6 +446,7 @@ export function render(el, ctx) {
           } catch (e) {
             ctx.toast(String(e), true);
             drop.disabled = false;
+            disarm();
           }
         });
         accountBody.append(drop);
@@ -465,5 +509,13 @@ export function render(el, ctx) {
     })
     .catch((e) => ctx.toast(String(e), true));
 
-  return {};
+  return {
+    // The Unpair confirm window is the only timer this screen ever owns.
+    // Without this, navigating away (back arrow → Status) while armed would
+    // leave a stray setTimeout pointed at a detached button — harmless in
+    // practice, but not something a screen should leave running.
+    dispose() {
+      clearTimeout(unpairArmTimer);
+    },
+  };
 }

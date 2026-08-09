@@ -58,9 +58,17 @@
           detectGame: () => delay(f.game ?? { region: "eu", realmNames: [] }),
           resolveRealm: (region, name) =>
             delay({ slug: name.toLowerCase().replace(/\s+/g, "-"), nameEn: name }),
-          pairWithCode: () => delay(),
+          pairWithCode: (code) => {
+            f.config.companionToken = "tok";
+            f.status.paired = true;
+            return delay();
+          },
           isPaired: () => delay(f.status.paired),
-          unpair: () => delay(),
+          unpair: () => {
+            f.config.companionToken = "";
+            f.status.paired = false;
+            return delay();
+          },
           openAccountPage: () => delay(),
         };
       }
