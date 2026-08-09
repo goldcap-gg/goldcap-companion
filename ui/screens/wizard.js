@@ -247,9 +247,16 @@ export function render(el, ctx) {
 
     if (game.region === "eu" || game.region === "us") draft.region = game.region;
     realmNames = game.realmNames ?? [];
-    // No realm names at all is a failure for this purpose even though
-    // detectGame did not throw — the manual-slug fallback lives in Realm.
-    if (realmNames.length === 0) {
+    // Auto-confirming is only honest when the game leaves no room for doubt.
+    // One realm is a fact; several is a guess dressed as one — the list is
+    // ordered by folder mtime, so "most recently played" is the best it can
+    // say, and a wrong guess here is not a nuisance: the config saves and the
+    // sync loop uploads under a realm the player never chose, before they see
+    // the line naming it. None at all is a failure for this purpose too, even
+    // though detectGame did not throw. Realm handles both — it preselects the
+    // newest name, so a player with several pays one click, and the
+    // manual-slug fallback lives there for the empty case.
+    if (realmNames.length !== 1) {
       go(1);
       return;
     }
