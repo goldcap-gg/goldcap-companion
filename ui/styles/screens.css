@@ -305,3 +305,120 @@
 .wizard-nav {
   flex: 0 0 auto;
 }
+
+/* ---------- settings ---------- */
+
+.screen-settings {
+  padding-top: 0;
+}
+
+.topbar-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  margin: 0 -20px;
+  padding: 12px 20px;
+  border-left: none;
+  border-right: none;
+  border-top: none;
+}
+
+.topbar-title {
+  font-size: 15px;
+}
+
+.settings-body {
+  padding-bottom: 8px;
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--border);
+}
+.group:last-child {
+  border-bottom: none;
+}
+
+.group-title {
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--gold);
+}
+
+/* A real (readonly) input standing in for what used to be a plain <span> —
+   see settings.js's fieldBlock for why — stripped back down to that span's
+   original look. Its focus ring still comes for free from app.css's
+   `:focus-visible` rule, since `input` is in that selector list. */
+.path-text {
+  font: inherit;
+  font-size: 13px;
+  color: var(--fg-muted);
+  background: transparent;
+  border: none;
+  padding: 0;
+  min-width: 0;
+  flex: 1 1 auto;
+  cursor: default;
+}
+
+.segments {
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+}
+
+.segment {
+  flex: 1;
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.segment.on {
+  background: var(--gold-soft);
+  color: var(--gold-hi);
+}
+
+.custom-interval {
+  width: 100px;
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.checkbox-row input {
+  accent-color: var(--gold);
+  width: 16px;
+  height: 16px;
+}
+
+.account-state {
+  margin: 0;
+  font-size: 13px;
+}
+
+/* Focused programmatically after a pair/unpair rebuild (see paintAccount in
+   settings.js) so a screen reader announces the new state — never reachable
+   by Tab itself, so this only ever suppresses the plain-focus ring on that
+   one programmatic case, same idiom as .wizard-head h1:focus above. */
+.account-state:focus {
+  outline: none;
+  box-shadow: none;
+}
