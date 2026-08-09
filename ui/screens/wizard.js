@@ -97,6 +97,22 @@ export function render(el, ctx) {
   });
   confirm.append(confirmHead, confirmSub, change);
 
+  // What the placeholder line says while detect() is still working. One
+  // label for the whole probe would be a lie for most of its duration: the
+  // install is usually found in the first moment, and everything after that
+  // is reading the game's files and asking the site to resolve a realm name.
+  // When a step does stall, the visible text is what says which one — the
+  // alternative is an owner reconstructing it from memory afterwards.
+  const PROBE_INSTALL = "Looking for World of Warcraft…";
+  const PROBE_FILES = "Reading the game's own files…";
+  const PROBE_REALM = "Working out your realm…";
+  let probeLine = PROBE_INSTALL;
+
+  function setProbe(line) {
+    probeLine = line;
+    paintConfirm();
+  }
+
   // Reflects `draft` onto the confirmation card. "Ready" is exactly the
   // condition that lets a config be saved (both path and slug present) —
   // before that it renders as the quiet placeholder line instead, with no
@@ -110,7 +126,7 @@ export function render(el, ctx) {
     confirmLine.classList.toggle("muted", !ready);
     confirmLine.textContent = ready
       ? `${draft.realmSlug} · ${draft.region.toUpperCase()}`
-      : "Looking for World of Warcraft…";
+      : probeLine;
     confirmSub.textContent = ready ? "Prices are already on their way to your addon." : "";
   }
 
@@ -191,7 +207,10 @@ export function render(el, ctx) {
   async function detect() {
     confirm.hidden = false;
     confirm.focus();
-    paintConfirm();
+    // Reset, not just repaint: detect() re-runs when the user comes back
+    // through "change", and a stale label from the last pass would name a
+    // step this one has not reached.
+    setProbe(PROBE_INSTALL);
 
     const gen = ++requestGen;
 
@@ -236,6 +255,7 @@ export function render(el, ctx) {
       return;
     }
     draft.wowRetailPath = path;
+    setProbe(PROBE_FILES);
 
     let game;
     try {
@@ -260,6 +280,8 @@ export function render(el, ctx) {
       go(1);
       return;
     }
+
+    setProbe(PROBE_REALM);
 
     try {
       const r = await ctx.api.resolveRealm(draft.region, realmNames[0]);
