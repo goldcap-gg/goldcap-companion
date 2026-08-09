@@ -87,17 +87,8 @@ pub async fn resolve_realm(region: String, name: String) -> Result<ResolvedRealm
     }
 }
 
-#[tauri::command]
-pub fn get_status_label(state: State<AppState>) -> String {
-    state
-        .status
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .label()
-}
-
-/// The whole pipeline as data, for the Status screen. `get_status_label` is
-/// kept alongside it because the tray menu still renders a single line.
+/// The whole pipeline as data, for the Status screen. The tray menu renders
+/// its own single line straight from `SyncStatus::label`.
 #[tauri::command]
 pub fn get_status(state: State<AppState>) -> crate::status::StatusSnapshot {
     let config = state

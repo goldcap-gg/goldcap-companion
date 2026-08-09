@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capabilities for the settings window — the app is otherwise tray-only with no auto-created windows.",
-  "windows": ["settings"],
+  "description": "Capabilities for the main window — the app is otherwise tray-only with no auto-created windows.",
+  "windows": ["main"],
   "permissions": [
     "core:default",
     "core:window:allow-close",

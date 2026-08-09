@@ -63,27 +63,26 @@ fn on_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
             let state: State<AppState> = app.state();
             let _ = state.trigger_tx.try_send(());
         }
-        SETTINGS_ITEM_ID => open_settings_window(app),
+        SETTINGS_ITEM_ID => open_main_window(app),
         QUIT_ITEM_ID => app.exit(0),
         _ => {}
     }
 }
 
-/// Opens the Settings window, or focuses it if it's already open.
-pub fn open_settings_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("settings") {
+/// Opens the app window, or focuses it if it's already open.
+pub fn open_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.set_focus();
         return;
     }
-    let result =
-        WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings.html".into()))
-            .title("GoldCap Companion — Settings")
-            .inner_size(460.0, 640.0)
-            .resizable(false)
-            .build();
+    let result = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+        .title("GoldCap Companion")
+        .inner_size(480.0, 660.0)
+        .resizable(false)
+        .build();
     if let Err(e) = result {
-        eprintln!("companion: failed to open settings window: {e}");
+        eprintln!("companion: failed to open the companion window: {e}");
     }
 }
 

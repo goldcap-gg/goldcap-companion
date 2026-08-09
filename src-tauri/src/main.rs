@@ -32,7 +32,6 @@ fn main() {
             commands::get_config,
             commands::save_config,
             commands::sync_now,
-            commands::get_status_label,
             commands::get_status,
             commands::detect_wow_path,
             commands::pick_wow_path,
@@ -52,6 +51,7 @@ fn main() {
 
             let logger = Arc::new(logging::Logger::new(&config_dir)?);
             let initial_config = Config::load_or_init(&config_path)?;
+            let config_for_first_run = initial_config.clone();
             logger.info("companion starting");
 
             let (config_tx, config_rx) = watch::channel(initial_config.clone());
@@ -103,6 +103,12 @@ fn main() {
                     tray::refresh(&cosmetic_refresh_handle);
                 }
             });
+
+            // A tray-only app has nowhere to put a first-run wizard: without
+            // this, a brand-new install shows an icon and nothing else.
+            if !config_for_first_run.is_complete() {
+                tray::open_main_window(&handle);
+            }
 
             Ok(())
         })
