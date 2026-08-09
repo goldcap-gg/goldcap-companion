@@ -28,6 +28,21 @@ export function render(el, ctx) {
   // until it has — a pure-detection run never sees it at all.
   let enteredStepped = false;
 
+  // Set by the "change" button right before it calls go(1) directly,
+  // skipping Game — read and cleared by stepRealm() itself the instant it
+  // starts running (see below), so it can never leak into a later, ordinary
+  // Game → Realm visit. Only ever true for the one Realm instance it was
+  // set for.
+  let realmEnteredFromConnect = false;
+
+  // The draft as of the last successful saveConfig — i.e. what Connect is
+  // actually showing and what the sync loop is actually using. Only written
+  // right after a save succeeds (detect()'s success path, and Realm's Next
+  // handler below). Realm's Back button, when it returns straight to
+  // Connect, restores this before showing it — a pick the user backed out
+  // of without confirming via Next must not appear as if it had been.
+  let savedDraft = null;
+
   const progress = document.createElement("div");
   progress.className = "progress";
   progress.hidden = true;
@@ -60,7 +75,20 @@ export function render(el, ctx) {
   change.className = "link connect-change";
   change.type = "button";
   change.textContent = "change";
-  change.addEventListener("click", () => go(0));
+  // "change" is only ever offered once the path resolved (paintConfirm
+  // hides it otherwise), so a wrong realm is by far the common reason to
+  // click it — walking through Game first would ask the user to confirm a
+  // path that was never in question. Skip straight to Realm whenever the
+  // path is already usable, using the exact condition Game's own Next uses
+  // to enable itself; only fall back to Game when the path itself needs
+  // fixing. stepRealm() reads and immediately clears
+  // realmEnteredFromConnect (see below) so its own Back button knows which
+  // screen it left.
+  change.addEventListener("click", () => {
+    const skipGame = draft.wowRetailPath.trim() !== "";
+    realmEnteredFromConnect = skipGame;
+    go(skipGame ? 1 : 0);
+  });
   confirm.append(confirmHead, confirmSub, change);
 
   // Reflects `draft` onto the confirmation card. "Ready" is exactly the
@@ -223,6 +251,7 @@ export function render(el, ctx) {
     }
     if (gen !== requestGen) return;
 
+    savedDraft = { ...draft };
     go(2);
   }
 
@@ -304,6 +333,14 @@ export function render(el, ctx) {
   async function stepRealm() {
     setHead("Pick your realm", "Read out of the game's own files.");
     bodyEl.replaceChildren();
+
+    // Captured once, immediately, so this instance's own Back button knows
+    // where it should go — and so the flag can never carry over into some
+    // later, unrelated entry into this step (a normal Game → Next visit
+    // never sets it, so it is already false by the time that happens; this
+    // reset just makes it impossible to get that ordering wrong).
+    const enteredFromConnect = realmEnteredFromConnect;
+    realmEnteredFromConnect = false;
 
     const regionLabel = document.createElement("label");
     regionLabel.className = "label";
@@ -426,7 +463,23 @@ export function render(el, ctx) {
     });
     back.addEventListener("click", () => {
       realmRequest++;
-      go(0);
+      // A normal Game → Realm visit goes back to Game, same as always. But
+      // when "change" skipped Game entirely because the path didn't need
+      // fixing, Game was never part of this trip — sending Back there would
+      // strand the user on a step with no Back button of its own (Game only
+      // ever had a Next), one hop further from Connect than where they
+      // started. Returning to Connect instead keeps Back a way out of
+      // whatever screen the user is actually looking at, in every case.
+      if (enteredFromConnect) {
+        // Whatever was picked on this screen was never confirmed via Next —
+        // Back cancels it. Restore the last actually-saved values first, so
+        // Connect shows (and syncNow uses) what is really persisted rather
+        // than a pick the user backed out of.
+        if (savedDraft) Object.assign(draft, savedDraft);
+        go(2);
+      } else {
+        go(0);
+      }
     });
     next.addEventListener("click", async () => {
       try {
@@ -435,6 +488,7 @@ export function render(el, ctx) {
         ctx.toast(String(e), true);
         return;
       }
+      savedDraft = { ...draft };
       realmRequest++;
       go(2);
     });

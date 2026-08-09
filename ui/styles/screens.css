@@ -179,6 +179,14 @@
   gap: 6px;
   flex: 0 0 auto;
 }
+/* Same [hidden]-vs-display conflict as .connect-confirm below: an author
+   rule that sets `display` beats the UA stylesheet's `[hidden] { display:
+   none }`, origin always outranking specificity/order, so without this the
+   bar stayed a visible (if empty-looking) flex row whenever progress.hidden
+   was set from wizard.js. */
+.progress[hidden] {
+  display: none;
+}
 
 .progress-seg {
   height: 3px;
