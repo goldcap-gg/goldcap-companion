@@ -11,6 +11,7 @@ mod state;
 mod status;
 mod sync;
 mod tray;
+mod updater;
 mod upload;
 mod wtf;
 
