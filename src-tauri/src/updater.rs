@@ -84,13 +84,18 @@ async fn check_once(app: &AppHandle, logger: &Logger) -> tauri_plugin_updater::R
     let state = app.state::<UpdaterState>();
 
     // Something is already staged: don't download again, just keep the
-    // tray offer visible.
-    {
+    // tray offer visible. The guard must be dropped before touching the
+    // menu — show_update_item blocks on the main thread, and the main
+    // thread's menu handler (apply_staged) takes this same mutex, so
+    // calling it while still holding the guard is a lock-order inversion
+    // that can deadlock (same pattern as tray::refresh).
+    let staged_label = {
         let staged = state.staged.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(s) = staged.as_ref() {
-            tray::show_update_item(app, &tray_label(s.kind(), s.version()));
-            return Ok(());
-        }
+        staged.as_ref().map(|s| tray_label(s.kind(), s.version()))
+    };
+    if let Some(label) = staged_label {
+        tray::show_update_item(app, &label);
+        return Ok(());
     }
 
     let Some(update) = app.updater()?.check().await? else {
@@ -102,8 +107,14 @@ async fn check_once(app: &AppHandle, logger: &Logger) -> tauri_plugin_updater::R
 
     #[cfg(not(windows))]
     let staged = {
-        // macOS: extract over the .app now; takes effect on relaunch.
-        update.install(bytes)?;
+        // macOS: extract over the .app now; takes effect on relaunch. Log
+        // an install failure distinctly from a check failure (the `?` in
+        // `check()` above vs. here) so the two are diagnosable apart; this
+        // is log-only, and returning Ok(()) lets the next tick retry.
+        if let Err(e) = update.install(bytes) {
+            logger.error(&format!("update install failed: {e}"));
+            return Ok(());
+        }
         logger.info(&format!("update v{version} installed, restart to apply"));
         Staged::Installed { version }
     };
@@ -132,11 +143,15 @@ pub fn apply_staged(app: &AppHandle) {
     match staged {
         None => {}
         Some(Staged::Installed { .. }) => app.restart(),
-        Some(Staged::Pending { update, bytes, .. }) => {
-            // NSIS terminates this process and relaunches after install.
-            if let Err(e) = update.install(bytes) {
+        Some(Staged::Pending { version, update, bytes }) => {
+            // On success the installer exits this process, so this arm only
+            // continues on failure — put the update back so the tray item
+            // keeps working instead of becoming a silent no-op.
+            if let Err(e) = update.install(&bytes) {
                 let logger = app.state::<crate::state::AppState>().logger.clone();
                 logger.error(&format!("update install failed: {e}"));
+                *state.staged.lock().unwrap_or_else(|p| p.into_inner()) =
+                    Some(Staged::Pending { version, update, bytes });
             }
         }
     }
@@ -159,6 +174,20 @@ mod tests {
         assert_eq!(
             tray_label(StagedKind::Pending, "1.3.0"),
             "Install update v1.3.0 and restart"
+        );
+    }
+
+    // Composition check: `Staged::kind()`/`version()` feeding `tray_label`
+    // must agree with the label the Installed variant should actually show
+    // — catches a swapped kind() match arm that the two label-only tests
+    // above can't. `Pending` holds a real `Update` object and isn't
+    // constructible in a unit test, so only `Installed` is covered here.
+    #[test]
+    fn installed_staged_composes_into_restart_label() {
+        let staged = Staged::Installed { version: "1.3.0".into() };
+        assert_eq!(
+            tray_label(staged.kind(), staged.version()),
+            "Restart to update to v1.3.0"
         );
     }
 }

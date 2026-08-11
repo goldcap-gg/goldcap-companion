@@ -83,6 +83,9 @@ fn main() {
             app.manage(tray_handles);
             app.manage(updater::UpdaterState::default());
 
+            // Cloned now, before `logger` itself is moved into the sync
+            // loop's spawn below — the updater loop's spawn further down
+            // needs its own owned handle.
             let updater_logger = logger.clone();
 
             let client = sync::build_client();
