@@ -79,6 +79,15 @@ fn main() {
 
             let tray_handles = tray::build(&handle)?;
 
+            // Instant sync: fire the normal sync pipeline seconds after WoW
+            // writes SavedVariables (logout//reload) instead of waiting for
+            // the interval poll. The interval stays as the fallback.
+            tauri::async_runtime::spawn(watcher::run_loop(
+                config_tx.subscribe(),
+                trigger_tx.clone(),
+                logger.clone(),
+            ));
+
             app.manage(AppState {
                 config: Mutex::new(initial_config),
                 config_path,
