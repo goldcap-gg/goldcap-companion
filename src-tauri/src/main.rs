@@ -12,6 +12,7 @@ mod state;
 mod status;
 mod sync;
 mod tray;
+mod updater;
 mod upload;
 mod wtf;
 
@@ -29,6 +30,7 @@ fn main() {
         ))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             commands::get_config,
             commands::save_config,
@@ -87,6 +89,12 @@ fn main() {
                 config_tx,
             });
             app.manage(tray_handles);
+            app.manage(updater::UpdaterState::default());
+
+            // Cloned now, before `logger` itself is moved into the sync
+            // loop's spawn below — the updater loop's spawn further down
+            // needs its own owned handle.
+            let updater_logger = logger.clone();
 
             let client = sync::build_client();
             let sync_refresh_handle = handle.clone();
@@ -110,6 +118,13 @@ fn main() {
                     tray::refresh(&cosmetic_refresh_handle);
                 }
             });
+
+            // Silent auto-update: check shortly after startup, then every
+            // few hours; the tray offers the restart when one is staged.
+            tauri::async_runtime::spawn(updater::run_loop(
+                handle.clone(),
+                updater_logger,
+            ));
 
             // A tray-only app has nowhere to put a first-run wizard: without
             // this, a brand-new install shows an icon and nothing else.
