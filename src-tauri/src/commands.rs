@@ -119,52 +119,13 @@ pub fn save_config(app: AppHandle, state: State<AppState>, config: Config) -> Re
     config
         .save_to(&state.config_path)
         .map_err(|e| e.to_string())?;
-    apply_autostart(&app, &state, config.launch_at_startup);
+    crate::autostart::apply(&app, &state.logger, config.launch_at_startup);
 
     *state.config.lock().unwrap_or_else(|p| p.into_inner()) = config.clone();
     let _ = state.config_tx.send(config);
     state.logger.info("config saved");
     Ok(())
 }
-
-#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
-fn apply_autostart(app: &AppHandle, state: &State<AppState>, enabled: bool) {
-    use tauri_plugin_autostart::ManagerExt;
-    let autostart = app.autolaunch();
-
-    // Only act on an actual change. `disable()` deletes the registry value
-    // outright (auto-launch's Windows impl calls `delete_value`), so calling
-    // it when autostart was never enabled fails with "cannot find the file
-    // specified" — every save with the toggle off logged an ERROR for a
-    // no-op, and a real autostart failure would have been indistinguishable
-    // from that noise. Reading the current state first also spares the
-    // registry a write on every save.
-    match autostart.is_enabled() {
-        Ok(current) if current == enabled => return,
-        Ok(_) => {}
-        Err(e) => {
-            // Unreadable state is itself worth knowing about; fall through
-            // and let the enable/disable below report what it hits.
-            state
-                .logger
-                .error(&format!("could not read launch-at-startup state: {e}"));
-        }
-    }
-
-    let result = if enabled {
-        autostart.enable()
-    } else {
-        autostart.disable()
-    };
-    if let Err(e) = result {
-        state
-            .logger
-            .error(&format!("failed to update launch-at-startup: {e}"));
-    }
-}
-
-#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
-fn apply_autostart(_app: &AppHandle, _state: &State<AppState>, _enabled: bool) {}
 
 /// Trades a pairing code from goldcap.gg/account for a long-lived upload
 /// token and stores it in the config. Reuses save_config so the running sync

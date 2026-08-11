@@ -1,6 +1,7 @@
 // Tray-only companion app: no console window on Windows release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod autostart;
 mod commands;
 mod config;
 mod health;
@@ -52,6 +53,13 @@ fn main() {
             let initial_config = Config::load_or_init(&config_path)?;
             let config_for_first_run = initial_config.clone();
             logger.info("companion starting");
+
+            // Registers (or unregisters) the OS-level login item on every
+            // start, not just after a Settings save — a fresh install's
+            // default config already says `launchAtStartup: true`, and
+            // without this it would never actually be registered until the
+            // user happened to open Settings and hit save once.
+            autostart::apply(&handle, &logger, initial_config.launch_at_startup);
 
             let (config_tx, config_rx) = watch::channel(initial_config.clone());
             let (trigger_tx, trigger_rx) = mpsc::channel::<()>(4);

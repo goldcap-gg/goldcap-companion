@@ -43,6 +43,10 @@ fn default_interval_minutes() -> u32 {
     30
 }
 
+fn default_launch_at_startup() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
@@ -54,7 +58,13 @@ pub struct Config {
     pub wow_retail_path: String,
     #[serde(default = "default_interval_minutes")]
     pub interval_minutes: u32,
-    #[serde(default)]
+    /// Defaults to on: most players want the companion syncing in the
+    /// background without remembering to launch it, and it's a single
+    /// checkbox away in Settings for anyone who doesn't. Only affects
+    /// brand-new configs — `#[serde(default)]` only fills this in when the
+    /// key is absent from the file, so an existing install's persisted
+    /// choice (explicit or not) is never silently flipped by an update.
+    #[serde(default = "default_launch_at_startup")]
     pub launch_at_startup: bool,
     /// Long-lived upload token from pairing with goldcap.gg. Empty until the
     /// player pairs; an empty token disables upload entirely rather than
@@ -70,7 +80,7 @@ impl Default for Config {
             realm_slug: String::new(),
             wow_retail_path: String::new(),
             interval_minutes: default_interval_minutes(),
-            launch_at_startup: false,
+            launch_at_startup: default_launch_at_startup(),
             companion_token: String::new(),
         }
     }
@@ -231,7 +241,7 @@ mod tests {
         assert_eq!(cfg.realm_slug, "");
         assert_eq!(cfg.wow_retail_path, "");
         assert_eq!(cfg.interval_minutes, 30);
-        assert!(!cfg.launch_at_startup);
+        assert!(cfg.launch_at_startup);
     }
 
     #[test]
@@ -269,7 +279,7 @@ mod tests {
         assert!(json.contains("\"realmSlug\":\"dentarg\""));
         assert!(json.contains("\"wowRetailPath\""));
         assert!(json.contains("\"intervalMinutes\":30"));
-        assert!(json.contains("\"launchAtStartup\":false"));
+        assert!(json.contains("\"launchAtStartup\":true"));
         assert!(json.contains("\"companionToken\":\"\""));
     }
 
