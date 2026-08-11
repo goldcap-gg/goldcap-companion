@@ -70,7 +70,7 @@ pub async fn run_loop(
 ) {
     loop {
         let wow_path = config_rx.borrow().wow_retail_path.trim().to_string();
-        let (event_tx, mut event_rx) = mpsc::unbounded_channel::<()>();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel::<PathBuf>();
 
         // Held for its Drop: dropping the watcher (on config change) stops
         // the notify thread watching the old path.
@@ -91,15 +91,27 @@ pub async fn run_loop(
                 .fire_at()
                 .unwrap_or_else(|| Instant::now() + Duration::from_secs(3600));
             tokio::select! {
+                // Both senders drop together at shutdown, so config_rx.changed()
+                // and event_rx.recv() can both be ready at once; unbiased select
+                // would coin-flip between exiting and a useless rebuild pass.
+                // Biased order (config change, then events, then the timer)
+                // makes shutdown deterministic.
+                biased;
                 changed = config_rx.changed() => {
                     if changed.is_err() {
                         return; // config sender dropped — app shutting down
+                    }
+                    let new_path = config_rx.borrow().wow_retail_path.trim().to_string();
+                    if new_path == wow_path {
+                        // A settings save that didn't touch the WoW path must
+                        // not tear down the watcher or discard a pending debounce.
+                        continue;
                     }
                     break; // rebuild the watcher against the (new) path
                 }
                 received = event_rx.recv() => {
                     match received {
-                        Some(()) => debounce.on_event(Instant::now()),
+                        Some(_) => debounce.on_event(Instant::now()),
                         None => {
                             // notify thread died; interval remains as
                             // fallback. Park until the config changes.
@@ -123,13 +135,13 @@ pub async fn run_loop(
 /// notify's own thread, so the async side only ever sees relevant events.
 fn build_watcher(
     account_root: PathBuf,
-    event_tx: mpsc::UnboundedSender<()>,
+    event_tx: mpsc::UnboundedSender<PathBuf>,
     logger: &Logger,
 ) -> Option<RecommendedWatcher> {
     let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if let Ok(event) = res {
-            if event.paths.iter().any(|p| is_goldcap_savedvars(p)) {
-                let _ = event_tx.send(());
+            for p in event.paths.iter().filter(|p| is_goldcap_savedvars(p)) {
+                let _ = event_tx.send(p.clone());
             }
         }
     });
@@ -210,14 +222,37 @@ mod tests {
         let logger = crate::logging::Logger::new(&logger_dir).unwrap();
 
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let _w = build_watcher(dir.join("Account"), tx, &logger)
+        let w = build_watcher(dir.join("Account"), tx, &logger)
             .expect("watcher should start on an existing dir");
 
+        // TSM.lua first: notify delivers events in order, so if the filter
+        // let non-GoldCap writes through, TSM.lua's event would be the one
+        // this recv sees (it would be ordered ahead of GoldCap.lua's).
+        std::fs::write(sv.join("TSM.lua"), "TSM_DB = {}").unwrap();
         std::fs::write(sv.join("GoldCap.lua"), "GOLDCAP_DB = {}").unwrap();
 
         let got = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await;
-        assert!(got.is_ok(), "no event within 10s for a GoldCap.lua write");
 
+        // Release the watch handle and clean up before asserting, so cleanup
+        // still runs on assertion failure and the dir handle is free
+        // (Windows holds it open while notify is watching).
+        drop(w);
         std::fs::remove_dir_all(&dir).ok();
+
+        assert!(got.is_ok(), "no event within 10s for a GoldCap.lua write");
+        let mut paths: Vec<PathBuf> = vec![got.unwrap().expect("channel closed unexpectedly")];
+        // Extra GoldCap.lua events (e.g. a create+modify pair) are legitimate
+        // and tolerated; a TSM.lua path is not — that would mean the filter
+        // let it through.
+        while let Ok(p) = rx.try_recv() {
+            paths.push(p);
+        }
+        for p in &paths {
+            assert!(
+                p.file_name().is_some_and(|f| f == "GoldCap.lua"),
+                "filter let a non-GoldCap path through: {}",
+                p.display()
+            );
+        }
     }
 }
