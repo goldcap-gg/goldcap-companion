@@ -14,12 +14,16 @@ const STATUS_ITEM_ID: &str = "status";
 const SYNC_NOW_ITEM_ID: &str = "sync_now";
 const SETTINGS_ITEM_ID: &str = "settings";
 const QUIT_ITEM_ID: &str = "quit";
+const UPDATE_ITEM_ID: &str = "apply_update";
 
 /// Handles kept around so `refresh` can update the tray without re-querying
 /// the menu tree every time.
 pub struct TrayHandles {
     pub tray: TrayIcon,
     pub status_item: MenuItem<tauri::Wry>,
+    pub menu: Menu<tauri::Wry>,
+    /// Not in the menu until an update is staged; see `show_update_item`.
+    pub update_item: MenuItem<tauri::Wry>,
 }
 
 pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
@@ -29,6 +33,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
     let settings_item =
         MenuItem::with_id(app, SETTINGS_ITEM_ID, "Open Companion…", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, QUIT_ITEM_ID, "Quit", true, None::<&str>)?;
+    let update_item = MenuItem::with_id(app, UPDATE_ITEM_ID, "", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
 
     let menu = Menu::with_items(
@@ -55,7 +60,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
 
     let tray = builder.build(app)?;
 
-    Ok(TrayHandles { tray, status_item })
+    Ok(TrayHandles { tray, status_item, menu, update_item })
 }
 
 fn on_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
@@ -66,6 +71,7 @@ fn on_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
         }
         SETTINGS_ITEM_ID => open_main_window(app),
         QUIT_ITEM_ID => app.exit(0),
+        UPDATE_ITEM_ID => crate::updater::apply_staged(app),
         _ => {}
     }
 }
@@ -101,4 +107,13 @@ pub fn refresh(app: &AppHandle) {
     let _ = handles
         .tray
         .set_tooltip(Some(format!("GoldCap Companion — {label}")));
+}
+
+/// Shows (or re-labels) the update entry, right below the status line.
+/// Remove-then-insert keeps repeated calls from duplicating the item.
+pub fn show_update_item(app: &AppHandle, label: &str) {
+    let handles: State<TrayHandles> = app.state();
+    let _ = handles.update_item.set_text(label);
+    let _ = handles.menu.remove(&handles.update_item);
+    let _ = handles.menu.insert(&handles.update_item, 1);
 }

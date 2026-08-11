@@ -81,6 +81,9 @@ fn main() {
                 config_tx,
             });
             app.manage(tray_handles);
+            app.manage(updater::UpdaterState::default());
+
+            let updater_logger = logger.clone();
 
             let client = sync::build_client();
             let sync_refresh_handle = handle.clone();
@@ -104,6 +107,13 @@ fn main() {
                     tray::refresh(&cosmetic_refresh_handle);
                 }
             });
+
+            // Silent auto-update: check shortly after startup, then every
+            // few hours; the tray offers the restart when one is staged.
+            tauri::async_runtime::spawn(updater::run_loop(
+                handle.clone(),
+                updater_logger,
+            ));
 
             // A tray-only app has nowhere to put a first-run wizard: without
             // this, a brand-new install shows an icon and nothing else.
