@@ -13,6 +13,7 @@ mod status;
 mod sync;
 mod tray;
 mod upload;
+mod watcher;
 mod wtf;
 
 use config::Config;
