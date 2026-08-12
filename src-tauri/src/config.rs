@@ -235,6 +235,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cargo_and_tauri_versions_match_the_1_5_release() {
+        let tauri: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+
+        assert_eq!(env!("CARGO_PKG_VERSION"), "1.5.0");
+        assert_eq!(tauri["version"].as_str(), Some(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
     fn default_config_has_expected_values() {
         let cfg = Config::default();
         assert_eq!(cfg.region, Region::Eu);
