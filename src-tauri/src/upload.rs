@@ -363,6 +363,13 @@ mod tests {
             at: 1_785_600_000,
             character: Some("Testchar-Dentarg".into()),
             region: Some("eu".into()),
+            decision_version: None,
+            decision_status: None,
+            decision_reasons: None,
+            stress_unit: None,
+            expected_profit: None,
+            recommended_quantity: None,
+            source_at: None,
         }
     }
 

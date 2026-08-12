@@ -30,6 +30,20 @@ pub struct LedgerEntry {
     pub character: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
+    #[serde(rename = "decisionVersion", skip_serializing_if = "Option::is_none")]
+    pub decision_version: Option<i64>,
+    #[serde(rename = "decisionStatus", skip_serializing_if = "Option::is_none")]
+    pub decision_status: Option<String>,
+    #[serde(rename = "decisionReasons", skip_serializing_if = "Option::is_none")]
+    pub decision_reasons: Option<Vec<String>>,
+    #[serde(rename = "stressUnit", skip_serializing_if = "Option::is_none")]
+    pub stress_unit: Option<i64>,
+    #[serde(rename = "expectedProfit", skip_serializing_if = "Option::is_none")]
+    pub expected_profit: Option<i64>,
+    #[serde(rename = "recommendedQuantity", skip_serializing_if = "Option::is_none")]
+    pub recommended_quantity: Option<i64>,
+    #[serde(rename = "sourceAt", skip_serializing_if = "Option::is_none")]
+    pub source_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -82,6 +96,20 @@ fn flag(t: &Table, key: &str) -> bool {
     matches!(t.get::<Value>(key), Ok(Value::Boolean(true)))
 }
 
+fn opt_string_sequence(t: &Table, key: &str) -> Option<Vec<String>> {
+    let Ok(Value::Table(values)) = t.get::<Value>(key) else {
+        return None;
+    };
+
+    values
+        .sequence_values::<Value>()
+        .map(|value| match value {
+            Ok(Value::String(value)) => value.to_str().ok().map(|value| value.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Evaluates the file in a VM with NO standard library, so the "code" in it can
 /// only build tables — it cannot open a file, spawn a process or reach the
 /// network even if a hostile file tried.
@@ -125,6 +153,13 @@ pub fn parse_saved_variables(lua_source: &str) -> Result<LedgerData, String> {
                 at,
                 character: opt_string(&row, "char"),
                 region: opt_string(&row, "region"),
+                decision_version: opt_int(&row, "decisionVersion"),
+                decision_status: opt_string(&row, "decisionStatus"),
+                decision_reasons: opt_string_sequence(&row, "decisionReasons"),
+                stress_unit: opt_int(&row, "stressUnit"),
+                expected_profit: opt_int(&row, "expectedProfit"),
+                recommended_quantity: opt_int(&row, "recommendedQuantity"),
+                source_at: opt_int(&row, "sourceAt"),
             });
         }
     }
@@ -234,6 +269,84 @@ mod tests {
         // Absent optional fields must not serialise as nulls — the API treats
         // an explicit null differently from a missing key.
         assert!(json.get("mv").is_none());
+    }
+
+    #[test]
+    fn a_sniper_decision_preserves_the_exact_total_and_optional_evidence_on_the_wire() {
+        let src = r#"
+GoldCapDB = { ["ledger"] = {
+    {
+        ["key"] = "sniper-evidence", ["kind"] = "buy", ["source"] = "goldcap_sniper",
+        ["itemID"] = 210930, ["qty"] = 2, ["total"] = 4321, ["at"] = 1785600000,
+        ["decisionVersion"] = 2, ["decisionStatus"] = "WATCH",
+        ["decisionReasons"] = { "roi_thin", "supply_tight" },
+        ["stressUnit"] = 12500, ["expectedProfit"] = 85000,
+        ["recommendedQuantity"] = 3, ["sourceAt"] = 1785600100,
+    },
+} }
+"#;
+
+        let data = parse_saved_variables(src).unwrap();
+        assert_eq!(data.entries.len(), 1);
+        let entry = &data.entries[0];
+        assert_eq!(entry.total, 4321, "the quoted purchase total must remain exact");
+        let json = serde_json::to_value(entry).unwrap();
+
+        assert_eq!(json["decisionVersion"], 2);
+        assert_eq!(json["decisionStatus"], "WATCH");
+        assert_eq!(json["decisionReasons"], serde_json::json!(["roi_thin", "supply_tight"]));
+        assert_eq!(json["stressUnit"], 12500);
+        assert_eq!(json["expectedProfit"], 85000);
+        assert_eq!(json["recommendedQuantity"], 3);
+        assert_eq!(json["sourceAt"], 1785600100);
+    }
+
+    #[test]
+    fn an_invalid_decision_reason_element_omits_only_that_optional_array() {
+        let src = r#"
+GoldCapDB = { ["ledger"] = {
+    {
+        ["key"] = "bad-reason", ["kind"] = "buy", ["source"] = "goldcap_sniper",
+        ["qty"] = 1, ["total"] = 99, ["at"] = 1785600000,
+        ["decisionVersion"] = 1, ["decisionStatus"] = "SAFE",
+        ["decisionReasons"] = { "roi_above_floor", 42 },
+        ["stressUnit"] = 50, ["expectedProfit"] = 75,
+        ["recommendedQuantity"] = 1, ["sourceAt"] = 1785600000,
+    },
+} }
+"#;
+
+        let data = parse_saved_variables(src).unwrap();
+        assert_eq!(data.entries.len(), 1, "bad optional evidence must not discard the ledger row");
+        let json = serde_json::to_value(&data.entries[0]).unwrap();
+        assert_eq!(json["decisionVersion"], 1);
+        assert!(json.get("decisionReasons").is_none());
+    }
+
+    #[test]
+    fn a_legacy_entry_serializes_without_decision_evidence_keys() {
+        let src = r#"
+GoldCapDB = { ["ledger"] = {
+    { ["key"] = "legacy", ["kind"] = "sale", ["source"] = "mail", ["qty"] = 1, ["total"] = 17, ["at"] = 1785600000 },
+} }
+"#;
+
+        let data = parse_saved_variables(src).unwrap();
+        assert_eq!(data.entries.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&data.entries[0]).unwrap(),
+            serde_json::json!({
+                "key": "legacy",
+                "kind": "sale",
+                "source": "mail",
+                "qty": 1,
+                "total": 17,
+                "cut": 0,
+                "deposit": 0,
+                "pending": false,
+                "at": 1785600000,
+            }),
+        );
     }
 
     #[test]
