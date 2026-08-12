@@ -46,6 +46,16 @@ pub struct LedgerEntry {
     pub source_at: Option<i64>,
 }
 
+struct DecisionEvidence {
+    decision_version: i64,
+    decision_status: String,
+    decision_reasons: Vec<String>,
+    stress_unit: i64,
+    expected_profit: i64,
+    recommended_quantity: i64,
+    source_at: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct GoldPoint {
     #[serde(rename = "char")]
@@ -92,6 +102,21 @@ fn opt_int(t: &Table, key: &str) -> Option<i64> {
     }
 }
 
+fn opt_exact_int(t: &Table, key: &str) -> Option<i64> {
+    match t.get::<Value>(key) {
+        Ok(Value::Integer(i)) => Some(i),
+        Ok(Value::Number(n))
+            if n.is_finite()
+                && n.fract() == 0.0
+                && n > i64::MIN as f64
+                && n < i64::MAX as f64 =>
+        {
+            Some(n as i64)
+        }
+        _ => None,
+    }
+}
+
 fn flag(t: &Table, key: &str) -> bool {
     matches!(t.get::<Value>(key), Ok(Value::Boolean(true)))
 }
@@ -108,6 +133,44 @@ fn opt_string_sequence(t: &Table, key: &str) -> Option<Vec<String>> {
             _ => None,
         })
         .collect()
+}
+
+// The upload API accepts decision evidence only as a complete seven-field
+// group. A legacy row has no evidence, but a partial group would reject the
+// whole batch, so any absent or malformed member makes this group absent.
+fn decision_evidence(t: &Table) -> Option<DecisionEvidence> {
+    const MAX_COPPER: i64 = 1_000_000_000_000_000;
+    let decision_version = opt_exact_int(t, "decisionVersion")?;
+    let decision_status = opt_string(t, "decisionStatus")?;
+    let decision_reasons = opt_string_sequence(t, "decisionReasons")?;
+    let stress_unit = opt_exact_int(t, "stressUnit")?;
+    let expected_profit = opt_exact_int(t, "expectedProfit")?;
+    let recommended_quantity = opt_exact_int(t, "recommendedQuantity")?;
+    let source_at = opt_exact_int(t, "sourceAt")?;
+
+    if !(1..=32_767).contains(&decision_version)
+        || !matches!(decision_status.as_str(), "SAFE" | "WATCH" | "AVOID")
+        || decision_reasons.len() > 32
+        || decision_reasons
+            .iter()
+            .any(|reason| reason.is_empty() || reason.encode_utf16().count() > 64)
+        || !(0..=MAX_COPPER).contains(&stress_unit)
+        || !(0..=MAX_COPPER).contains(&expected_profit)
+        || recommended_quantity <= 0
+        || source_at <= 0
+    {
+        return None;
+    }
+
+    Some(DecisionEvidence {
+        decision_version,
+        decision_status,
+        decision_reasons,
+        stress_unit,
+        expected_profit,
+        recommended_quantity,
+        source_at,
+    })
 }
 
 /// Evaluates the file in a VM with NO standard library, so the "code" in it can
@@ -138,6 +201,7 @@ pub fn parse_saved_variables(lua_source: &str) -> Result<LedgerData, String> {
             ) else {
                 continue;
             };
+            let evidence = decision_evidence(&row);
             data.entries.push(LedgerEntry {
                 key,
                 kind,
@@ -153,13 +217,13 @@ pub fn parse_saved_variables(lua_source: &str) -> Result<LedgerData, String> {
                 at,
                 character: opt_string(&row, "char"),
                 region: opt_string(&row, "region"),
-                decision_version: opt_int(&row, "decisionVersion"),
-                decision_status: opt_string(&row, "decisionStatus"),
-                decision_reasons: opt_string_sequence(&row, "decisionReasons"),
-                stress_unit: opt_int(&row, "stressUnit"),
-                expected_profit: opt_int(&row, "expectedProfit"),
-                recommended_quantity: opt_int(&row, "recommendedQuantity"),
-                source_at: opt_int(&row, "sourceAt"),
+                decision_version: evidence.as_ref().map(|e| e.decision_version),
+                decision_status: evidence.as_ref().map(|e| e.decision_status.clone()),
+                decision_reasons: evidence.as_ref().map(|e| e.decision_reasons.clone()),
+                stress_unit: evidence.as_ref().map(|e| e.stress_unit),
+                expected_profit: evidence.as_ref().map(|e| e.expected_profit),
+                recommended_quantity: evidence.as_ref().map(|e| e.recommended_quantity),
+                source_at: evidence.as_ref().map(|e| e.source_at),
             });
         }
     }
@@ -302,7 +366,7 @@ GoldCapDB = { ["ledger"] = {
     }
 
     #[test]
-    fn an_invalid_decision_reason_element_omits_only_that_optional_array() {
+    fn a_malformed_decision_reason_element_clears_the_whole_evidence_group() {
         let src = r#"
 GoldCapDB = { ["ledger"] = {
     {
@@ -319,8 +383,119 @@ GoldCapDB = { ["ledger"] = {
         let data = parse_saved_variables(src).unwrap();
         assert_eq!(data.entries.len(), 1, "bad optional evidence must not discard the ledger row");
         let json = serde_json::to_value(&data.entries[0]).unwrap();
-        assert_eq!(json["decisionVersion"], 1);
-        assert!(json.get("decisionReasons").is_none());
+        assert_eq!(json["key"], "bad-reason");
+        for key in [
+            "decisionVersion",
+            "decisionStatus",
+            "decisionReasons",
+            "stressUnit",
+            "expectedProfit",
+            "recommendedQuantity",
+            "sourceAt",
+        ] {
+            assert!(json.get(key).is_none(), "malformed evidence leaked {key}");
+        }
+    }
+
+    #[test]
+    fn a_missing_decision_scalar_clears_the_whole_evidence_group() {
+        let src = r#"
+GoldCapDB = { ["ledger"] = {
+    {
+        ["key"] = "missing-scalar", ["kind"] = "buy", ["source"] = "goldcap_sniper",
+        ["qty"] = 1, ["total"] = 99, ["at"] = 1785600000,
+        ["decisionVersion"] = 1, ["decisionStatus"] = "SAFE",
+        ["decisionReasons"] = { "roi_above_floor" },
+        ["stressUnit"] = 50, ["recommendedQuantity"] = 1, ["sourceAt"] = 1785600000,
+    },
+} }
+"#;
+
+        let data = parse_saved_variables(src).unwrap();
+        assert_eq!(data.entries.len(), 1, "missing optional evidence must not discard the ledger row");
+        let json = serde_json::to_value(&data.entries[0]).unwrap();
+        assert_eq!(json["key"], "missing-scalar");
+        for key in [
+            "decisionVersion",
+            "decisionStatus",
+            "decisionReasons",
+            "stressUnit",
+            "expectedProfit",
+            "recommendedQuantity",
+            "sourceAt",
+        ] {
+            assert!(json.get(key).is_none(), "incomplete evidence leaked {key}");
+        }
+    }
+
+    #[test]
+    fn a_malformed_decision_scalar_clears_the_whole_evidence_group() {
+        let src = r#"
+GoldCapDB = { ["ledger"] = {
+    {
+        ["key"] = "malformed-scalar", ["kind"] = "buy", ["source"] = "goldcap_sniper",
+        ["qty"] = 1, ["total"] = 99, ["at"] = 1785600000,
+        ["decisionVersion"] = 1, ["decisionStatus"] = "SAFE",
+        ["decisionReasons"] = { "roi_above_floor" },
+        ["stressUnit"] = 50, ["expectedProfit"] = "not-a-number",
+        ["recommendedQuantity"] = 1, ["sourceAt"] = 1785600000,
+    },
+} }
+"#;
+
+        let data = parse_saved_variables(src).unwrap();
+        assert_eq!(data.entries.len(), 1, "malformed optional evidence must not discard the ledger row");
+        let json = serde_json::to_value(&data.entries[0]).unwrap();
+        assert_eq!(json["key"], "malformed-scalar");
+        for key in [
+            "decisionVersion",
+            "decisionStatus",
+            "decisionReasons",
+            "stressUnit",
+            "expectedProfit",
+            "recommendedQuantity",
+            "sourceAt",
+        ] {
+            assert!(json.get(key).is_none(), "malformed evidence leaked {key}");
+        }
+    }
+
+    #[test]
+    fn semantically_invalid_decision_fields_clear_the_whole_evidence_group() {
+        for (key, status, expected_profit) in [
+            ("invalid-status", r#""UNSURE""#, "75"),
+            ("fractional-profit", r#""SAFE""#, "75.5"),
+        ] {
+            let src = format!(
+                r#"
+GoldCapDB = {{ ["ledger"] = {{
+    {{
+        ["key"] = "{key}", ["kind"] = "buy", ["source"] = "goldcap_sniper",
+        ["qty"] = 1, ["total"] = 99, ["at"] = 1785600000,
+        ["decisionVersion"] = 1, ["decisionStatus"] = {status},
+        ["decisionReasons"] = {{ "roi_above_floor" }},
+        ["stressUnit"] = 50, ["expectedProfit"] = {expected_profit},
+        ["recommendedQuantity"] = 1, ["sourceAt"] = 1785600000,
+    }},
+}} }}
+"#
+            );
+
+            let data = parse_saved_variables(&src).unwrap();
+            assert_eq!(data.entries.len(), 1, "invalid evidence must not discard the ledger row");
+            let json = serde_json::to_value(&data.entries[0]).unwrap();
+            for evidence_key in [
+                "decisionVersion",
+                "decisionStatus",
+                "decisionReasons",
+                "stressUnit",
+                "expectedProfit",
+                "recommendedQuantity",
+                "sourceAt",
+            ] {
+                assert!(json.get(evidence_key).is_none(), "invalid evidence leaked {evidence_key}");
+            }
+        }
     }
 
     #[test]
