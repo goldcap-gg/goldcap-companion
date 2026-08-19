@@ -12,6 +12,12 @@ pub const ADDON_DIR_NAME: &str = "GoldCap_AppData";
 pub const TOC_FILE_NAME: &str = "GoldCap_AppData.toc";
 pub const LUA_FILE_NAME: &str = "AppData.lua";
 
+/// Second data file in the same mini-addon: the ledger summary the in-game
+/// Sold tab renders. Separate from `AppData.lua` on purpose — the price path
+/// is never touched by summary writes, and a failed summary fetch leaves the
+/// previous snapshot on disk (nothing rewrites this file on failure).
+pub const LEDGER_FILE_NAME: &str = "LedgerSummary.lua";
+
 /// Static contents of `GoldCap_AppData.toc`. Never changes at runtime; the
 /// companion only (re)writes it if it's missing or a game patch changed the
 /// expected Interface version out from under an older build of this file.
@@ -21,6 +27,7 @@ pub const TOC_CONTENTS: &str = "\
 ## Notes: Auto-synced market data for GoldCap. File is rewritten by the GoldCap companion app.
 ## LoadOnDemand: 0
 AppData.lua
+LedgerSummary.lua
 ";
 
 /// `{wowRetailPath}/Interface/AddOns/GoldCap_AppData`.
