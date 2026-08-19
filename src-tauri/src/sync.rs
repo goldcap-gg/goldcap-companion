@@ -286,6 +286,19 @@ pub async fn sync_once(
             Err(e) => logger.error(&format!("ledger summary write failed: {e}")),
         }
     }
+
+    // Live observations ride the same passenger rule as the summary leg:
+    // logger-only, never turns a good price sync red.
+    crate::upload::upload_observations_once(
+        client,
+        &config.companion_token,
+        &region,
+        &config.realm_slug,
+        Path::new(&config.wow_retail_path),
+        &state_path.join(crate::upload::STATE_FILE_NAME),
+        logger,
+    )
+    .await;
 }
 
 /// The sync loop: on every interval tick (recomputed from `config_rx`'s

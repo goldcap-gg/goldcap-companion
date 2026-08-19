@@ -5,7 +5,7 @@
 //! at logout. Losing this file is harmless: the server is idempotent on the
 //! addon's dedupe key, so the worst case is one redundant full re-send.
 
-use crate::savedvars::{GoldPoint, LedgerData, LedgerEntry};
+use crate::savedvars::{GoldPoint, LedgerData, LedgerEntry, LiveObservation};
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -16,6 +16,10 @@ pub const STATE_FILE_NAME: &str = "uploaded.json";
 
 const CLAIM_URL: &str = "https://api.goldcap.gg/v1/companion/claim";
 const UPLOAD_URL: &str = "https://api.goldcap.gg/v1/ledger/upload";
+
+pub const LIVE_OBSERVATIONS_URL: &str = "https://api.goldcap.gg/v1/live-observations";
+/// Must not exceed the API's own per-request cap (routes/live-observations.ts).
+pub const MAX_OBSERVATION_BATCH: usize = 200;
 
 /// What the Status screen shows for the ledger stage. Kept next to the dedupe
 /// keys in the same file so a restart does not reset the counter to zero.
@@ -53,9 +57,10 @@ pub struct UploadState {
 }
 
 impl UploadState {
-    /// Roughly the addon's own ledger cap plus headroom. Bounded because this
-    /// file is read and rewritten on every sync tick.
-    pub const MAX_KEYS: usize = 8000;
+    /// 8000 → 20000: live observations add up to 200 fingerprints per scan
+    /// on top of ledger + gold; eviction is arbitrary, and evicting a
+    /// LEDGER key causes harmless-but-wasteful re-uploads.
+    pub const MAX_KEYS: usize = 20000;
 
     pub fn load_from(path: &Path) -> Self {
         let Ok(text) = std::fs::read_to_string(path) else {
@@ -180,6 +185,27 @@ fn entry_fingerprint(e: &LedgerEntry) -> String {
 
 fn gold_fingerprint(g: &GoldPoint) -> String {
     format!("gold|{}|{}", g.character, g.at)
+}
+
+/// `live|` prefix so observation fingerprints share uploaded.json's one key
+/// set with ledger (bare key) and gold (`gold|`) fingerprints safely.
+/// An observation is immutable — item + scan time IS its identity.
+fn observation_fingerprint(o: &LiveObservation) -> String {
+    format!("live|{}|{}", o.item_id, o.scanned_at)
+}
+
+/// Rows worth sending: not yet fingerprinted, and stamped with the SAME
+/// region the companion is configured for — a row scanned on a
+/// wrong-region alt must not be filed under this config's realm slug.
+fn pending_observations<'a>(
+    data: &'a LedgerData,
+    state: &UploadState,
+    region: &str,
+) -> Vec<&'a LiveObservation> {
+    data.observations
+        .iter()
+        .filter(|o| o.region == region && !state.contains(&observation_fingerprint(o)))
+        .collect()
 }
 
 pub fn pending<'a>(
@@ -340,10 +366,84 @@ pub async fn upload_once(
     state.stats().clone()
 }
 
+/// Live observations ride the same passenger rule as the ledger upload:
+/// logger-only reporting, never an error return, so a bad batch cannot turn
+/// a good price sync red. An unpaired companion (empty token) or an
+/// unconfigured realm is a silent no-op. Returns rows accepted this pass.
+pub async fn upload_observations_once(
+    client: &reqwest::Client,
+    token: &str,
+    region: &str,
+    realm_slug: &str,
+    wow_retail_path: &Path,
+    state_path: &Path,
+    logger: &crate::logging::Logger,
+) -> usize {
+    if token.trim().is_empty() || realm_slug.trim().is_empty() {
+        return 0;
+    }
+
+    let mut state = UploadState::load_from(state_path);
+    let mut accepted = 0usize;
+
+    for file in crate::savedvars::saved_variables_paths(wow_retail_path) {
+        let Ok(source) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        let Ok(data) = crate::savedvars::parse_saved_variables(&source) else {
+            continue;
+        };
+
+        let rows = pending_observations(&data, &state, region);
+        for batch in rows.chunks(MAX_OBSERVATION_BATCH) {
+            let body = serde_json::json!({
+                "region": region,
+                "realmSlug": realm_slug,
+                "observations": batch,
+            });
+            let sent = client
+                .post(LIVE_OBSERVATIONS_URL)
+                .bearer_auth(token)
+                .json(&body)
+                .send()
+                .await;
+            match sent {
+                Ok(res) if res.status().is_success() => {
+                    let keys: Vec<String> =
+                        batch.iter().map(|o| observation_fingerprint(o)).collect();
+                    state.remember(&keys);
+                    accepted += batch.len();
+                }
+                Ok(res) => {
+                    logger.error(&format!("live observations refused: {}", res.status()));
+                    break; // retry this file's remainder next tick
+                }
+                Err(e) => {
+                    logger.error(&format!("live observations failed: {e}"));
+                    break; // retry this file's remainder next tick
+                }
+            }
+        }
+    }
+
+    // Persisted once at the end of the whole pass -- the same granularity
+    // upload_once uses for the ledger leg, not per-batch: a mid-pass crash
+    // just re-sends what never made it to disk, and the server absorbs the
+    // duplicate idempotently on the fingerprint.
+    if accepted > 0 {
+        if let Err(e) = state.save_to(state_path) {
+            logger.error(&format!("could not persist live observation state: {e}"));
+        }
+        logger.info(&format!("live observations sent: {accepted}"));
+    }
+
+    accepted
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::savedvars::{parse_saved_variables, GoldPoint, LedgerData, LedgerEntry};
+    use crate::savedvars::{parse_saved_variables, GoldPoint, LedgerData, LedgerEntry, LiveObservation};
 
     const REAL_FILE: &str = include_str!("../tests/fixtures/GoldCap.lua");
 
@@ -380,6 +480,72 @@ mod tests {
             copper: 1,
             at,
         }
+    }
+
+    fn observation(item_id: i64, scanned_at: i64) -> LiveObservation {
+        LiveObservation {
+            item_id,
+            region: "eu".into(),
+            scanned_at,
+            min_unit: 1000,
+            listings: None,
+            total_qty: None,
+            levels: None,
+        }
+    }
+
+    #[test]
+    fn observation_fingerprints_key_on_item_and_scan_time_with_their_own_prefix() {
+        let a = observation_fingerprint(&observation(42, 5000));
+        assert_eq!(a, "live|42|5000");
+        assert_ne!(a, observation_fingerprint(&observation(42, 5001)));
+    }
+
+    #[test]
+    fn pending_observations_drops_already_sent_and_wrong_region_rows() {
+        let mut state = UploadState::default();
+        state.remember(&["live|42|5000".to_string()]);
+        let data = LedgerData {
+            observations: vec![
+                observation(42, 5000), // already sent
+                observation(7, 6000),  // fresh
+                LiveObservation { region: "us".into(), ..observation(9, 6100) }, // wrong region
+            ],
+            ..Default::default()
+        };
+        let pending = pending_observations(&data, &state, "eu");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].item_id, 7);
+    }
+
+    #[test]
+    fn observation_batches_never_exceed_the_server_cap() {
+        let rows: Vec<LiveObservation> = (0..450).map(|i| observation(i, 5000 + i)).collect();
+        let refs: Vec<&LiveObservation> = rows.iter().collect();
+        let batches: Vec<_> = refs.chunks(MAX_OBSERVATION_BATCH).collect();
+        assert!(batches.iter().all(|b| b.len() <= 200));
+        assert_eq!(batches.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn an_unpaired_observation_pass_sends_nothing() {
+        let dir = std::env::temp_dir().join(format!("goldcap-liveobs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let client = reqwest::Client::new();
+        let logger = crate::logging::Logger::new(&dir).unwrap();
+        let sent = upload_observations_once(
+            &client,
+            "  ",
+            "eu",
+            "dentarg",
+            std::path::Path::new("/nonexistent"),
+            &dir.join("uploaded.json"),
+            &logger,
+        )
+        .await;
+        assert_eq!(sent, 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
