@@ -227,6 +227,29 @@ pub async fn sync_once(
     )
     .await;
 
+    // The in-game Sold tab's data rides the same tick, also as a passenger
+    // and deliberately after the upload leg so the snapshot includes what
+    // was just uploaded. Reporting is logger-only and SyncStatus is
+    // untouched: the user-visible staleness surface is the tab's own age
+    // line, and a failed fetch leaves the previous LedgerSummary.lua on
+    // disk (apply_fetch_result writes nothing on Err). Unpaired = silent
+    // no-op, same rule as the upload.
+    if !config.companion_token.is_empty() {
+        let fetched =
+            crate::ledger_summary::fetch_summary(client, &config.companion_token).await;
+        let failed = fetched.as_ref().err().cloned();
+        let dir = luafile::addon_dir(Path::new(&config.wow_retail_path));
+        match crate::ledger_summary::apply_fetch_result(&dir, fetched, luafile::now_unix()) {
+            Ok(true) => logger.info("ledger summary synced"),
+            Ok(false) => {
+                if let Some(e) = failed {
+                    logger.error(&format!("ledger summary fetch failed: {e}"));
+                }
+            }
+            Err(e) => logger.error(&format!("ledger summary write failed: {e}")),
+        }
+    }
+
     let mut s = match status.lock() {
         Ok(s) => s,
         Err(poisoned) => poisoned.into_inner(),

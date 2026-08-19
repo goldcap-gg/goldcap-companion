@@ -171,10 +171,37 @@ pub fn render_ledger_summary_lua(summary: &WireSummary, generated_at: i64) -> St
     )
 }
 
+const SUMMARY_URL: &str = "https://api.goldcap.gg/v1/ledger/summary/companion";
+
+/// Fetches the paired user's own summary. The token IS the identity — the
+/// route takes no userId. 30-day window, the tab's fixed v1 scope.
+pub async fn fetch_summary(
+    client: &reqwest::Client,
+    token: &str,
+) -> Result<WireSummary, String> {
+    let resp = client
+        .get(SUMMARY_URL)
+        .query(&[("days", "30")])
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("unexpected status {}", status.as_u16()));
+    }
+    resp.json::<WireSummary>()
+        .await
+        .map_err(|e| format!("bad summary body: {e}"))
+}
+
 /// The write seam `sync_once` calls: `Ok` renders and atomically writes,
 /// `Err` performs no filesystem operation at all — by construction, not by
 /// guard — so a transient API failure can never blank the in-game tab.
-/// Returns whether a write happened.
+/// `ensure_toc` runs first because the price leg (which normally creates
+/// `dir` and its `.toc`) is not guaranteed to have run this tick — it can
+/// fail before ever reaching the addon folder, and this leg must not depend
+/// on that having succeeded. Returns whether a write happened.
 pub fn apply_fetch_result(
     dir: &Path,
     fetched: Result<WireSummary, String>,
@@ -184,6 +211,7 @@ pub fn apply_fetch_result(
         Ok(s) => s,
         Err(_) => return Ok(false),
     };
+    luafile::ensure_toc(dir).map_err(|e| e.to_string())?;
     let contents = render_ledger_summary_lua(&summary, generated_at);
     luafile::write_atomic(&dir.join(luafile::LEDGER_FILE_NAME), &contents)
         .map_err(|e| e.to_string())?;
@@ -346,6 +374,10 @@ mod tests {
         let path = dir.join(crate::luafile::LEDGER_FILE_NAME);
         let first = std::fs::read_to_string(&path).unwrap();
         assert!(first.starts_with("GoldCap_AppLedger = { v = 1, generatedAt = 42,"));
+        assert!(
+            dir.join(crate::luafile::TOC_FILE_NAME).exists(),
+            "apply_fetch_result must ensure the .toc exists even when the price leg hasn't run"
+        );
 
         // The passenger failure policy: a failed fetch must leave the
         // previous snapshot byte-identical on disk.
