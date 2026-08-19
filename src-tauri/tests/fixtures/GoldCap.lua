@@ -6391,4 +6391,30 @@ GoldCapDB = {
 ["region"] = "eu",
 },
 },
+["liveObservations"] = {
+{
+["itemID"] = 190320,
+["region"] = "eu",
+["scannedAt"] = 1786145400,
+["minUnit"] = 8000,
+["listings"] = 4,
+["totalQty"] = 9,
+["levels"] = {
+{
+["unit"] = 8000,
+["qty"] = 3,
+},
+{
+["unit"] = 8500,
+["qty"] = 6,
+},
+},
+},
+{
+["itemID"] = 7676,
+["region"] = "eu",
+["scannedAt"] = 1786145500,
+["minUnit"] = 12000,
+},
+},
 }

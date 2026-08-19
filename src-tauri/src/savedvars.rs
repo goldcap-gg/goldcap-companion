@@ -57,6 +57,30 @@ struct DecisionEvidence {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct BookLevel {
+    pub unit: i64,
+    pub qty: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct LiveObservation {
+    #[serde(rename = "itemID")]
+    pub item_id: i64,
+    #[serde(skip_serializing)]
+    pub region: String,
+    #[serde(rename = "scannedAt")]
+    pub scanned_at: i64,
+    #[serde(rename = "minUnit")]
+    pub min_unit: i64,
+    #[serde(rename = "listings", skip_serializing_if = "Option::is_none")]
+    pub listings: Option<i64>,
+    #[serde(rename = "totalQty", skip_serializing_if = "Option::is_none")]
+    pub total_qty: Option<i64>,
+    #[serde(rename = "levels", skip_serializing_if = "Option::is_none")]
+    pub levels: Option<Vec<BookLevel>>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct GoldPoint {
     #[serde(rename = "char")]
     pub character: String,
@@ -70,6 +94,7 @@ pub struct GoldPoint {
 pub struct LedgerData {
     pub entries: Vec<LedgerEntry>,
     pub gold: Vec<GoldPoint>,
+    pub observations: Vec<LiveObservation>,
 }
 
 /// Every `WTF/Account/<ACCOUNT>/SavedVariables/GoldCap.lua` on disk. One per
@@ -173,6 +198,31 @@ fn decision_evidence(t: &Table) -> Option<DecisionEvidence> {
     })
 }
 
+/// Bounded book levels. Any malformed element clears the whole list —
+/// a partial book misleads more than an absent one (mirrors the
+/// all-or-nothing rule decision_evidence already applies).
+fn opt_levels(row: &Table) -> Option<Vec<BookLevel>> {
+    let Ok(Value::Table(list)) = row.get::<Value>("levels") else {
+        return None;
+    };
+    let mut out = Vec::new();
+    for value in list.sequence_values::<Value>().flatten() {
+        let Value::Table(level) = value else {
+            return None;
+        };
+        let (Some(unit), Some(qty)) = (opt_exact_int(&level, "unit"), opt_exact_int(&level, "qty"))
+        else {
+            return None;
+        };
+        out.push(BookLevel { unit, qty });
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
 /// Evaluates the file in a VM with NO standard library, so the "code" in it can
 /// only build tables — it cannot open a file, spawn a process or reach the
 /// network even if a hostile file tried.
@@ -246,6 +296,28 @@ pub fn parse_saved_variables(lua_source: &str) -> Result<LedgerData, String> {
         }
     }
 
+    if let Ok(Value::Table(observations)) = db.get::<Value>("liveObservations") {
+        for row in observations.sequence_values::<Table>().flatten() {
+            let (Some(item_id), Some(region), Some(scanned_at), Some(min_unit)) = (
+                opt_exact_int(&row, "itemID"),
+                opt_string(&row, "region"),
+                opt_exact_int(&row, "scannedAt"),
+                opt_exact_int(&row, "minUnit"),
+            ) else {
+                continue;
+            };
+            data.observations.push(LiveObservation {
+                item_id,
+                region,
+                scanned_at,
+                min_unit,
+                listings: opt_exact_int(&row, "listings"),
+                total_qty: opt_exact_int(&row, "totalQty"),
+                levels: opt_levels(&row),
+            });
+        }
+    }
+
     Ok(data)
 }
 
@@ -274,6 +346,28 @@ mod tests {
         let data = parse_saved_variables(REAL_FILE).unwrap();
         assert_eq!(data.entries.len(), 2);
         assert_eq!(data.gold.len(), 5);
+        assert_eq!(data.observations.len(), 2);
+    }
+
+    #[test]
+    fn a_real_observation_carries_its_levels_and_a_minimal_one_does_not() {
+        let data = parse_saved_variables(REAL_FILE).unwrap();
+        let full = data.observations.iter().find(|o| o.item_id == 190320).unwrap();
+        assert_eq!(full.region, "eu");
+        assert_eq!(full.scanned_at, 1786145400);
+        assert_eq!(full.min_unit, 8000);
+        assert_eq!(full.listings, Some(4));
+        assert_eq!(full.total_qty, Some(9));
+        let levels = full.levels.as_ref().unwrap();
+        assert_eq!(levels.len(), 2);
+        assert_eq!(levels[0], BookLevel { unit: 8000, qty: 3 });
+        assert_eq!(levels[1], BookLevel { unit: 8500, qty: 6 });
+
+        let minimal = data.observations.iter().find(|o| o.item_id == 7676).unwrap();
+        assert_eq!(minimal.min_unit, 12000);
+        assert_eq!(minimal.listings, None);
+        assert_eq!(minimal.total_qty, None);
+        assert_eq!(minimal.levels, None);
     }
 
     #[test]
@@ -574,5 +668,69 @@ GoldCapDB = { ["ledger"] = {
         // The VM is built with no stdlib: a SavedVariables file that somehow
         // contained code could not open a file or a socket even if it tried.
         assert!(parse_saved_variables("GoldCapDB = { x = os.time() }").is_err());
+    }
+
+    #[test]
+    fn live_observations_parse_with_levels_and_optionals() {
+        let src = r#"GoldCapDB = { liveObservations = {
+            { itemID = 42, region = "eu", scannedAt = 5000, minUnit = 1000,
+              listings = 3, totalQty = 14,
+              levels = { { unit = 1000, qty = 4 }, { unit = 1200, qty = 10 } } },
+            { itemID = 7, region = "eu", scannedAt = 5100, minUnit = 500 },
+        } }"#;
+        let data = parse_saved_variables(src).unwrap();
+        assert_eq!(data.observations.len(), 2);
+        let first = &data.observations[0];
+        assert_eq!(first.item_id, 42);
+        assert_eq!(first.min_unit, 1000);
+        assert_eq!(first.levels.as_ref().unwrap().len(), 2);
+        assert_eq!(first.levels.as_ref().unwrap()[1], BookLevel { unit: 1200, qty: 10 });
+        let second = &data.observations[1];
+        assert_eq!(second.listings, None);
+        assert_eq!(second.levels, None);
+    }
+
+    #[test]
+    fn observations_missing_required_fields_are_skipped() {
+        let src = r#"GoldCapDB = { liveObservations = {
+            { itemID = 42, region = "eu", scannedAt = 5000 },       -- no minUnit
+            { region = "eu", scannedAt = 5000, minUnit = 100 },     -- no itemID
+            { itemID = 9, region = "eu", scannedAt = 6000, minUnit = 700 },
+        } }"#;
+        let data = parse_saved_variables(src).unwrap();
+        assert_eq!(data.observations.len(), 1);
+        assert_eq!(data.observations[0].item_id, 9);
+    }
+
+    #[test]
+    fn a_malformed_levels_table_clears_levels_but_keeps_the_row() {
+        let src = r#"GoldCapDB = { liveObservations = {
+            { itemID = 42, region = "eu", scannedAt = 5000, minUnit = 1000,
+              levels = { { unit = 1000 }, "junk" } },
+        } }"#;
+        let data = parse_saved_variables(src).unwrap();
+        assert_eq!(data.observations.len(), 1);
+        assert_eq!(data.observations[0].levels, None);
+    }
+
+    #[test]
+    fn an_observation_serializes_under_the_addons_field_names_without_region() {
+        let o = LiveObservation {
+            item_id: 42,
+            region: "eu".into(),
+            scanned_at: 5000,
+            min_unit: 1000,
+            listings: Some(3),
+            total_qty: None,
+            levels: Some(vec![BookLevel { unit: 1000, qty: 4 }]),
+        };
+        let v = serde_json::to_value(&o).unwrap();
+        assert_eq!(v["itemID"], 42);
+        assert_eq!(v["scannedAt"], 5000);
+        assert_eq!(v["minUnit"], 1000);
+        assert_eq!(v["listings"], 3);
+        assert!(v.get("totalQty").is_none());
+        assert!(v.get("region").is_none());
+        assert_eq!(v["levels"][0]["unit"], 1000);
     }
 }

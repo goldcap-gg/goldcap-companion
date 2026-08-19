@@ -387,6 +387,7 @@ mod tests {
         let data = LedgerData {
             entries: vec![entry("a"), entry("b")],
             gold: vec![gold(1)],
+            observations: vec![],
         };
         let (entries, points) = pending(&data, &UploadState::default());
         assert_eq!(entries.len(), 2);
@@ -424,6 +425,7 @@ mod tests {
         let data = LedgerData {
             entries: vec![entry("a"), entry("b")],
             gold: vec![],
+            observations: vec![],
         };
         let (entries, _) = pending(&data, &state);
         assert_eq!(entries.len(), 1);
@@ -444,6 +446,7 @@ mod tests {
         let data = LedgerData {
             entries: vec![entry("a")], // pending=false, total=500_000
             gold: vec![],
+            observations: vec![],
         };
         let (entries, _) = pending(&data, &state);
         assert_eq!(entries.len(), 1, "a row whose contents changed must be re-sent");
@@ -456,6 +459,7 @@ mod tests {
         let data = LedgerData {
             entries: vec![],
             gold: vec![gold(1), gold(2)],
+            observations: vec![],
         };
         let (_, points) = pending(&data, &state);
         assert_eq!(points.len(), 1);
@@ -514,6 +518,7 @@ mod tests {
         let data = LedgerData {
             entries: (0..1200).map(|i| entry(&i.to_string())).collect(),
             gold: vec![],
+            observations: vec![],
         };
         let (entries, _) = pending(&data, &UploadState::default());
         let batches: Vec<_> = entries.chunks(MAX_BATCH).collect();
