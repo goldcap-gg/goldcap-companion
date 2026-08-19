@@ -88,8 +88,19 @@ pub fn open_main_window(app: &AppHandle) {
         .inner_size(480.0, 660.0)
         .resizable(false)
         .build();
-    if let Err(e) = result {
-        eprintln!("companion: failed to open the companion window: {e}");
+    match result {
+        // `build()` alone leaves the window on-screen but not frontmost: for
+        // a tray-only app with no Dock icon, macOS doesn't hand the new
+        // window focus on its own, so it can end up sitting behind every
+        // other window with nothing visibly happening (confirmed via
+        // Accessibility — the window existed fully on-screen but needed an
+        // explicit raise). The same show()+set_focus() as the "already
+        // open" branch above fixes it.
+        Ok(window) => {
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+        Err(e) => eprintln!("companion: failed to open the companion window: {e}"),
     }
 }
 
