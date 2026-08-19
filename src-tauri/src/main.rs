@@ -163,13 +163,15 @@ fn main() {
             // way to reach the window, and on a notched MacBook the menu
             // bar often hides it behind the overflow chevron — without
             // this, "reopening" a tray-only app looks like nothing
-            // happened. Only act when no window is already visible so we
-            // don't steal focus for no reason.
+            // happened. Deliberately unconditional: `has_visible_windows`
+            // stays true for a window buried behind others or parked on
+            // another Space — exactly the states the user is trying to
+            // escape by relaunching — and open_main_window only focuses an
+            // existing window, so the worst case is granting the focus the
+            // relaunch was asking for.
             #[cfg(target_os = "macos")]
-            tauri::RunEvent::Reopen { has_visible_windows, .. } => {
-                if !has_visible_windows {
-                    tray::open_main_window(app_handle);
-                }
+            tauri::RunEvent::Reopen { .. } => {
+                tray::open_main_window(app_handle);
             }
             _ => {}
         });
