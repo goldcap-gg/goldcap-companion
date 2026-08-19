@@ -395,6 +395,15 @@ pub async fn upload_observations_once(
         };
 
         let rows = pending_observations(&data, &state, region);
+
+        let wrong_region = data.observations.iter().filter(|o| o.region != region).count();
+        if wrong_region > 0 {
+            logger.info(&format!(
+                "live observations: {wrong_region} rows from another region dropped ({})",
+                file.display()
+            ));
+        }
+
         for batch in rows.chunks(MAX_OBSERVATION_BATCH) {
             let body = serde_json::json!({
                 "region": region,
