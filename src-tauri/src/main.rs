@@ -7,6 +7,7 @@ mod config;
 mod health;
 mod logging;
 mod luafile;
+mod ledger_summary;
 mod savedvars;
 mod state;
 mod status;
