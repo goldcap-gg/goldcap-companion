@@ -234,7 +234,7 @@ pub async fn sync_once(
     // line, and a failed fetch leaves the previous LedgerSummary.lua on
     // disk (apply_fetch_result writes nothing on Err). Unpaired = silent
     // no-op, same rule as the upload.
-    if !config.companion_token.is_empty() {
+    if !config.companion_token.trim().is_empty() {
         let fetched =
             crate::ledger_summary::fetch_summary(client, &config.companion_token).await;
         let failed = fetched.as_ref().err().cloned();
