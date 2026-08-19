@@ -121,7 +121,6 @@ pub fn parse_iso_utc(s: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::*;
 
     #[test]
     fn parse_iso_utc_handles_epoch_and_real_timestamps() {
