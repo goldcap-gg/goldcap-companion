@@ -227,13 +227,50 @@ pub async fn sync_once(
     )
     .await;
 
-    // The in-game Sold tab's data rides the same tick, also as a passenger
-    // and deliberately after the upload leg so the snapshot includes what
-    // was just uploaded. Reporting is logger-only and SyncStatus is
-    // untouched: the user-visible staleness surface is the tab's own age
-    // line, and a failed fetch leaves the previous LedgerSummary.lua on
-    // disk (apply_fetch_result writes nothing on Err). Unpaired = silent
-    // no-op, same rule as the upload.
+    {
+        let mut s = match status.lock() {
+            Ok(s) => s,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        s.upload = upload_stats;
+        s.syncing = false;
+        if fetched_ok {
+            s.last_success_at = Some(SystemTime::now());
+            s.last_success_realm = Some(config.realm_slug.clone());
+        }
+        match &sync_error {
+            None => {
+                s.last_error = None;
+                s.last_error_stage = None;
+                logger.info(&format!("synced {} {}", region, config.realm_slug));
+            }
+            Some(e) => {
+                s.last_error_stage = Some(e.stage());
+                s.last_error = Some(e.to_string());
+                logger.error(&format!(
+                    "sync failed for {} {}: {e}",
+                    region, config.realm_slug
+                ));
+            }
+        }
+        // Lock released here (end of block), before the ledger summary
+        // fetch below -- that fetch is the slowest leg of the tick (its own
+        // 20s timeout) and status is done publishing by this point, so it
+        // must not hold the tray on "Syncing..." a moment longer than the
+        // price sync it actually reflects.
+    }
+
+    // The in-game Sold tab's data rides the same tick, also as a passenger,
+    // deliberately after BOTH the upload leg (so the snapshot includes what
+    // was just uploaded) AND status publication above (M7 ruling): this
+    // fetch can take up to its own 20s timeout, and nothing about it
+    // belongs in the tray's "syncing" window -- the price sync (what the
+    // tray label is actually about) is already done and published by the
+    // time this runs. Reporting is logger-only and SyncStatus stays
+    // untouched from here on: the user-visible staleness surface is the
+    // tab's own age line, and a failed fetch leaves the previous
+    // LedgerSummary.lua on disk (apply_fetch_result writes nothing on Err).
+    // Unpaired = silent no-op, same rule as the upload.
     if !config.companion_token.trim().is_empty() {
         let fetched =
             crate::ledger_summary::fetch_summary(client, &config.companion_token).await;
@@ -247,32 +284,6 @@ pub async fn sync_once(
                 }
             }
             Err(e) => logger.error(&format!("ledger summary write failed: {e}")),
-        }
-    }
-
-    let mut s = match status.lock() {
-        Ok(s) => s,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    s.upload = upload_stats;
-    s.syncing = false;
-    if fetched_ok {
-        s.last_success_at = Some(SystemTime::now());
-        s.last_success_realm = Some(config.realm_slug.clone());
-    }
-    match &sync_error {
-        None => {
-            s.last_error = None;
-            s.last_error_stage = None;
-            logger.info(&format!("synced {} {}", region, config.realm_slug));
-        }
-        Some(e) => {
-            s.last_error_stage = Some(e.stage());
-            s.last_error = Some(e.to_string());
-            logger.error(&format!(
-                "sync failed for {} {}: {e}",
-                region, config.realm_slug
-            ));
         }
     }
 }
