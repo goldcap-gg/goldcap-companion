@@ -147,16 +147,33 @@ fn main() {
         })
         .build(tauri::generate_context!())
         .expect("error while building the goldcap companion app")
-        .run(|_app_handle, event| {
+        .run(|app_handle, event| match event {
             // Tray-only app: closing the companion window must not quit the
             // process. A window-close exit request carries code None; an
             // explicit app.exit(0) (the tray's Quit item) carries Some(0)
             // and must be allowed through — blocking unconditionally here
             // is exactly the "Quit does nothing" bug.
-            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+            tauri::RunEvent::ExitRequested { api, code, .. } => {
                 if code.is_none() {
                     api.prevent_exit();
                 }
             }
+            // Relaunching the .app while it's already running (Dock,
+            // Spotlight, `open`, clicking it again) delivers Reopen instead
+            // of a second process start. The tray icon is the only other
+            // way to reach the window, and on a notched MacBook the menu
+            // bar often hides it behind the overflow chevron — without
+            // this, "reopening" a tray-only app looks like nothing
+            // happened. Deliberately unconditional: `has_visible_windows`
+            // stays true for a window buried behind others or parked on
+            // another Space — exactly the states the user is trying to
+            // escape by relaunching — and open_main_window only focuses an
+            // existing window, so the worst case is granting the focus the
+            // relaunch was asking for.
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { .. } => {
+                tray::open_main_window(app_handle);
+            }
+            _ => {}
         });
 }
