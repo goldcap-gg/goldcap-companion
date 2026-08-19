@@ -125,6 +125,18 @@ pub fn write_app_data_lua(dir: &Path, import_string: &str, written_at: i64) -> i
     write_atomic(&dir.join(LUA_FILE_NAME), &contents)
 }
 
+/// Removes `LedgerSummary.lua` from `dir` if present. Called on unpair: the
+/// previously written ledger snapshot must not survive an unpair, or "no
+/// server data next login" only holds for a companion that was never paired.
+/// A missing file is not an error -- there is nothing to remove.
+pub fn remove_ledger_summary(dir: &Path) -> io::Result<()> {
+    match fs::remove_file(dir.join(LEDGER_FILE_NAME)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,6 +274,33 @@ mod tests {
             contents,
             "GoldCap_AppData = { importString = 'GCS1;eu;dentarg;1;abc', writtenAt = 42 }\n"
         );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn remove_ledger_summary_deletes_existing_file() {
+        let dir = temp_dir("ledger-remove");
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join(LEDGER_FILE_NAME);
+        fs::write(&target, "GoldCapLedgerSummary = {}\n").unwrap();
+
+        remove_ledger_summary(&dir).unwrap();
+
+        assert!(!target.exists());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn remove_ledger_summary_is_ok_when_already_gone() {
+        let dir = temp_dir("ledger-remove-twice");
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join(LEDGER_FILE_NAME);
+        fs::write(&target, "GoldCapLedgerSummary = {}\n").unwrap();
+
+        remove_ledger_summary(&dir).unwrap();
+        remove_ledger_summary(&dir).unwrap();
+
+        assert!(!target.exists());
         fs::remove_dir_all(&dir).ok();
     }
 

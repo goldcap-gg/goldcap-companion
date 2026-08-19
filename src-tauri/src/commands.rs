@@ -156,7 +156,10 @@ pub async fn pair_with_code(
 }
 
 /// Drops the upload token. Goes through `save_config` so the running sync
-/// loop stops uploading on its next tick without a restart.
+/// loop stops uploading on its next tick without a restart. Also removes the
+/// previously written `LedgerSummary.lua`, best-effort: otherwise "unpaired
+/// means no server data next login" would only hold for a companion that was
+/// never paired in the first place.
 #[tauri::command]
 pub fn unpair(app: AppHandle, state: State<AppState>) -> Result<(), String> {
     let mut config = state
@@ -165,6 +168,16 @@ pub fn unpair(app: AppHandle, state: State<AppState>) -> Result<(), String> {
         .unwrap_or_else(|p| p.into_inner())
         .clone();
     config.companion_token = String::new();
+
+    if !config.wow_retail_path.trim().is_empty() {
+        let dir = crate::luafile::addon_dir(Path::new(&config.wow_retail_path));
+        if let Err(e) = crate::luafile::remove_ledger_summary(&dir) {
+            state
+                .logger
+                .error(&format!("could not remove ledger summary on unpair: {e}"));
+        }
+    }
+
     save_config(app, state, config)
 }
 
