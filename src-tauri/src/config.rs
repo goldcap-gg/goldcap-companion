@@ -235,11 +235,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cargo_and_tauri_versions_match_the_1_5_2_release() {
+    fn cargo_and_tauri_versions_match_the_1_6_0_release() {
         let tauri: serde_json::Value =
             serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
 
-        assert_eq!(env!("CARGO_PKG_VERSION"), "1.5.2");
+        assert_eq!(env!("CARGO_PKG_VERSION"), "1.6.0");
         assert_eq!(tauri["version"].as_str(), Some(env!("CARGO_PKG_VERSION")));
     }
 
