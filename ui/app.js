@@ -1,6 +1,7 @@
 import { render as renderWizard } from "./screens/wizard.js";
 import { render as renderStatus } from "./screens/status.js";
 import { render as renderSettings } from "./screens/settings.js";
+import { mountUpdateBanner } from "./lib/updateBanner.js";
 
 const SCREENS = {
   wizard: renderWizard,
@@ -54,6 +55,9 @@ export function show(screen) {
 
 export async function mount(root, api) {
   ctx = { root, api, show, toast };
+  // Above the screens and outside `show()`'s replaceChildren, so the offer
+  // survives every screen swap.
+  mountUpdateBanner(root.parentElement ?? document.body);
   try {
     const config = await api.getConfig();
     const complete =

@@ -33,6 +33,9 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // A tray app with no window open has nowhere to put "there's an
+        // update" — this is that place. Best-effort: see updater::announce.
+        .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             commands::get_config,
             commands::save_config,
@@ -45,6 +48,8 @@ fn main() {
             commands::pair_with_code,
             commands::unpair,
             commands::open_account_page,
+            commands::update_ready,
+            commands::install_update,
         ])
         .setup(|app| {
             let handle = app.handle().clone();

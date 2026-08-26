@@ -15,3 +15,6 @@ export const resolveRealm = (region, name) => invoke("resolve_realm", { region, 
 export const pairWithCode = (code) => invoke("pair_with_code", { code });
 export const unpair = () => invoke("unpair");
 export const openAccountPage = () => invoke("open_account_page");
+/** The update waiting to be applied, or null. See lib/updateBanner.js. */
+export const updateReady = () => invoke("update_ready");
+export const installUpdate = () => invoke("install_update");

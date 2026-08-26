@@ -238,3 +238,56 @@ h3 {
   color: var(--neg);
   border-color: var(--neg);
 }
+
+/* ---------- update bar ----------
+   The visible half of auto-update. It sits above every screen rather than
+   inside one, because an update offer is about the app, not about whatever
+   the window happens to be showing. Gold, because it is the one thing in
+   this window that asks for a decision. */
+
+.update-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--gold-lo);
+  border-radius: var(--radius);
+  background: var(--gold-faint);
+}
+
+.update-bar[hidden] {
+  display: none;
+}
+
+.update-bar-text {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--fg);
+}
+
+.update-bar-action {
+  flex-shrink: 0;
+  padding: 7px 13px;
+  border: 1px solid var(--gold);
+  border-radius: var(--radius-sm);
+  background: var(--gold-soft);
+  color: var(--gold-hi);
+  font-family: var(--font-display);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease);
+}
+
+.update-bar-action:hover:not(:disabled) {
+  background: var(--gold);
+  color: var(--bg);
+}
+
+.update-bar-action:disabled {
+  opacity: 0.6;
+  cursor: default;
+}

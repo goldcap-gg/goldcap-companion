@@ -195,3 +195,20 @@ pub fn open_account_page(app: AppHandle) -> Result<(), String> {
         .open_url("https://goldcap.gg/account", None::<&str>)
         .map_err(|e| e.to_string())
 }
+
+/// What update, if any, is waiting — so a window that opens after the check
+/// shows the same offer as one that was open when it landed.
+#[tauri::command]
+pub fn update_ready(app: AppHandle) -> Option<crate::updater::UpdateView> {
+    use tauri::Manager;
+    let state = app.state::<crate::updater::UpdaterState>();
+    let staged = state.staged.lock().unwrap_or_else(|p| p.into_inner());
+    staged.as_ref().map(|s| crate::updater::view(s.kind(), s.version()))
+}
+
+/// The button in that banner: apply whatever is staged (restart, run the
+/// installer, or open the downloads page — see updater::apply_staged).
+#[tauri::command]
+pub fn install_update(app: AppHandle) {
+    crate::updater::apply_staged(&app);
+}
