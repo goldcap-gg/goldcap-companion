@@ -1,4 +1,5 @@
 import { relativeTime, countdown } from "../lib/format.js";
+import { brandMarkSvg } from "../lib/brandMark.js";
 
 const POLL_MS = 5000;
 
@@ -98,7 +99,7 @@ export function render(el, ctx) {
 
   const top = document.createElement("div");
   top.className = "topbar";
-  top.innerHTML = `<div class="brand"><span class="brand-mark"></span>GoldCap</div>`;
+  top.innerHTML = `<div class="brand">${brandMarkSvg()}GoldCap</div>`;
   const gear = document.createElement("button");
   gear.className = "icon-btn";
   gear.type = "button";
