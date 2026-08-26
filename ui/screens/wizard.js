@@ -404,6 +404,8 @@ export function render(el, ctx) {
     region.id = "wizard-region";
     region.add(new Option("EU", "eu"));
     region.add(new Option("US", "us"));
+    region.add(new Option("KR", "kr"));
+    region.add(new Option("TW", "tw"));
     region.value = draft.region;
 
     const realmLabel = document.createElement("label");

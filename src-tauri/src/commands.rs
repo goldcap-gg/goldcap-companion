@@ -71,21 +71,53 @@ pub struct ResolvedRealm {
 #[tauri::command]
 pub async fn resolve_realm(region: String, name: String) -> Result<ResolvedRealm, String> {
     let client = crate::sync::build_client();
+    // Shared with the sync loop's auto-follow so the two can never disagree
+    // about what a realm name means (and so both hit the same slug cache).
+    let slug = crate::sync::resolve_realm_slug(&client, &region, &name).await?;
+    Ok(ResolvedRealm { name_en: name, slug })
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegionRealm {
+    pub slug: String,
+    pub name: String,
+}
+
+/// Every realm in a region, so the settings screen can OFFER the choice.
+///
+/// The old screen paired a dropdown of realms found in the game's folders
+/// with a free-text slug box — and a typo there ("ss") is indistinguishable
+/// from a realm, so it silently synced nothing until someone noticed. There
+/// is nothing to type now.
+#[tauri::command]
+pub async fn list_region_realms(region: String) -> Result<Vec<RegionRealm>, String> {
+    #[derive(serde::Deserialize)]
+    struct Response {
+        realms: Vec<RegionRealm2>,
+    }
+    #[derive(serde::Deserialize)]
+    struct RegionRealm2 {
+        slug: String,
+        name: String,
+    }
+
+    let client = crate::sync::build_client();
     let resp = client
-        .get("https://api.goldcap.gg/v1/addon/resolve-realm")
-        .query(&[("region", region.as_str()), ("name", name.as_str())])
+        .get("https://api.goldcap.gg/v1/addon/realms")
+        .query(&[("region", region.as_str())])
         .send()
         .await
         .map_err(|e| e.to_string())?;
-
-    match resp.status().as_u16() {
-        200 => resp
-            .json::<ResolvedRealm>()
-            .await
-            .map_err(|e| e.to_string()),
-        404 => Err(format!("realm \"{name}\" not found on {region}")),
-        code => Err(format!("resolve failed: HTTP {code}")),
+    if !resp.status().is_success() {
+        return Err(format!("realm list failed: HTTP {}", resp.status().as_u16()));
     }
+    let body = resp.json::<Response>().await.map_err(|e| e.to_string())?;
+    Ok(body
+        .realms
+        .into_iter()
+        .map(|r| RegionRealm { slug: r.slug, name: r.name })
+        .collect())
 }
 
 /// The whole pipeline as data, for the Status screen. The tray menu renders

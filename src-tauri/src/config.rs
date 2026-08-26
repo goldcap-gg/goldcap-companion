@@ -16,6 +16,8 @@ pub enum Region {
     #[default]
     Eu,
     Us,
+    Kr,
+    Tw,
 }
 
 impl fmt::Display for Region {
@@ -23,6 +25,8 @@ impl fmt::Display for Region {
         f.write_str(match self {
             Region::Eu => "eu",
             Region::Us => "us",
+            Region::Kr => "kr",
+            Region::Tw => "tw",
         })
     }
 }
@@ -34,6 +38,8 @@ impl std::str::FromStr for Region {
         match s.to_ascii_lowercase().as_str() {
             "eu" => Ok(Region::Eu),
             "us" => Ok(Region::Us),
+            "kr" => Ok(Region::Kr),
+            "tw" => Ok(Region::Tw),
             other => Err(format!("unknown region: {other}")),
         }
     }
@@ -54,6 +60,14 @@ pub struct Config {
     pub region: Region,
     #[serde(default)]
     pub realm_slug: String,
+    /// Follow whatever realm the player logged into most recently, instead of
+    /// pinning one. Defaults to OFF for a config written before this existed
+    /// (`serde(default)` — an install with a working realm keeps it) and ON
+    /// for a fresh one (see `Config::default`), which is the answer for
+    /// someone who plays a couple of hours on one realm and a couple on
+    /// another.
+    #[serde(default)]
+    pub realm_auto: bool,
     #[serde(default)]
     pub wow_retail_path: String,
     #[serde(default = "default_interval_minutes")]
@@ -78,6 +92,7 @@ impl Default for Config {
         Config {
             region: Region::default(),
             realm_slug: String::new(),
+            realm_auto: true,
             wow_retail_path: String::new(),
             interval_minutes: default_interval_minutes(),
             launch_at_startup: default_launch_at_startup(),
@@ -234,13 +249,29 @@ pub fn detect_wow_retail_path() -> String {
 mod tests {
     use super::*;
 
+    // The release procedure bumps the version in TWO manifests (see
+    // .github/workflows/companion-release.yml's header) and the updater
+    // compares what it downloads against the one baked into the binary — so
+    // the two drifting apart ships an app that offers itself an update
+    // forever, or none at all.
+    //
+    // The literal that used to sit here ("1.6.0") pinned the assertion to one
+    // release, which meant every bump failed CI on a test that had nothing to
+    // say about the change. What matters is that the manifests AGREE and that
+    // the version is a real semver triple; both survive a bump.
     #[test]
-    fn cargo_and_tauri_versions_match_the_1_6_0_release() {
+    fn cargo_and_tauri_versions_agree() {
         let tauri: serde_json::Value =
             serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let cargo = env!("CARGO_PKG_VERSION");
 
-        assert_eq!(env!("CARGO_PKG_VERSION"), "1.6.0");
-        assert_eq!(tauri["version"].as_str(), Some(env!("CARGO_PKG_VERSION")));
+        assert_eq!(tauri["version"].as_str(), Some(cargo));
+        let parts: Vec<&str> = cargo.split('.').collect();
+        assert_eq!(parts.len(), 3, "version must be major.minor.patch: {cargo}");
+        assert!(
+            parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit())),
+            "version must be numeric: {cargo}",
+        );
     }
 
     #[test]
@@ -248,6 +279,9 @@ mod tests {
         let cfg = Config::default();
         assert_eq!(cfg.region, Region::Eu);
         assert_eq!(cfg.realm_slug, "");
+        // A fresh install follows the realm you last played on; an existing
+        // config without the field keeps its pinned realm (serde default).
+        assert!(cfg.realm_auto);
         assert_eq!(cfg.wow_retail_path, "");
         assert_eq!(cfg.interval_minutes, 30);
         assert!(cfg.launch_at_startup);
@@ -295,7 +329,20 @@ mod tests {
     #[test]
     fn missing_fields_fall_back_to_defaults() {
         let cfg: Config = serde_json::from_str("{}").unwrap();
-        assert_eq!(cfg, Config::default());
+        assert_eq!(Config { realm_auto: cfg.realm_auto, ..Config::default() }, cfg);
+    }
+
+    // The one field where "what a fresh install starts with" and "what an old
+    // config file means" deliberately disagree. A config written before
+    // realm-following existed names a realm on purpose, and reading it must
+    // not silently start overriding that choice from the game's folders;
+    // a config that names nothing has no choice to protect.
+    #[test]
+    fn an_existing_config_keeps_its_pinned_realm_while_a_fresh_one_follows() {
+        let existing: Config = serde_json::from_str(r#"{"realmSlug": "dentarg"}"#).unwrap();
+        assert!(!existing.realm_auto, "an upgrade must not repoint someone's realm");
+
+        assert!(Config::default().realm_auto, "a fresh install follows the last realm played");
     }
 
     #[test]
@@ -316,6 +363,7 @@ mod tests {
         let cfg = Config {
             region: Region::Us,
             realm_slug: "area-52".into(),
+            realm_auto: false,
             wow_retail_path: "/tmp/wow/_retail_".into(),
             interval_minutes: 45,
             launch_at_startup: true,

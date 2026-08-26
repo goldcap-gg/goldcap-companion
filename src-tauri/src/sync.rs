@@ -8,7 +8,8 @@ use crate::logging::Logger;
 use crate::luafile;
 use std::fmt;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 use tokio::sync::{mpsc, watch};
 
@@ -177,6 +178,86 @@ pub fn apply_import_string(wow_retail_path: &Path, import_string: &str) -> Resul
         .map_err(|e| SyncError::Write(e.to_string()))
 }
 
+/// Realm display name -> connected-realm slug, remembered for the process's
+/// lifetime. Auto-follow re-reads the game's folders every tick, but the name
+/// it finds almost never changes, and resolving it is a network call.
+fn slug_cache() -> &'static Mutex<HashMap<(String, String), String>> {
+    static CACHE: OnceLock<Mutex<HashMap<(String, String), String>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Resolve a realm display name (any locale, member or leader name) to the
+/// connected-realm slug the API expects. Shared with the `resolve_realm`
+/// command so the picker and the sync loop can never disagree.
+pub async fn resolve_realm_slug(
+    client: &reqwest::Client,
+    region: &str,
+    name: &str,
+) -> Result<String, String> {
+    let key = (region.to_string(), name.to_ascii_lowercase());
+    if let Some(hit) = slug_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&key)
+        .cloned()
+    {
+        return Ok(hit);
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Resolved {
+        slug: String,
+    }
+    let resp = client
+        .get("https://api.goldcap.gg/v1/addon/resolve-realm")
+        .query(&[("region", region), ("name", name)])
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let slug = match resp.status().as_u16() {
+        200 => resp.json::<Resolved>().await.map_err(|e| e.to_string())?.slug,
+        404 => return Err(format!("realm \"{name}\" not found on {region}")),
+        code => return Err(format!("resolve failed: HTTP {code}")),
+    };
+    slug_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(key, slug.clone());
+    Ok(slug)
+}
+
+/// Which realm this tick is for.
+///
+/// Pinned mode is the stored slug. Auto mode reads the realm folders WoW
+/// keeps under `WTF/Account/` — already sorted newest-first by mtime, so the
+/// first one is where the player logged in last — and resolves that name.
+/// That is the answer for someone who plays a couple of hours on one realm
+/// and a couple on another: the prices follow them instead of being pinned to
+/// whichever realm they happened to configure once.
+async fn effective_realm(
+    client: &reqwest::Client,
+    config: &Config,
+    logger: &Logger,
+) -> Option<String> {
+    if !config.realm_auto {
+        let pinned = config.realm_slug.trim();
+        return (!pinned.is_empty()).then(|| pinned.to_string());
+    }
+
+    let names = crate::wtf::list_realm_names(Path::new(&config.wow_retail_path));
+    let newest = names.first()?;
+    match resolve_realm_slug(client, &config.region.to_string(), newest).await {
+        Ok(slug) => Some(slug),
+        Err(e) => {
+            logger.error(&format!("could not resolve last played realm \"{newest}\": {e}"));
+            // Fall back to whatever was last pinned rather than syncing
+            // nothing at all.
+            let pinned = config.realm_slug.trim();
+            (!pinned.is_empty()).then(|| pinned.to_string())
+        }
+    }
+}
+
 /// Runs one sync attempt end to end: fetch, write, update `status`, log the
 /// outcome. Never panics or propagates — a bad tick is just a logged error.
 pub async fn sync_once(
@@ -188,7 +269,8 @@ pub async fn sync_once(
 ) {
     set_syncing(status, true);
 
-    if config.realm_slug.trim().is_empty() || config.wow_retail_path.trim().is_empty() {
+    let realm_slug = effective_realm(client, config, logger).await.unwrap_or_default();
+    if realm_slug.is_empty() || config.wow_retail_path.trim().is_empty() {
         let msg = "not configured (realm or WoW path missing)".to_string();
         logger.error(&format!("sync skipped: {msg}"));
         if let Ok(mut s) = status.lock() {
@@ -200,7 +282,7 @@ pub async fn sync_once(
     }
 
     let region = config.region.to_string();
-    let fetch_result = fetch_import_string(client, &region, &config.realm_slug).await;
+    let fetch_result = fetch_import_string(client, &region, &realm_slug).await;
 
     // Fetching and writing are attributed separately from here on: a write
     // failure after a successful fetch must not make the prices stage look
@@ -236,21 +318,18 @@ pub async fn sync_once(
         s.syncing = false;
         if fetched_ok {
             s.last_success_at = Some(SystemTime::now());
-            s.last_success_realm = Some(config.realm_slug.clone());
+            s.last_success_realm = Some(realm_slug.clone());
         }
         match &sync_error {
             None => {
                 s.last_error = None;
                 s.last_error_stage = None;
-                logger.info(&format!("synced {} {}", region, config.realm_slug));
+                logger.info(&format!("synced {} {}", region, realm_slug));
             }
             Some(e) => {
                 s.last_error_stage = Some(e.stage());
                 s.last_error = Some(e.to_string());
-                logger.error(&format!(
-                    "sync failed for {} {}: {e}",
-                    region, config.realm_slug
-                ));
+                logger.error(&format!("sync failed for {} {}: {e}", region, realm_slug));
             }
         }
         // Lock released here (end of block), before the ledger summary
@@ -293,7 +372,7 @@ pub async fn sync_once(
         client,
         &config.companion_token,
         &region,
-        &config.realm_slug,
+        &realm_slug,
         Path::new(&config.wow_retail_path),
         &state_path.join(crate::upload::STATE_FILE_NAME),
         logger,

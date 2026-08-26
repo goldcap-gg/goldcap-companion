@@ -48,6 +48,7 @@ fn main() {
             commands::pair_with_code,
             commands::unpair,
             commands::open_account_page,
+            commands::list_region_realms,
             commands::update_ready,
             commands::install_update,
         ])

@@ -164,7 +164,7 @@ export function render(el, ctx) {
         // Only worth re-reading the game's realm list when the path that
         // was actually saved changed — a rejected save leaves config (and
         // so the path detectGame would read) exactly where it was.
-        if (ok) loadRealmNames(config.wowRetailPath);
+        if (ok) loadRealms(config.wowRetailPath, config.region);
       } catch (e) {
         if (disposed) return;
         ctx.toast(String(e), true);
@@ -182,7 +182,7 @@ export function render(el, ctx) {
         const ok = await persist({ wowRetailPath: found });
         if (disposed) return;
         paintPath();
-        if (ok) loadRealmNames(config.wowRetailPath);
+        if (ok) loadRealms(config.wowRetailPath, config.region);
       } catch (e) {
         if (disposed) return;
         ctx.toast(String(e), true);
@@ -193,6 +193,8 @@ export function render(el, ctx) {
     region.className = "field";
     region.add(new Option("EU", "eu"));
     region.add(new Option("US", "us"));
+    region.add(new Option("KR", "kr"));
+    region.add(new Option("TW", "tw"));
     game.append(fieldBlock("settings-region", "Region", region));
 
     function paintRegion() {
@@ -206,75 +208,110 @@ export function render(el, ctx) {
       // select already shows what was just picked), on rejection it snaps
       // the dropdown back rather than leaving it showing an unsaved region.
       paintRegion();
+      // The realm list is per region — leaving EU realms on screen after
+      // switching to KR is how someone ends up pinned to a realm that
+      // doesn't exist there.
+      loadRealms(config.wowRetailPath, config.region);
     });
 
-    const realmRow = document.createElement("div");
-    realmRow.className = "row";
-
+    // One control, and nothing to type.
+    //
+    // This used to be a dropdown of realms found in the game's folders NEXT
+    // TO a free-text slug box, which went wrong three ways: the dropdown
+    // always reset to its "— from game files —" placeholder, so a saved
+    // realm looked lost after every restart; the text box accepted anything
+    // ("ss") and saved it unvalidated, so sync silently stopped; and neither
+    // answered what a player on two realms is supposed to do.
     const realm = document.createElement("select");
     realm.className = "field";
-    realm.id = "settings-realm-detected";
-    // The slug field below is what the outer label names — this dropdown
-    // needs its own accessible name, since a <select>'s name is never
-    // derived from its options' text.
-    realm.setAttribute("aria-label", "Realm detected from game files");
-    realm.add(new Option("— from game files —", ""));
+    realm.id = "settings-realm";
 
-    const slug = document.createElement("input");
-    slug.className = "field mono";
-    slug.autocomplete = "off";
-    slug.spellcheck = false;
+    const realmHint = document.createElement("p");
+    realmHint.className = "hint";
 
-    realmRow.append(realm, slug);
-    game.append(fieldBlock("settings-realm-slug", "Realm", slug, realmRow));
+    const realmBlock = fieldBlock("settings-realm", "Realm", realm);
+    realmBlock.append(realmHint);
+    game.append(realmBlock);
+
+    const AUTO = "\u0000auto";
 
     function paintRealm() {
-      slug.value = config.realmSlug;
+      realm.value = config.realmAuto ? AUTO : config.realmSlug;
+      // A pinned realm that isn't in the list yet (still loading, or an old
+      // config naming something the region list doesn't have) keeps its own
+      // option rather than snapping the control to whatever sits first.
+      if (!config.realmAuto && realm.value !== config.realmSlug && config.realmSlug) {
+        realm.add(new Option(config.realmSlug, config.realmSlug), 1);
+        realm.value = config.realmSlug;
+      }
+      realmHint.textContent = config.realmAuto
+        ? "Follows the realm you logged into last — switch characters and prices follow."
+        : "Pinned. Prices are always for this realm.";
     }
 
     realm.addEventListener("change", async () => {
-      if (!realm.value) return;
-      try {
-        const r = await ctx.api.resolveRealm(region.value, realm.value);
-        if (disposed) return;
-        await persist({ realmSlug: r.slug });
-      } catch (e) {
-        if (disposed) return;
-        ctx.toast(String(e), true);
-      } finally {
-        if (!disposed) paintRealm();
+      const value = realm.value;
+      if (value === AUTO) {
+        await persist({ realmAuto: true });
+      } else {
+        await persist({ realmAuto: false, realmSlug: value });
       }
-    });
-
-    slug.addEventListener("blur", async () => {
-      const value = slug.value.trim();
-      if (!value || value === config.realmSlug) {
-        paintRealm();
-        return;
-      }
-      await persist({ realmSlug: value });
-      if (disposed) return;
-      paintRealm();
+      if (!disposed) paintRealm();
     });
 
     // Bumped by every call, including this one's own — the standard guard
     // (copied from the wizard's realmRequest) against a slow response
-    // landing after a newer one (rapid Change→Change, or Change while an
-    // earlier detectGame is still in flight) and re-populating a dropdown
-    // that has since moved on to a different install.
+    // landing after a newer one and repopulating a list that has since
+    // moved on to another region or install.
     let realmRequest = 0;
-    async function loadRealmNames(path) {
+    async function loadRealms(path, regionValue) {
       const gen = ++realmRequest;
-      realm.replaceChildren(new Option("— from game files —", ""));
+      realm.replaceChildren(new Option("Auto — my last played realm", AUTO));
+
+      // The realms this install has actually logged into come first: for
+      // nearly everyone their realm is one of two or three names, not one of
+      // several hundred.
+      let played = [];
       try {
         const g = await ctx.api.detectGame(path);
         if (disposed || gen !== realmRequest) return;
-        for (const name of g.realmNames ?? []) realm.add(new Option(name, name));
+        played = g.realmNames ?? [];
+      } catch {
+        /* an unreadable install just means no shortcuts */
+      }
+
+      let all = [];
+      try {
+        all = await ctx.api.listRegionRealms(regionValue);
+        if (disposed || gen !== realmRequest) return;
       } catch {
         if (disposed || gen !== realmRequest) return;
-        // An unreadable install just leaves the dropdown at its placeholder;
-        // the slug field next to it is always usable.
+        // Offline: the played names are still worth offering, resolved on
+        // pick like they always were.
       }
+
+      const bySlug = new Map(all.map((r) => [r.slug, r.name]));
+      const playedSlugs = [];
+      for (const name of played) {
+        const match = all.find(
+          (r) => r.name.toLowerCase() === name.toLowerCase() || r.slug === name.toLowerCase(),
+        );
+        if (match && !playedSlugs.includes(match.slug)) playedSlugs.push(match.slug);
+      }
+
+      if (playedSlugs.length > 0) {
+        const group = document.createElement("optgroup");
+        group.label = "On this computer";
+        for (const slug of playedSlugs) group.append(new Option(bySlug.get(slug) ?? slug, slug));
+        realm.append(group);
+      }
+      if (all.length > 0) {
+        const group = document.createElement("optgroup");
+        group.label = "All realms";
+        for (const r of all) group.append(new Option(r.name, r.slug));
+        realm.append(group);
+      }
+      paintRealm();
     }
 
     paintPath();
@@ -283,7 +320,7 @@ export function render(el, ctx) {
     // Populated once per screen entry, not per repaint — nothing below this
     // point rebuilds the Game group, so this is the only call site besides
     // the two above that persist a new path.
-    loadRealmNames(config.wowRetailPath);
+    loadRealms(config.wowRetailPath, config.region);
   }
 
   // ---- sync ------------------------------------------------------------
