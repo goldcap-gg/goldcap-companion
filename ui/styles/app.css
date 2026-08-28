@@ -24,6 +24,12 @@ body {
   -webkit-font-smoothing: antialiased;
   user-select: none;
   overflow: hidden;
+  /* #root and the update bar (lib/updateBanner.js prepends it as #root's
+     sibling here, so it survives every screen swap) are stacked as flex
+     items rather than plain block flow, so the bar's height is *subtracted*
+     from #root's rather than added on top of it — see #root below. */
+  display: flex;
+  flex-direction: column;
 }
 
 /* A single soft gold bloom behind everything, so the window does not read as

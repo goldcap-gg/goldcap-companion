@@ -125,10 +125,21 @@ export function render(el, ctx) {
   const foot = document.createElement("p");
   foot.className = "foot dim";
 
-  const spacer = document.createElement("div");
-  spacer.className = "spacer";
+  // Everything between the topbar and the pinned Sync button/version line.
+  // A plain .spacer (flex:1, no overflow handling) used to sit where this
+  // wrapper's gap now goes — fine as long as hero+stages+meta always fit
+  // the fixed window height, but the update bar (or several stage rows
+  // carrying real error text at once) can push their combined height past
+  // what's left, and a .spacer doesn't shrink: it just lets its neighbors
+  // overflow the screen and get clipped by body's `overflow: hidden`. This
+  // wrapper absorbs the same leftover space when there's slack, but also
+  // shrinks and scrolls internally when there isn't, so the Sync button and
+  // version line stay fully visible either way.
+  const scroll = document.createElement("div");
+  scroll.className = "status-scroll";
+  scroll.append(hero, stages, meta);
 
-  el.append(top, hero, stages, meta, spacer, action, foot);
+  el.append(top, scroll, action, foot);
 
   let snapshot = null;
   let disposed = false;

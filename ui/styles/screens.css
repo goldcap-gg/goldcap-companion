@@ -1,7 +1,13 @@
 /* Layout shared by the three screens plus their enter transition. */
 
+/* Fills whatever height body has left after the update bar (a flex sibling,
+   see app.css's body rule) — not a fixed 100vh, or the bar's height would
+   be added on top of a full window's worth of #root instead of shared with
+   it, pushing .screen's bottom-pinned content off the bottom of the
+   (fixed-size, non-resizable) window. */
 #root {
-  height: 100vh;
+  flex: 1 1 auto;
+  min-height: 0;
   position: relative;
 }
 
@@ -87,6 +93,23 @@
 }
 
 /* ---------- status ---------- */
+
+/* Wraps hero+stages+meta (see status.js). flex:1 so it absorbs whatever
+   room is left between the topbar and the pinned Sync button/version line
+   — same job a plain .spacer would do — but min-height:0 + overflow-y:auto
+   let it shrink and scroll internally instead of overflowing the screen
+   when the update bar above (or several stage rows' worth of error text)
+   leaves less room than that content naturally needs. */
+.status-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
 
 .hero {
   display: flex;
