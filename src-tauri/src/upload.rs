@@ -173,13 +173,30 @@ impl UploadState {
     }
 }
 
-/// The dedupe key PLUS the mutable money fields. Fingerprinting on the key
-/// alone would permanently skip the "Sale Pending" maturation, which reuses
-/// the same key on purpose once the money lands.
+/// The dedupe key PLUS every mutable field the server is allowed to correct.
+/// Fingerprinting on the key alone would permanently skip the "Sale Pending"
+/// maturation, which reuses the same key on purpose once the money lands.
+///
+/// `region` joined the list on 2026-08-28. The addon used to stamp rows with
+/// the region of the last IMPORT rather than the one the character plays in,
+/// and now repairs those rows in place (GC.Ledger.RepairCharacterRegions).
+/// With region outside the fingerprint that repair could never reach the
+/// server: same key, same money, so the companion skipped the row forever and
+/// the website went on pairing sales against a market they never happened in.
+///
+/// Adding a field invalidates every key already on disk, so the next run does
+/// one full re-send. That is the documented worst case for this file (see the
+/// module header) and exactly what is wanted here: it is what carries the
+/// correction up for players who already have bad rows stored.
 fn entry_fingerprint(e: &LedgerEntry) -> String {
     format!(
-        "{}|{}|{}|{}|{}",
-        e.key, e.total, e.cut, e.deposit, e.pending
+        "{}|{}|{}|{}|{}|{}",
+        e.key,
+        e.total,
+        e.cut,
+        e.deposit,
+        e.pending,
+        e.region.as_deref().unwrap_or("")
     )
 }
 
@@ -625,6 +642,28 @@ mod tests {
         };
         let (entries, _) = pending(&data, &state);
         assert_eq!(entries.len(), 1, "a row whose contents changed must be re-sent");
+    }
+
+    #[test]
+    fn a_row_whose_region_was_repaired_is_sent_again_under_the_same_key() {
+        // The addon rewrites the region of rows it stamped from the imported
+        // snapshot instead of from the client (Core/Ledger.lua's
+        // RepairCharacterRegions). Key and money are untouched by that repair,
+        // so leaving region out of the fingerprint stranded the correction on
+        // the player's disk while the website kept pairing FIFO lots against a
+        // market the sale never happened in.
+        let mut state = UploadState::default();
+        let mut mislabelled = entry("a");
+        mislabelled.region = Some("kr".into());
+        state.remember_entries(&[&mislabelled]);
+
+        let data = LedgerData {
+            entries: vec![entry("a")], // region repaired back to eu
+            gold: vec![],
+            observations: vec![],
+        };
+        let (entries, _) = pending(&data, &state);
+        assert_eq!(entries.len(), 1, "a repaired region must reach the server");
     }
 
     #[test]
