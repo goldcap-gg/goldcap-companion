@@ -90,11 +90,47 @@ pub struct GoldPoint {
     pub at: i64,
 }
 
+/// One row of `GoldCapDB.itemNames`: what the game client said about an item
+/// the site could not name. Field names are the API's (routes/item-names.ts).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ItemNameReport {
+    #[serde(rename = "itemID")]
+    pub item_id: i64,
+    pub name: String,
+    pub locale: String,
+    pub at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quality: Option<i64>,
+    #[serde(rename = "classID", skip_serializing_if = "Option::is_none")]
+    pub class_id: Option<i64>,
+    #[serde(rename = "subclassID", skip_serializing_if = "Option::is_none")]
+    pub subclass_id: Option<i64>,
+    #[serde(rename = "className", skip_serializing_if = "Option::is_none")]
+    pub class_name: Option<String>,
+    #[serde(rename = "subclassName", skip_serializing_if = "Option::is_none")]
+    pub subclass_name: Option<String>,
+    #[serde(rename = "sellPrice", skip_serializing_if = "Option::is_none")]
+    pub sell_price: Option<i64>,
+    #[serde(rename = "itemLevel", skip_serializing_if = "Option::is_none")]
+    pub item_level: Option<i64>,
+    #[serde(rename = "requiredLevel", skip_serializing_if = "Option::is_none")]
+    pub required_level: Option<i64>,
+    #[serde(rename = "stackCount", skip_serializing_if = "Option::is_none")]
+    pub stack_count: Option<i64>,
+    #[serde(rename = "iconFileID", skip_serializing_if = "Option::is_none")]
+    pub icon_file_id: Option<i64>,
+    #[serde(rename = "bindType", skip_serializing_if = "Option::is_none")]
+    pub bind_type: Option<i64>,
+    #[serde(rename = "expansionID", skip_serializing_if = "Option::is_none")]
+    pub expansion_id: Option<i64>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LedgerData {
     pub entries: Vec<LedgerEntry>,
     pub gold: Vec<GoldPoint>,
     pub observations: Vec<LiveObservation>,
+    pub item_names: Vec<ItemNameReport>,
 }
 
 /// Every `WTF/Account/<ACCOUNT>/SavedVariables/GoldCap.lua` on disk. One per
@@ -316,6 +352,41 @@ pub fn parse_saved_variables(lua_source: &str) -> Result<LedgerData, String> {
                 levels: opt_levels(&row),
             });
         }
+    }
+
+    if let Ok(Value::Table(names)) = db.get::<Value>("itemNames") {
+        for (key, row) in names.pairs::<Value, Table>().flatten() {
+            let item_id = match key {
+                Value::Integer(i) if i > 0 => i,
+                Value::Number(n) if n.is_finite() && n.fract() == 0.0 && n > 0.0 => n as i64,
+                _ => continue,
+            };
+            let (Some(name), Some(locale), Some(at)) =
+                (opt_string(&row, "n"), opt_string(&row, "l"), opt_exact_int(&row, "at"))
+            else {
+                continue;
+            };
+            data.item_names.push(ItemNameReport {
+                item_id,
+                name,
+                locale,
+                at,
+                quality: opt_exact_int(&row, "q"),
+                class_id: opt_exact_int(&row, "c"),
+                subclass_id: opt_exact_int(&row, "sc"),
+                class_name: opt_string(&row, "ct"),
+                subclass_name: opt_string(&row, "sct"),
+                sell_price: opt_exact_int(&row, "sp"),
+                item_level: opt_exact_int(&row, "il"),
+                required_level: opt_exact_int(&row, "ml"),
+                stack_count: opt_exact_int(&row, "st"),
+                icon_file_id: opt_exact_int(&row, "ic"),
+                bind_type: opt_exact_int(&row, "b"),
+                expansion_id: opt_exact_int(&row, "e"),
+            });
+        }
+        // pairs() order is arbitrary; sort so batches and fingerprints are stable.
+        data.item_names.sort_by_key(|r| (r.item_id, r.locale.clone()));
     }
 
     Ok(data)
@@ -711,6 +782,30 @@ GoldCapDB = { ["ledger"] = {
         let data = parse_saved_variables(src).unwrap();
         assert_eq!(data.observations.len(), 1);
         assert_eq!(data.observations[0].levels, None);
+    }
+
+    #[test]
+    fn reads_item_names_keyed_by_item_id() {
+        let src = r#"GoldCapDB = { itemNames = {
+          [201421] = { ["n"] = "Tuskarr Jerky", ["l"] = "enUS", ["q"] = 1, ["il"] = 1, ["ml"] = 0,
+                       ["ct"] = "Consumable", ["sct"] = "Food & Drink", ["st"] = 20, ["ic"] = 1387645,
+                       ["sp"] = 1250, ["c"] = 0, ["sc"] = 5, ["b"] = 0, ["e"] = 9, ["at"] = 1756470000 },
+          [5] = { ["n"] = "No locale", ["at"] = 1 },
+          ["x"] = { ["n"] = "Bad key", ["l"] = "enUS", ["at"] = 1 },
+        } }"#;
+        let data = parse_saved_variables(src).unwrap();
+        assert_eq!(data.item_names.len(), 1);
+        let r = &data.item_names[0];
+        assert_eq!(r.item_id, 201421);
+        assert_eq!(r.name, "Tuskarr Jerky");
+        assert_eq!(r.locale, "enUS");
+        assert_eq!(r.quality, Some(1));
+        assert_eq!(r.icon_file_id, Some(1387645));
+        assert_eq!(r.at, 1756470000);
+        let json = serde_json::to_value(r).unwrap();
+        assert_eq!(json["itemID"], 201421);
+        assert_eq!(json["iconFileID"], 1387645);
+        assert!(json.get("region").is_none());
     }
 
     #[test]

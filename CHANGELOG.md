@@ -9,6 +9,10 @@ data.
 - **The update banner no longer pushes the Sync now button off the bottom of
   the window.** When an update was ready, the "Sync now" button could end up
   half cut off below the edge of the window.
+- **Sends the site the names of items it could not name.** With addon 0.6.2,
+  the game resolves a short list of hotfix-only items (Tuskarr Jerky and about
+  a hundred more) and the Companion passes those names to goldcap.gg on its
+  next sync, so they show up in search there. Nothing new to set up.
 
 ## 1.7.1 (2026-08-28)
 

@@ -5,7 +5,7 @@
 //! at logout. Losing this file is harmless: the server is idempotent on the
 //! addon's dedupe key, so the worst case is one redundant full re-send.
 
-use crate::savedvars::{GoldPoint, LedgerData, LedgerEntry, LiveObservation};
+use crate::savedvars::{GoldPoint, ItemNameReport, LedgerData, LedgerEntry, LiveObservation};
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -20,6 +20,10 @@ const UPLOAD_URL: &str = "https://api.goldcap.gg/v1/ledger/upload";
 pub const LIVE_OBSERVATIONS_URL: &str = "https://api.goldcap.gg/v1/live-observations";
 /// Must not exceed the API's own per-request cap (routes/live-observations.ts).
 pub const MAX_OBSERVATION_BATCH: usize = 200;
+
+pub const ITEM_NAMES_URL: &str = "https://api.goldcap.gg/v1/addon/item-names";
+/// Must not exceed the API's own per-request cap (routes/item-names.ts).
+pub const MAX_ITEM_NAME_BATCH: usize = 100;
 
 /// What the Status screen shows for the ledger stage. Kept next to the dedupe
 /// keys in the same file so a restart does not reset the counter to zero.
@@ -223,6 +227,16 @@ fn pending_observations<'a>(
         .iter()
         .filter(|o| o.region == region && !state.contains(&observation_fingerprint(o)))
         .collect()
+}
+
+/// `name|` prefix, same shared key set as ledger / `gold|` / `live|`. A report
+/// is re-sent only when the addon re-records it (`at` moves).
+fn item_name_fingerprint(r: &ItemNameReport) -> String {
+    format!("name|{}|{}|{}", r.item_id, r.locale, r.at)
+}
+
+fn pending_item_names<'a>(data: &'a LedgerData, state: &UploadState) -> Vec<&'a ItemNameReport> {
+    data.item_names.iter().filter(|r| !state.contains(&item_name_fingerprint(r))).collect()
 }
 
 pub fn pending<'a>(
@@ -466,6 +480,52 @@ pub async fn upload_observations_once(
     accepted
 }
 
+/// Item-name reports ride the same passenger rule as live observations:
+/// logger-only, never an error return. Region-free — a name is a name.
+pub async fn upload_item_names_once(
+    client: &reqwest::Client,
+    token: &str,
+    wow_retail_path: &Path,
+    state_path: &Path,
+    logger: &crate::logging::Logger,
+) -> usize {
+    if token.trim().is_empty() {
+        return 0;
+    }
+    let mut state = UploadState::load_from(state_path);
+    let mut accepted = 0usize;
+    for file in crate::savedvars::saved_variables_paths(wow_retail_path) {
+        let Ok(source) = std::fs::read_to_string(&file) else { continue };
+        let Ok(data) = crate::savedvars::parse_saved_variables(&source) else { continue };
+        let rows = pending_item_names(&data, &state);
+        for batch in rows.chunks(MAX_ITEM_NAME_BATCH) {
+            let body = serde_json::json!({ "reports": batch });
+            match client.post(ITEM_NAMES_URL).bearer_auth(token).json(&body).send().await {
+                Ok(res) if res.status().is_success() => {
+                    let keys: Vec<String> = batch.iter().map(|r| item_name_fingerprint(r)).collect();
+                    state.remember(&keys);
+                    accepted += batch.len();
+                }
+                Ok(res) => {
+                    logger.error(&format!("item names refused: {}", res.status()));
+                    break;
+                }
+                Err(e) => {
+                    logger.error(&format!("item names failed: {e}"));
+                    break;
+                }
+            }
+        }
+    }
+    if accepted > 0 {
+        if let Err(e) = state.save_to(state_path) {
+            logger.error(&format!("could not persist item name state: {e}"));
+        }
+        logger.info(&format!("item names sent: {accepted}"));
+    }
+    accepted
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -518,6 +578,70 @@ mod tests {
             total_qty: None,
             levels: None,
         }
+    }
+
+    fn name_report(item_id: i64, locale: &str, at: i64) -> ItemNameReport {
+        ItemNameReport {
+            item_id,
+            name: "Tuskarr Jerky".into(),
+            locale: locale.into(),
+            at,
+            quality: None,
+            class_id: None,
+            subclass_id: None,
+            class_name: None,
+            subclass_name: None,
+            sell_price: None,
+            item_level: None,
+            required_level: None,
+            stack_count: None,
+            icon_file_id: None,
+            bind_type: None,
+            expansion_id: None,
+        }
+    }
+
+    #[test]
+    fn item_name_fingerprints_key_on_item_locale_and_time_with_their_own_prefix() {
+        assert_eq!(item_name_fingerprint(&name_report(201421, "enUS", 5)), "name|201421|enUS|5");
+    }
+
+    #[test]
+    fn pending_item_names_drops_already_sent_rows() {
+        let data = LedgerData {
+            item_names: vec![name_report(1, "enUS", 5), name_report(2, "enUS", 5)],
+            ..Default::default()
+        };
+        let mut state = UploadState::default();
+        state.remember(&["name|1|enUS|5".to_string()]);
+        let pending = pending_item_names(&data, &state);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].item_id, 2);
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn item_name_batches_never_exceed_the_server_cap() {
+        assert!(MAX_ITEM_NAME_BATCH <= 100);
+    }
+
+    #[tokio::test]
+    async fn an_unpaired_item_name_pass_sends_nothing() {
+        let dir = std::env::temp_dir().join(format!("goldcap-names-unpaired-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let client = reqwest::Client::new();
+        let logger = crate::logging::Logger::new(&dir).unwrap();
+        let sent = upload_item_names_once(
+            &client,
+            "",
+            Path::new("/definitely/not/here"),
+            &dir.join("uploaded.json"),
+            &logger,
+        )
+        .await;
+        assert_eq!(sent, 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -580,6 +704,7 @@ mod tests {
             entries: vec![entry("a"), entry("b")],
             gold: vec![gold(1)],
             observations: vec![],
+            item_names: vec![],
         };
         let (entries, points) = pending(&data, &UploadState::default());
         assert_eq!(entries.len(), 2);
@@ -618,6 +743,7 @@ mod tests {
             entries: vec![entry("a"), entry("b")],
             gold: vec![],
             observations: vec![],
+            item_names: vec![],
         };
         let (entries, _) = pending(&data, &state);
         assert_eq!(entries.len(), 1);
@@ -639,6 +765,7 @@ mod tests {
             entries: vec![entry("a")], // pending=false, total=500_000
             gold: vec![],
             observations: vec![],
+            item_names: vec![],
         };
         let (entries, _) = pending(&data, &state);
         assert_eq!(entries.len(), 1, "a row whose contents changed must be re-sent");
@@ -661,6 +788,7 @@ mod tests {
             entries: vec![entry("a")], // region repaired back to eu
             gold: vec![],
             observations: vec![],
+            item_names: vec![],
         };
         let (entries, _) = pending(&data, &state);
         assert_eq!(entries.len(), 1, "a repaired region must reach the server");
@@ -674,6 +802,7 @@ mod tests {
             entries: vec![],
             gold: vec![gold(1), gold(2)],
             observations: vec![],
+            item_names: vec![],
         };
         let (_, points) = pending(&data, &state);
         assert_eq!(points.len(), 1);
@@ -733,6 +862,7 @@ mod tests {
             entries: (0..1200).map(|i| entry(&i.to_string())).collect(),
             gold: vec![],
             observations: vec![],
+            item_names: vec![],
         };
         let (entries, _) = pending(&data, &UploadState::default());
         let batches: Vec<_> = entries.chunks(MAX_BATCH).collect();
