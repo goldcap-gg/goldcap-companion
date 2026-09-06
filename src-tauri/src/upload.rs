@@ -5,7 +5,7 @@
 //! at logout. Losing this file is harmless: the server is idempotent on the
 //! addon's dedupe key, so the worst case is one redundant full re-send.
 
-use crate::savedvars::{GoldPoint, ItemNameReport, LedgerData, LedgerEntry, LiveObservation};
+use crate::savedvars::{GoldPoint, ItemNameReport, LedgerData, LedgerEntry, LiveObservation, OwnedLot};
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -24,6 +24,10 @@ pub const MAX_OBSERVATION_BATCH: usize = 200;
 pub const ITEM_NAMES_URL: &str = "https://api.goldcap.gg/v1/addon/item-names";
 /// Must not exceed the API's own per-request cap (routes/item-names.ts).
 pub const MAX_ITEM_NAME_BATCH: usize = 100;
+
+pub const OWNED_LOTS_URL: &str = "https://api.goldcap.gg/v1/owned-lots";
+/// Must not exceed the API's own per-request cap (routes/owned-lots.ts).
+pub const MAX_OWNED_LOT_BATCH: usize = 500;
 
 /// What the Status screen shows for the ledger stage. Kept next to the dedupe
 /// keys in the same file so a restart does not reset the counter to zero.
@@ -237,6 +241,22 @@ fn item_name_fingerprint(r: &ItemNameReport) -> String {
 
 fn pending_item_names<'a>(data: &'a LedgerData, state: &UploadState) -> Vec<&'a ItemNameReport> {
     data.item_names.iter().filter(|r| !state.contains(&item_name_fingerprint(r))).collect()
+}
+
+/// `owned|` prefix, same shared key set as ledger / `gold|` / `live|` / `name|`. Keyed on
+/// auctionID PLUS seenAt and cancelledAt (not auctionID alone): a re-seen lot's seenAt moving
+/// forward, or a cancellation landing, are both new facts the server has not seen yet.
+fn owned_lot_fingerprint(l: &OwnedLot) -> String {
+    format!("owned|{}|{}|{}", l.auction_id, l.seen_at, l.cancelled_at.unwrap_or(0))
+}
+
+/// Rows worth sending: not yet fingerprinted, and stamped with the SAME region the companion
+/// is configured for -- same rule as pending_observations.
+fn pending_owned_lots<'a>(data: &'a LedgerData, state: &UploadState, region: &str) -> Vec<&'a OwnedLot> {
+    data.owned_lots
+        .iter()
+        .filter(|l| l.region == region && !state.contains(&owned_lot_fingerprint(l)))
+        .collect()
 }
 
 pub fn pending<'a>(
@@ -526,10 +546,65 @@ pub async fn upload_item_names_once(
     accepted
 }
 
+/// Owned lots ride the same passenger rule as live observations and item names:
+/// logger-only, never an error return. An unpaired companion (empty token) is a silent
+/// no-op. Returns rows accepted this pass.
+pub async fn upload_owned_lots_once(
+    client: &reqwest::Client,
+    token: &str,
+    region: &str,
+    wow_retail_path: &Path,
+    state_path: &Path,
+    logger: &crate::logging::Logger,
+) -> usize {
+    if token.trim().is_empty() {
+        return 0;
+    }
+
+    let mut state = UploadState::load_from(state_path);
+    let mut accepted = 0usize;
+
+    for file in crate::savedvars::saved_variables_paths(wow_retail_path) {
+        let Ok(source) = std::fs::read_to_string(&file) else { continue };
+        let Ok(data) = crate::savedvars::parse_saved_variables(&source) else { continue };
+
+        let rows = pending_owned_lots(&data, &state, region);
+
+        for batch in rows.chunks(MAX_OWNED_LOT_BATCH) {
+            let body = serde_json::json!({ "region": region, "lots": batch });
+            let sent = client.post(OWNED_LOTS_URL).bearer_auth(token).json(&body).send().await;
+            match sent {
+                Ok(res) if res.status().is_success() => {
+                    let keys: Vec<String> = batch.iter().map(|l| owned_lot_fingerprint(l)).collect();
+                    state.remember(&keys);
+                    accepted += batch.len();
+                }
+                Ok(res) => {
+                    logger.error(&format!("owned lots refused: {}", res.status()));
+                    break; // retry this file's remainder next tick
+                }
+                Err(e) => {
+                    logger.error(&format!("owned lots upload failed: {e}"));
+                    break; // retry this file's remainder next tick
+                }
+            }
+        }
+    }
+
+    if accepted > 0 {
+        if let Err(e) = state.save_to(state_path) {
+            logger.error(&format!("could not persist owned lot state: {e}"));
+        }
+        logger.info(&format!("owned lots sent: {accepted}"));
+    }
+
+    accepted
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::savedvars::{parse_saved_variables, GoldPoint, LedgerData, LedgerEntry, LiveObservation};
+    use crate::savedvars::{parse_saved_variables, GoldPoint, LedgerData, LedgerEntry, LiveObservation, OwnedLot};
 
     const REAL_FILE: &str = include_str!("../tests/fixtures/GoldCap.lua");
 
@@ -690,6 +765,75 @@ mod tests {
             "eu",
             "dentarg",
             std::path::Path::new("/nonexistent"),
+            &dir.join("uploaded.json"),
+            &logger,
+        )
+        .await;
+        assert_eq!(sent, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn owned_lot(auction_id: i64, seen_at: i64, cancelled_at: Option<i64>) -> OwnedLot {
+        OwnedLot {
+            auction_id,
+            item_id: 190316,
+            is_commodity: true,
+            quantity: 20,
+            unit_price: 921200,
+            expires_at: None,
+            character: "Aiyana-Dentarg".into(),
+            region: "eu".into(),
+            seen_at,
+            cancelled_at,
+        }
+    }
+
+    #[test]
+    fn owned_lot_fingerprint_changes_on_seen_at_and_cancelled_at() {
+        let a = owned_lot_fingerprint(&owned_lot(1, 1000, None));
+        assert_eq!(a, "owned|1|1000|0");
+        assert_ne!(a, owned_lot_fingerprint(&owned_lot(1, 1100, None)));
+        assert_ne!(a, owned_lot_fingerprint(&owned_lot(1, 1000, Some(1050))));
+    }
+
+    #[test]
+    fn pending_owned_lots_drops_already_sent_and_wrong_region_rows() {
+        let mut state = UploadState::default();
+        state.remember(&["owned|1|1000|0".to_string()]);
+        let data = LedgerData {
+            owned_lots: vec![
+                owned_lot(1, 1000, None), // already sent
+                owned_lot(2, 1100, None), // fresh
+                OwnedLot { region: "us".into(), ..owned_lot(3, 1200, None) }, // wrong region
+            ],
+            ..Default::default()
+        };
+        let pending = pending_owned_lots(&data, &state, "eu");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].auction_id, 2);
+    }
+
+    #[test]
+    fn owned_lot_batches_never_exceed_the_server_cap() {
+        let rows: Vec<OwnedLot> = (0..900).map(|i| owned_lot(i, 1000 + i, None)).collect();
+        let refs: Vec<&OwnedLot> = rows.iter().collect();
+        let batches: Vec<_> = refs.chunks(MAX_OWNED_LOT_BATCH).collect();
+        assert!(batches.iter().all(|b| b.len() <= 500));
+        assert_eq!(batches.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn an_unpaired_owned_lot_pass_sends_nothing() {
+        let dir = std::env::temp_dir().join(format!("goldcap-ownedlots-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let client = reqwest::Client::new();
+        let logger = crate::logging::Logger::new(&dir).unwrap();
+        let sent = upload_owned_lots_once(
+            &client,
+            "",
+            "eu",
+            Path::new("/definitely/not/here"),
             &dir.join("uploaded.json"),
             &logger,
         )

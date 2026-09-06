@@ -388,6 +388,17 @@ pub async fn sync_once(
         logger,
     )
     .await;
+
+    // Owned lots (My-auctions): same passenger rule as the two uploads above.
+    crate::upload::upload_owned_lots_once(
+        client,
+        &config.companion_token,
+        &region,
+        Path::new(&config.wow_retail_path),
+        &state_path.join(crate::upload::STATE_FILE_NAME),
+        logger,
+    )
+    .await;
 }
 
 /// The sync loop: on every interval tick (recomputed from `config_rx`'s
