@@ -4,6 +4,13 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
+## 1.8.0 (unreleased)
+
+- **Sends goldcap.gg your posted and cancelled auctions.** With addon 0.8.0, the game
+  remembers every lot your Auction House tab has seen, and the Companion uploads it on the
+  regular sync tick — the same way ledger sales already sync. Powers the new My auctions page
+  on the site. Nothing new to set up.
+
 ## 1.7.2 (2026-08-29)
 
 - **The update banner no longer pushes the Sync now button off the bottom of

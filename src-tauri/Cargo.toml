@@ -1,6 +1,6 @@
 [package]
 name = "goldcap-companion"
-version = "1.7.2"
+version = "1.8.0"
 description = "GoldCap companion — automatic price sync for the GoldCap WoW addon"
 edition = "2021"
 rust-version = "1.77"
