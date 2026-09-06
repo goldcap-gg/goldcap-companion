@@ -81,6 +81,29 @@ pub struct LiveObservation {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct OwnedLot {
+    #[serde(rename = "auctionID")]
+    pub auction_id: i64,
+    #[serde(rename = "itemID")]
+    pub item_id: i64,
+    #[serde(rename = "isCommodity")]
+    pub is_commodity: bool,
+    pub quantity: i64,
+    #[serde(rename = "unitPrice")]
+    pub unit_price: i64,
+    #[serde(rename = "expiresAt", skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
+    #[serde(rename = "char")]
+    pub character: String,
+    #[serde(skip_serializing)]
+    pub region: String,
+    #[serde(rename = "seenAt")]
+    pub seen_at: i64,
+    #[serde(rename = "cancelledAt", skip_serializing_if = "Option::is_none")]
+    pub cancelled_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct GoldPoint {
     #[serde(rename = "char")]
     pub character: String,
@@ -131,6 +154,7 @@ pub struct LedgerData {
     pub gold: Vec<GoldPoint>,
     pub observations: Vec<LiveObservation>,
     pub item_names: Vec<ItemNameReport>,
+    pub owned_lots: Vec<OwnedLot>,
 }
 
 /// Every `WTF/Account/<ACCOUNT>/SavedVariables/GoldCap.lua` on disk. One per
@@ -350,6 +374,35 @@ pub fn parse_saved_variables(lua_source: &str) -> Result<LedgerData, String> {
                 listings: opt_exact_int(&row, "listings"),
                 total_qty: opt_exact_int(&row, "totalQty"),
                 levels: opt_levels(&row),
+            });
+        }
+    }
+
+    if let Ok(Value::Table(owned_lots)) = db.get::<Value>("ownedLots") {
+        for row in owned_lots.sequence_values::<Table>().flatten() {
+            let (Some(auction_id), Some(item_id), Some(quantity), Some(unit_price),
+                Some(character), Some(region), Some(seen_at)) = (
+                opt_exact_int(&row, "auctionID"),
+                opt_exact_int(&row, "itemID"),
+                opt_exact_int(&row, "quantity"),
+                opt_exact_int(&row, "unitPrice"),
+                opt_string(&row, "char"),
+                opt_string(&row, "region"),
+                opt_exact_int(&row, "seenAt"),
+            ) else {
+                continue;
+            };
+            data.owned_lots.push(OwnedLot {
+                auction_id,
+                item_id,
+                is_commodity: flag(&row, "isCommodity"),
+                quantity,
+                unit_price,
+                expires_at: opt_exact_int(&row, "expiresAt"),
+                character,
+                region,
+                seen_at,
+                cancelled_at: opt_exact_int(&row, "cancelledAt"),
             });
         }
     }
@@ -782,6 +835,60 @@ GoldCapDB = { ["ledger"] = {
         let data = parse_saved_variables(src).unwrap();
         assert_eq!(data.observations.len(), 1);
         assert_eq!(data.observations[0].levels, None);
+    }
+
+    #[test]
+    fn owned_lots_parse_two_characters_and_a_cancelled_row() {
+        let src = r#"GoldCapDB = { ownedLots = {
+            { auctionID = 1932076389, itemID = 190316, isCommodity = true, quantity = 20,
+              unitPrice = 921200, expiresAt = 1757200000, char = "Aiyana-Dentarg",
+              region = "eu", seenAt = 1757100000 },
+            { auctionID = 1932076390, itemID = 42, isCommodity = false, quantity = 1,
+              unitPrice = 500000, char = "Bjorn-Area52", region = "us", seenAt = 1757100100,
+              cancelledAt = 1757100200 },
+        } }"#;
+        let data = parse_saved_variables(src).unwrap();
+        assert_eq!(data.owned_lots.len(), 2);
+
+        let first = &data.owned_lots[0];
+        assert_eq!(first.auction_id, 1932076389);
+        assert_eq!(first.item_id, 190316);
+        assert!(first.is_commodity);
+        assert_eq!(first.quantity, 20);
+        assert_eq!(first.unit_price, 921200);
+        assert_eq!(first.expires_at, Some(1757200000));
+        assert_eq!(first.character, "Aiyana-Dentarg");
+        assert_eq!(first.region, "eu");
+        assert_eq!(first.seen_at, 1757100000);
+        assert_eq!(first.cancelled_at, None);
+
+        let second = &data.owned_lots[1];
+        assert!(!second.is_commodity);
+        assert_eq!(second.character, "Bjorn-Area52");
+        assert_eq!(second.region, "us");
+        assert_eq!(second.cancelled_at, Some(1757100200));
+        assert_eq!(second.expires_at, None);
+    }
+
+    #[test]
+    fn owned_lots_missing_required_fields_are_skipped() {
+        let src = r#"GoldCapDB = { ownedLots = {
+            { itemID = 42, isCommodity = true, quantity = 1, unitPrice = 100,
+              char = "A-R", region = "eu", seenAt = 1000 },              -- no auctionID
+            { auctionID = 1, isCommodity = true, quantity = 1, unitPrice = 100,
+              char = "A-R", region = "eu", seenAt = 1000 },              -- no itemID
+            { auctionID = 2, itemID = 42, isCommodity = true, quantity = 1, unitPrice = 100,
+              region = "eu", seenAt = 1000 },                            -- no char
+            { auctionID = 3, itemID = 42, isCommodity = true, quantity = 1, unitPrice = 100,
+              char = "A-R", seenAt = 1000 },                             -- no region
+            { auctionID = 4, itemID = 42, isCommodity = true, quantity = 1, unitPrice = 100,
+              char = "A-R", region = "eu" },                             -- no seenAt
+            { auctionID = 5, itemID = 42, isCommodity = true, quantity = 1, unitPrice = 100,
+              char = "A-R", region = "eu", seenAt = 1000 },
+        } }"#;
+        let data = parse_saved_variables(src).unwrap();
+        assert_eq!(data.owned_lots.len(), 1);
+        assert_eq!(data.owned_lots[0].auction_id, 5);
     }
 
     #[test]

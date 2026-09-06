@@ -705,6 +705,7 @@ mod tests {
             gold: vec![gold(1)],
             observations: vec![],
             item_names: vec![],
+            owned_lots: vec![],
         };
         let (entries, points) = pending(&data, &UploadState::default());
         assert_eq!(entries.len(), 2);
@@ -744,6 +745,7 @@ mod tests {
             gold: vec![],
             observations: vec![],
             item_names: vec![],
+            owned_lots: vec![],
         };
         let (entries, _) = pending(&data, &state);
         assert_eq!(entries.len(), 1);
@@ -766,6 +768,7 @@ mod tests {
             gold: vec![],
             observations: vec![],
             item_names: vec![],
+            owned_lots: vec![],
         };
         let (entries, _) = pending(&data, &state);
         assert_eq!(entries.len(), 1, "a row whose contents changed must be re-sent");
@@ -789,6 +792,7 @@ mod tests {
             gold: vec![],
             observations: vec![],
             item_names: vec![],
+            owned_lots: vec![],
         };
         let (entries, _) = pending(&data, &state);
         assert_eq!(entries.len(), 1, "a repaired region must reach the server");
@@ -803,6 +807,7 @@ mod tests {
             gold: vec![gold(1), gold(2)],
             observations: vec![],
             item_names: vec![],
+            owned_lots: vec![],
         };
         let (_, points) = pending(&data, &state);
         assert_eq!(points.len(), 1);
@@ -863,6 +868,7 @@ mod tests {
             gold: vec![],
             observations: vec![],
             item_names: vec![],
+            owned_lots: vec![],
         };
         let (entries, _) = pending(&data, &UploadState::default());
         let batches: Vec<_> = entries.chunks(MAX_BATCH).collect();
