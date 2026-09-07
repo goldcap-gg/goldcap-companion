@@ -4,7 +4,7 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
-## 1.8.0 (unreleased)
+## 1.8.0 (2026-09-08)
 
 - **Sends goldcap.gg your posted and cancelled auctions.** With addon 0.8.0, the game
   remembers every lot your Auction House tab has seen, and the Companion uploads it on the
