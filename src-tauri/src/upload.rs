@@ -251,12 +251,27 @@ fn owned_lot_fingerprint(l: &OwnedLot) -> String {
 }
 
 /// Rows worth sending: not yet fingerprinted, and stamped with the SAME region the companion
-/// is configured for -- same rule as pending_observations.
+/// is configured for -- same rule as pending_observations. Deduped by auction_id, newest
+/// seen_at wins: the addon's SavedVariables can carry more than one row for the same
+/// auction_id (a stale row from a prior character scope not yet pruned, or the rare
+/// cross-character id collision the addon's own doc calls out) -- the server's primary key is
+/// (user_id, region, auction_id), so sending two rows for the same id in one batch would
+/// either race each other or double-count in the accepted/updated response.
 fn pending_owned_lots<'a>(data: &'a LedgerData, state: &UploadState, region: &str) -> Vec<&'a OwnedLot> {
-    data.owned_lots
+    let mut by_auction_id: std::collections::HashMap<i64, &'a OwnedLot> = std::collections::HashMap::new();
+    for lot in data
+        .owned_lots
         .iter()
         .filter(|l| l.region == region && !state.contains(&owned_lot_fingerprint(l)))
-        .collect()
+    {
+        match by_auction_id.get(&lot.auction_id) {
+            Some(existing) if existing.seen_at >= lot.seen_at => {}
+            _ => {
+                by_auction_id.insert(lot.auction_id, lot);
+            }
+        }
+    }
+    by_auction_id.into_values().collect()
 }
 
 pub fn pending<'a>(
@@ -811,6 +826,22 @@ mod tests {
         let pending = pending_owned_lots(&data, &state, "eu");
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].auction_id, 2);
+    }
+
+    #[test]
+    fn pending_owned_lots_dedupes_by_auction_id_keeping_the_newest_seen_at() {
+        let state = UploadState::default();
+        let data = LedgerData {
+            owned_lots: vec![
+                OwnedLot { character: "Alice-Kazzak".into(), ..owned_lot(1, 1000, None) },
+                OwnedLot { character: "Bob-Kazzak".into(), unit_price: 999, ..owned_lot(1, 2000, None) },
+            ],
+            ..Default::default()
+        };
+        let pending = pending_owned_lots(&data, &state, "eu");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].seen_at, 2000, "the newer seen_at row wins the collision");
+        assert_eq!(pending[0].unit_price, 999);
     }
 
     #[test]
