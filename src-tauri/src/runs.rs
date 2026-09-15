@@ -107,16 +107,17 @@ pub struct WireRuns {
 
 /// Renders `Runs.lua`'s contents: the addon-side buy list, keyed off the
 /// same short field names as the rest of `GoldCap_AppData` (`i`/`q`/`v`/`n`
-/// on a line) to keep the in-game table small. `updatedAt` on each run is
-/// re-derived from its ISO timestamp the same way `LedgerSummary.lua`'s
-/// `sale_rows` does; an unparseable timestamp fails the whole render rather
-/// than silently rendering as the Unix epoch — the caller (Task 2) must not
-/// write a file that lies about a run's freshness.
+/// on a line, plus `u`/`vu`/`ch`/`cp` when the site priced the line) to keep
+/// the in-game table small. `updatedAt` on each run is re-derived from its
+/// ISO timestamp the same way `LedgerSummary.lua`'s `sale_rows` does; an
+/// unparseable timestamp fails the whole render rather than silently
+/// rendering as the Unix epoch — `apply_fetch_result` must not write a file
+/// that lies about a run's freshness.
 pub fn render_runs_lua(runs: &WireRuns, generated_at: i64) -> Result<String, String> {
     let mut out = String::new();
     // `v` is rendered straight from the wire payload rather than hard-coded:
     // the version gate itself lives in `apply_fetch_result`, which refuses
-    // `v != 1` before this function is ever called.
+    // any `v` outside `SUPPORTED_VERSIONS` before this function is called.
     out.push_str(&format!(
         "GoldCap_AppRuns = {{ v = {}, generatedAt = {}, plan = '{}', freeLines = {}, runs = {{ ",
         runs.v,
@@ -154,10 +155,12 @@ pub fn render_runs_lua(runs: &WireRuns, generated_at: i64) -> Result<String, Str
             // absent rather than written as 0 or nil — the addon reads a
             // missing key as "the site didn't know", which is not the same
             // as "the site says zero".
-            if let Some(usual) = line.usual {
+            // A zero is not a price either: the site stores an unknown vendor price as
+            // NULL, so a 0 here would be a line priced at nothing in game.
+            if let Some(usual) = line.usual.filter(|v| *v > 0) {
                 out.push_str(&format!(", u = {usual}"));
             }
-            if let Some(vendor_unit) = line.vendor_unit {
+            if let Some(vendor_unit) = line.vendor_unit.filter(|v| *v > 0) {
                 out.push_str(&format!(", vu = {vendor_unit}"));
             }
             if let Some(cheap) = &line.cheap_hour {
@@ -571,6 +574,31 @@ mod tests {
         for key in [", u = ", ", vu = "] {
             assert!(!hour_only.contains(key), "leaked {key}");
         }
+    }
+
+    #[test]
+    fn a_zero_price_is_dropped_rather_than_rendered() {
+        // The site stores an unknown vendor price as NULL, so a 0 would price a
+        // line at nothing in game. Absent beats misleading.
+        let runs = WireRuns {
+            v: 2,
+            generated_at: "2026-09-15T10:00:00.000Z".into(),
+            plan: "pro".into(),
+            free_lines: 5,
+            runs: vec![WireRun {
+                code: "abcd2345".into(),
+                name: None,
+                updated_at: "2026-09-15T09:00:00.000Z".into(),
+                lines: vec![WireRunLine {
+                    usual: Some(0),
+                    vendor_unit: Some(0),
+                    ..line(2589, 20, false, "Linen Cloth")
+                }],
+            }],
+        };
+        let lua = render_runs_lua(&runs, 1).unwrap();
+        assert!(!lua.contains(", u = "));
+        assert!(!lua.contains(", vu = "));
     }
 
     #[test]
