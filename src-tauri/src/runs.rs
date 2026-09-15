@@ -1,10 +1,11 @@
-//! Wire shape for the "Buy runs" feature and the `Runs.lua` renderer. Task 2
-//! adds the fetch; this module only owns the deserialized shape and the pure
-//! render function, same split as `ledger_summary.rs`.
+//! Wire shape, `Runs.lua` renderer, fetch, and write seam for the "Buy runs"
+//! feature — same shape as `ledger_summary.rs`, rides the sync tick as a
+//! passenger after it (see `sync.rs::sync_once`).
 
 use crate::ledger_summary::parse_iso_utc;
 use crate::luafile::escape_lua_string;
 use serde::Deserialize;
+use std::path::Path;
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -77,6 +78,45 @@ pub fn render_runs_lua(runs: &WireRuns, generated_at: i64) -> Result<String, Str
     }
     out.push_str(" } }\n");
     Ok(out)
+}
+
+pub const RUNS_URL: &str = "https://api.goldcap.gg/v1/lists/companion";
+
+/// Fetches the paired user's buy runs. The token IS the identity, same as
+/// `ledger_summary::fetch_summary` — no userId on the route.
+pub async fn fetch_runs(client: &reqwest::Client, token: &str) -> Result<WireRuns, String> {
+    let res = client
+        .get(RUNS_URL)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !res.status().is_success() {
+        return Err(format!("runs: http {}", res.status()));
+    }
+    res.json::<WireRuns>().await.map_err(|e| e.to_string())
+}
+
+/// The write seam `sync_once` calls: `Ok(true)` means it wrote, and every
+/// failure — a fetch error, an unsupported `v`, or an unparseable
+/// `updatedAt` inside `render_runs_lua` — comes back as `Err` before any
+/// filesystem operation, leaving a previously written `Runs.lua` untouched.
+/// `Ok(false)` is part of the shared shape with `ledger_summary`'s seam but
+/// is never actually returned here.
+pub fn apply_fetch_result(
+    dir: &Path,
+    fetched: Result<WireRuns, String>,
+    generated_at: i64,
+) -> Result<bool, String> {
+    let runs = fetched?;
+    if runs.v != 1 {
+        return Err(format!("runs: unsupported version {}", runs.v));
+    }
+    let contents = render_runs_lua(&runs, generated_at)?;
+    crate::luafile::ensure_toc(dir).map_err(|e| e.to_string())?;
+    crate::luafile::write_atomic(&dir.join(crate::luafile::RUNS_FILE_NAME), &contents)
+        .map_err(|e| e.to_string())?;
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -164,5 +204,47 @@ mod tests {
         let json = r#"{"v":1,"generatedAt":"2026-09-15T10:00:00.000Z","plan":"free","freeLines":5,"runs":[{"code":"abcd2345","name":null,"updatedAt":"2026-09-15T09:00:00.000Z","lines":[{"itemId":5,"qty":210,"vendor":false,"nameEn":"Plant Protein"}]}]}"#;
         let parsed: WireRuns = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.runs[0].lines[0].qty, 210);
+    }
+
+    #[test]
+    fn a_fetch_error_leaves_the_previous_file_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(crate::luafile::RUNS_FILE_NAME), "old").unwrap();
+        let r = apply_fetch_result(dir.path(), Err("boom".into()), 1);
+        assert!(r.is_err());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(crate::luafile::RUNS_FILE_NAME)).unwrap(),
+            "old"
+        );
+    }
+
+    #[test]
+    fn a_fetch_writes_the_file_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs = WireRuns {
+            v: 1,
+            generated_at: "2026-09-15T10:00:00.000Z".into(),
+            plan: "free".into(),
+            free_lines: 5,
+            runs: vec![],
+        };
+        assert_eq!(apply_fetch_result(dir.path(), Ok(runs), 7).unwrap(), true);
+        let s = std::fs::read_to_string(dir.path().join(crate::luafile::RUNS_FILE_NAME)).unwrap();
+        assert!(s.starts_with("GoldCap_AppRuns = { v = 1, generatedAt = 7"));
+        assert!(!dir.path().join("Runs.lua.tmp").exists());
+    }
+
+    #[test]
+    fn a_wrong_version_is_refused_before_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs = WireRuns {
+            v: 2,
+            generated_at: String::new(),
+            plan: "free".into(),
+            free_lines: 5,
+            runs: vec![],
+        };
+        assert!(apply_fetch_result(dir.path(), Ok(runs), 7).is_err());
+        assert!(!dir.path().join(crate::luafile::RUNS_FILE_NAME).exists());
     }
 }

@@ -142,6 +142,17 @@ pub fn remove_ledger_summary(dir: &Path) -> io::Result<()> {
     }
 }
 
+/// Removes `Runs.lua` from `dir` if present. Same unpair rule as
+/// `remove_ledger_summary`: a previously written buy-runs snapshot must not
+/// survive an unpair. A missing file is not an error.
+pub fn remove_runs(dir: &Path) -> io::Result<()> {
+    match fs::remove_file(dir.join(RUNS_FILE_NAME)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,6 +315,33 @@ mod tests {
 
         remove_ledger_summary(&dir).unwrap();
         remove_ledger_summary(&dir).unwrap();
+
+        assert!(!target.exists());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn remove_runs_deletes_existing_file() {
+        let dir = temp_dir("runs-remove");
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join(RUNS_FILE_NAME);
+        fs::write(&target, "GoldCap_AppRuns = {}\n").unwrap();
+
+        remove_runs(&dir).unwrap();
+
+        assert!(!target.exists());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn remove_runs_is_ok_when_already_gone() {
+        let dir = temp_dir("runs-remove-twice");
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join(RUNS_FILE_NAME);
+        fs::write(&target, "GoldCap_AppRuns = {}\n").unwrap();
+
+        remove_runs(&dir).unwrap();
+        remove_runs(&dir).unwrap();
 
         assert!(!target.exists());
         fs::remove_dir_all(&dir).ok();

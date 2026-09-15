@@ -366,6 +366,25 @@ pub async fn sync_once(
         }
     }
 
+    // Buy runs ride the same passenger rule as the ledger summary leg just
+    // above: logger-only, never touches SyncStatus or the tray label. A
+    // failed fetch (or a write failure) leaves the previously written
+    // Runs.lua on disk untouched — apply_fetch_result performs no
+    // filesystem operation on Err. Unpaired = silent no-op, same rule as
+    // the other passengers.
+    if !config.companion_token.is_empty() {
+        let fetched = crate::runs::fetch_runs(client, &config.companion_token).await;
+        match crate::runs::apply_fetch_result(
+            &luafile::addon_dir(Path::new(&config.wow_retail_path)),
+            fetched,
+            luafile::now_unix(),
+        ) {
+            Ok(true) => logger.info("runs: written"),
+            Ok(false) => {}
+            Err(e) => logger.error(&format!("runs: {e}")),
+        }
+    }
+
     // Live observations ride the same passenger rule as the summary leg:
     // logger-only, never turns a good price sync red.
     crate::upload::upload_observations_once(
