@@ -30,6 +30,10 @@ pub struct LedgerEntry {
     pub character: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
+    /// The BUY-tab run this purchase came from, when the addon recorded one.
+    /// Display only on the site — it never changes what the row means.
+    #[serde(rename = "runCode", skip_serializing_if = "Option::is_none")]
+    pub run_code: Option<String>,
     #[serde(rename = "decisionVersion", skip_serializing_if = "Option::is_none")]
     pub decision_version: Option<i64>,
     #[serde(rename = "decisionStatus", skip_serializing_if = "Option::is_none")]
@@ -40,7 +44,10 @@ pub struct LedgerEntry {
     pub stress_unit: Option<i64>,
     #[serde(rename = "expectedProfit", skip_serializing_if = "Option::is_none")]
     pub expected_profit: Option<i64>,
-    #[serde(rename = "recommendedQuantity", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "recommendedQuantity",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub recommended_quantity: Option<i64>,
     #[serde(rename = "sourceAt", skip_serializing_if = "Option::is_none")]
     pub source_at: Option<i64>,
@@ -191,10 +198,7 @@ fn opt_exact_int(t: &Table, key: &str) -> Option<i64> {
     match t.get::<Value>(key) {
         Ok(Value::Integer(i)) => Some(i),
         Ok(Value::Number(n))
-            if n.is_finite()
-                && n.fract() == 0.0
-                && n > i64::MIN as f64
-                && n < i64::MAX as f64 =>
+            if n.is_finite() && n.fract() == 0.0 && n > i64::MIN as f64 && n < i64::MAX as f64 =>
         {
             Some(n as i64)
         }
@@ -258,6 +262,23 @@ fn decision_evidence(t: &Table) -> Option<DecisionEvidence> {
     })
 }
 
+// The upload API takes `runCode` only on a `goldcap_buy` row and only in the
+// shape it published (`/^[a-z0-9]{8}$/`); anything else rejects the entire
+// batch, which would strand every other row in it. Same reasoning as
+// decision_evidence above: an out-of-contract field is dropped, the row is
+// kept.
+fn buy_run_code(t: &Table, source: &str) -> Option<String> {
+    if source != "goldcap_buy" {
+        return None;
+    }
+    let code = opt_string(t, "runCode")?;
+    let well_formed = code.len() == 8
+        && code
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
+    well_formed.then_some(code)
+}
+
 /// Bounded book levels. Any malformed element clears the whole list —
 /// a partial book misleads more than an absent one (mirrors the
 /// all-or-nothing rule decision_evidence already applies).
@@ -312,6 +333,7 @@ pub fn parse_saved_variables(lua_source: &str) -> Result<LedgerData, String> {
                 continue;
             };
             let evidence = decision_evidence(&row);
+            let run_code = buy_run_code(&row, &source);
             data.entries.push(LedgerEntry {
                 key,
                 kind,
@@ -327,6 +349,7 @@ pub fn parse_saved_variables(lua_source: &str) -> Result<LedgerData, String> {
                 at,
                 character: opt_string(&row, "char"),
                 region: opt_string(&row, "region"),
+                run_code,
                 decision_version: evidence.as_ref().map(|e| e.decision_version),
                 decision_status: evidence.as_ref().map(|e| e.decision_status.clone()),
                 decision_reasons: evidence.as_ref().map(|e| e.decision_reasons.clone()),
@@ -380,8 +403,15 @@ pub fn parse_saved_variables(lua_source: &str) -> Result<LedgerData, String> {
 
     if let Ok(Value::Table(owned_lots)) = db.get::<Value>("ownedLots") {
         for row in owned_lots.sequence_values::<Table>().flatten() {
-            let (Some(auction_id), Some(item_id), Some(quantity), Some(unit_price),
-                Some(character), Some(region), Some(seen_at)) = (
+            let (
+                Some(auction_id),
+                Some(item_id),
+                Some(quantity),
+                Some(unit_price),
+                Some(character),
+                Some(region),
+                Some(seen_at),
+            ) = (
                 opt_exact_int(&row, "auctionID"),
                 opt_exact_int(&row, "itemID"),
                 opt_exact_int(&row, "quantity"),
@@ -389,7 +419,8 @@ pub fn parse_saved_variables(lua_source: &str) -> Result<LedgerData, String> {
                 opt_string(&row, "char"),
                 opt_string(&row, "region"),
                 opt_exact_int(&row, "seenAt"),
-            ) else {
+            )
+            else {
                 continue;
             };
             data.owned_lots.push(OwnedLot {
@@ -414,9 +445,11 @@ pub fn parse_saved_variables(lua_source: &str) -> Result<LedgerData, String> {
                 Value::Number(n) if n.is_finite() && n.fract() == 0.0 && n > 0.0 => n as i64,
                 _ => continue,
             };
-            let (Some(name), Some(locale), Some(at)) =
-                (opt_string(&row, "n"), opt_string(&row, "l"), opt_exact_int(&row, "at"))
-            else {
+            let (Some(name), Some(locale), Some(at)) = (
+                opt_string(&row, "n"),
+                opt_string(&row, "l"),
+                opt_exact_int(&row, "at"),
+            ) else {
                 continue;
             };
             data.item_names.push(ItemNameReport {
@@ -439,7 +472,8 @@ pub fn parse_saved_variables(lua_source: &str) -> Result<LedgerData, String> {
             });
         }
         // pairs() order is arbitrary; sort so batches and fingerprints are stable.
-        data.item_names.sort_by_key(|r| (r.item_id, r.locale.clone()));
+        data.item_names
+            .sort_by_key(|r| (r.item_id, r.locale.clone()));
     }
 
     Ok(data)
@@ -462,7 +496,10 @@ mod tests {
         // them, so the parser was being tested against bytes the game never
         // produces. Guarded here because a .gitattributes rule, an editor or
         // a well-meaning formatter could quietly undo it again.
-        assert!(REAL_FILE.contains("\r\n"), "fixture lost its CRLF line endings");
+        assert!(
+            REAL_FILE.contains("\r\n"),
+            "fixture lost its CRLF line endings"
+        );
     }
 
     #[test]
@@ -476,7 +513,11 @@ mod tests {
     #[test]
     fn a_real_observation_carries_its_levels_and_a_minimal_one_does_not() {
         let data = parse_saved_variables(REAL_FILE).unwrap();
-        let full = data.observations.iter().find(|o| o.item_id == 190320).unwrap();
+        let full = data
+            .observations
+            .iter()
+            .find(|o| o.item_id == 190320)
+            .unwrap();
         assert_eq!(full.region, "eu");
         assert_eq!(full.scanned_at, 1786145400);
         assert_eq!(full.min_unit, 8000);
@@ -487,7 +528,11 @@ mod tests {
         assert_eq!(levels[0], BookLevel { unit: 8000, qty: 3 });
         assert_eq!(levels[1], BookLevel { unit: 8500, qty: 6 });
 
-        let minimal = data.observations.iter().find(|o| o.item_id == 7676).unwrap();
+        let minimal = data
+            .observations
+            .iter()
+            .find(|o| o.item_id == 7676)
+            .unwrap();
         assert_eq!(minimal.min_unit, 12000);
         assert_eq!(minimal.listings, None);
         assert_eq!(minimal.total_qty, None);
@@ -533,7 +578,9 @@ mod tests {
         let sale = data.entries.iter().find(|e| e.kind == "sale").unwrap();
         assert!(sale.key.contains('\u{1}'), "separator lost: {:?}", sale.key);
         assert_eq!(sale.key.split('\u{1}').count(), 8);
-        assert!(sale.key.starts_with("Auction House\u{1}Carving Canine\u{1}"));
+        assert!(sale
+            .key
+            .starts_with("Auction House\u{1}Carving Canine\u{1}"));
     }
 
     #[test]
@@ -571,12 +618,18 @@ GoldCapDB = { ["ledger"] = {
         let data = parse_saved_variables(src).unwrap();
         assert_eq!(data.entries.len(), 1);
         let entry = &data.entries[0];
-        assert_eq!(entry.total, 4321, "the quoted purchase total must remain exact");
+        assert_eq!(
+            entry.total, 4321,
+            "the quoted purchase total must remain exact"
+        );
         let json = serde_json::to_value(entry).unwrap();
 
         assert_eq!(json["decisionVersion"], 2);
         assert_eq!(json["decisionStatus"], "WATCH");
-        assert_eq!(json["decisionReasons"], serde_json::json!(["roi_thin", "supply_tight"]));
+        assert_eq!(
+            json["decisionReasons"],
+            serde_json::json!(["roi_thin", "supply_tight"])
+        );
         assert_eq!(json["stressUnit"], 12500);
         assert_eq!(json["expectedProfit"], 85000);
         assert_eq!(json["recommendedQuantity"], 3);
@@ -599,7 +652,11 @@ GoldCapDB = { ["ledger"] = {
 "#;
 
         let data = parse_saved_variables(src).unwrap();
-        assert_eq!(data.entries.len(), 1, "bad optional evidence must not discard the ledger row");
+        assert_eq!(
+            data.entries.len(),
+            1,
+            "bad optional evidence must not discard the ledger row"
+        );
         let json = serde_json::to_value(&data.entries[0]).unwrap();
         assert_eq!(json["key"], "bad-reason");
         for key in [
@@ -630,7 +687,11 @@ GoldCapDB = { ["ledger"] = {
 "#;
 
         let data = parse_saved_variables(src).unwrap();
-        assert_eq!(data.entries.len(), 1, "missing optional evidence must not discard the ledger row");
+        assert_eq!(
+            data.entries.len(),
+            1,
+            "missing optional evidence must not discard the ledger row"
+        );
         let json = serde_json::to_value(&data.entries[0]).unwrap();
         assert_eq!(json["key"], "missing-scalar");
         for key in [
@@ -662,7 +723,11 @@ GoldCapDB = { ["ledger"] = {
 "#;
 
         let data = parse_saved_variables(src).unwrap();
-        assert_eq!(data.entries.len(), 1, "malformed optional evidence must not discard the ledger row");
+        assert_eq!(
+            data.entries.len(),
+            1,
+            "malformed optional evidence must not discard the ledger row"
+        );
         let json = serde_json::to_value(&data.entries[0]).unwrap();
         assert_eq!(json["key"], "malformed-scalar");
         for key in [
@@ -700,7 +765,11 @@ GoldCapDB = {{ ["ledger"] = {{
             );
 
             let data = parse_saved_variables(&src).unwrap();
-            assert_eq!(data.entries.len(), 1, "invalid evidence must not discard the ledger row");
+            assert_eq!(
+                data.entries.len(),
+                1,
+                "invalid evidence must not discard the ledger row"
+            );
             let json = serde_json::to_value(&data.entries[0]).unwrap();
             for evidence_key in [
                 "decisionVersion",
@@ -711,7 +780,10 @@ GoldCapDB = {{ ["ledger"] = {{
                 "recommendedQuantity",
                 "sourceAt",
             ] {
-                assert!(json.get(evidence_key).is_none(), "invalid evidence leaked {evidence_key}");
+                assert!(
+                    json.get(evidence_key).is_none(),
+                    "invalid evidence leaked {evidence_key}"
+                );
             }
         }
     }
@@ -726,6 +798,121 @@ GoldCapDB = { ["ledger"] = {
 
         let data = parse_saved_variables(src).unwrap();
         assert_eq!(data.entries.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&data.entries[0]).unwrap(),
+            serde_json::json!({
+                "key": "legacy",
+                "kind": "sale",
+                "source": "mail",
+                "qty": 1,
+                "total": 17,
+                "cut": 0,
+                "deposit": 0,
+                "pending": false,
+                "at": 1785600000,
+            }),
+        );
+    }
+
+    #[test]
+    fn a_buy_run_purchase_carries_its_run_code_to_the_wire() {
+        // The addon appends this row after a BUY-tab purchase; the site uses
+        // the code to say which run a ledger row belongs to.
+        let src = r#"
+GoldCapDB = { ["ledger"] = {
+    {
+        ["key"] = "buyrun-1", ["kind"] = "buy", ["source"] = "goldcap_buy",
+        ["itemID"] = 2589, ["itemName"] = "Linen Cloth", ["qty"] = 20,
+        ["total"] = 9000, ["cut"] = 0, ["deposit"] = 0, ["pending"] = false,
+        ["at"] = 1785600000, ["char"] = "Testchar-Dentarg", ["region"] = "eu",
+        ["runCode"] = "abcd2345",
+    },
+} }
+"#;
+
+        let data = parse_saved_variables(src).unwrap();
+        assert_eq!(data.entries.len(), 1);
+        let json = serde_json::to_value(&data.entries[0]).unwrap();
+        assert_eq!(json["source"], "goldcap_buy");
+        assert_eq!(json["runCode"], "abcd2345");
+        assert_eq!(json["itemID"], 2589);
+        assert_eq!(json["qty"], 20);
+        assert_eq!(json["total"], 9000);
+    }
+
+    #[test]
+    fn a_run_code_on_any_other_source_is_dropped_but_the_row_survives() {
+        // The upload API accepts runCode only alongside source
+        // "goldcap_buy" and rejects the whole batch otherwise — one stray row
+        // must not strand every other row behind it. Same all-or-nothing rule
+        // decision_evidence already follows.
+        let src = r#"
+GoldCapDB = { ["ledger"] = {
+    {
+        ["key"] = "stray", ["kind"] = "sale", ["source"] = "mail",
+        ["qty"] = 1, ["total"] = 17, ["at"] = 1785600000,
+        ["runCode"] = "abcd2345",
+    },
+} }
+"#;
+
+        let data = parse_saved_variables(src).unwrap();
+        assert_eq!(
+            data.entries.len(),
+            1,
+            "a stray code must not discard the row"
+        );
+        let json = serde_json::to_value(&data.entries[0]).unwrap();
+        assert_eq!(json["key"], "stray");
+        assert!(
+            json.get("runCode").is_none(),
+            "runCode leaked onto a mail sale"
+        );
+    }
+
+    #[test]
+    fn a_malformed_run_code_is_dropped_rather_than_rejecting_the_batch() {
+        // The API's shape is /^[a-z0-9]{8}$/.
+        for bad in [
+            "[\"runCode\"] = \"ABCD2345\"",  // uppercase
+            "[\"runCode\"] = \"abc\"",       // too short
+            "[\"runCode\"] = \"abcd23456\"", // too long
+            "[\"runCode\"] = \"abcd-234\"",  // outside the alphabet
+            "[\"runCode\"] = 12345678",      // not a string
+        ] {
+            let src = format!(
+                r#"
+GoldCapDB = {{ ["ledger"] = {{
+    {{
+        ["key"] = "buyrun-bad", ["kind"] = "buy", ["source"] = "goldcap_buy",
+        ["qty"] = 1, ["total"] = 99, ["at"] = 1785600000, {bad},
+    }},
+}} }}
+"#
+            );
+
+            let data = parse_saved_variables(&src).unwrap();
+            assert_eq!(
+                data.entries.len(),
+                1,
+                "a bad code must not discard the row: {bad}"
+            );
+            let json = serde_json::to_value(&data.entries[0]).unwrap();
+            assert!(json.get("runCode").is_none(), "bad code leaked: {bad}");
+        }
+    }
+
+    #[test]
+    fn an_entry_without_a_run_code_serialises_exactly_as_before() {
+        // Guards the other direction: the API distinguishes a missing key
+        // from an explicit null, so the new field must not appear at all.
+        let src = r#"
+GoldCapDB = { ["ledger"] = {
+    { ["key"] = "legacy", ["kind"] = "sale", ["source"] = "mail", ["qty"] = 1, ["total"] = 17, ["at"] = 1785600000 },
+} }
+"#;
+
+        let data = parse_saved_variables(src).unwrap();
         assert_eq!(
             serde_json::to_value(&data.entries[0]).unwrap(),
             serde_json::json!({
@@ -808,7 +995,13 @@ GoldCapDB = { ["ledger"] = {
         assert_eq!(first.item_id, 42);
         assert_eq!(first.min_unit, 1000);
         assert_eq!(first.levels.as_ref().unwrap().len(), 2);
-        assert_eq!(first.levels.as_ref().unwrap()[1], BookLevel { unit: 1200, qty: 10 });
+        assert_eq!(
+            first.levels.as_ref().unwrap()[1],
+            BookLevel {
+                unit: 1200,
+                qty: 10
+            }
+        );
         let second = &data.observations[1];
         assert_eq!(second.listings, None);
         assert_eq!(second.levels, None);

@@ -5,7 +5,9 @@
 //! at logout. Losing this file is harmless: the server is idempotent on the
 //! addon's dedupe key, so the worst case is one redundant full re-send.
 
-use crate::savedvars::{GoldPoint, ItemNameReport, LedgerData, LedgerEntry, LiveObservation, OwnedLot};
+use crate::savedvars::{
+    GoldPoint, ItemNameReport, LedgerData, LedgerEntry, LiveObservation, OwnedLot,
+};
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -91,7 +93,10 @@ impl UploadState {
         // makes that impossible by construction instead of by luck.
         if text.trim_start().starts_with('[') {
             return match serde_json::from_str::<HashSet<String>>(&text) {
-                Ok(keys) => Self { uploaded: keys, stats: UploadStats::default() },
+                Ok(keys) => Self {
+                    uploaded: keys,
+                    stats: UploadStats::default(),
+                },
                 Err(_) => Self::default(),
             };
         }
@@ -240,14 +245,22 @@ fn item_name_fingerprint(r: &ItemNameReport) -> String {
 }
 
 fn pending_item_names<'a>(data: &'a LedgerData, state: &UploadState) -> Vec<&'a ItemNameReport> {
-    data.item_names.iter().filter(|r| !state.contains(&item_name_fingerprint(r))).collect()
+    data.item_names
+        .iter()
+        .filter(|r| !state.contains(&item_name_fingerprint(r)))
+        .collect()
 }
 
 /// `owned|` prefix, same shared key set as ledger / `gold|` / `live|` / `name|`. Keyed on
 /// auctionID PLUS seenAt and cancelledAt (not auctionID alone): a re-seen lot's seenAt moving
 /// forward, or a cancellation landing, are both new facts the server has not seen yet.
 fn owned_lot_fingerprint(l: &OwnedLot) -> String {
-    format!("owned|{}|{}|{}", l.auction_id, l.seen_at, l.cancelled_at.unwrap_or(0))
+    format!(
+        "owned|{}|{}|{}",
+        l.auction_id,
+        l.seen_at,
+        l.cancelled_at.unwrap_or(0)
+    )
 }
 
 /// Rows worth sending: not yet fingerprinted, and stamped with the SAME region the companion
@@ -257,8 +270,13 @@ fn owned_lot_fingerprint(l: &OwnedLot) -> String {
 /// cross-character id collision the addon's own doc calls out) -- the server's primary key is
 /// (user_id, region, auction_id), so sending two rows for the same id in one batch would
 /// either race each other or double-count in the accepted/updated response.
-fn pending_owned_lots<'a>(data: &'a LedgerData, state: &UploadState, region: &str) -> Vec<&'a OwnedLot> {
-    let mut by_auction_id: std::collections::HashMap<i64, &'a OwnedLot> = std::collections::HashMap::new();
+fn pending_owned_lots<'a>(
+    data: &'a LedgerData,
+    state: &UploadState,
+    region: &str,
+) -> Vec<&'a OwnedLot> {
+    let mut by_auction_id: std::collections::HashMap<i64, &'a OwnedLot> =
+        std::collections::HashMap::new();
     for lot in data
         .owned_lots
         .iter()
@@ -426,7 +444,9 @@ pub async fn upload_once(
         logger.info(&format!("uploaded {sent} ledger rows"));
     }
     if failed > 0 {
-        logger.error(&format!("{failed} ledger batches deferred to the next tick"));
+        logger.error(&format!(
+            "{failed} ledger batches deferred to the next tick"
+        ));
     }
 
     state.stats().clone()
@@ -462,7 +482,11 @@ pub async fn upload_observations_once(
 
         let rows = pending_observations(&data, &state, region);
 
-        let wrong_region = data.observations.iter().filter(|o| o.region != region).count();
+        let wrong_region = data
+            .observations
+            .iter()
+            .filter(|o| o.region != region)
+            .count();
         if wrong_region > 0 {
             logger.info(&format!(
                 "live observations: {wrong_region} rows from another region dropped ({})",
@@ -530,14 +554,25 @@ pub async fn upload_item_names_once(
     let mut state = UploadState::load_from(state_path);
     let mut accepted = 0usize;
     for file in crate::savedvars::saved_variables_paths(wow_retail_path) {
-        let Ok(source) = std::fs::read_to_string(&file) else { continue };
-        let Ok(data) = crate::savedvars::parse_saved_variables(&source) else { continue };
+        let Ok(source) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        let Ok(data) = crate::savedvars::parse_saved_variables(&source) else {
+            continue;
+        };
         let rows = pending_item_names(&data, &state);
         for batch in rows.chunks(MAX_ITEM_NAME_BATCH) {
             let body = serde_json::json!({ "reports": batch });
-            match client.post(ITEM_NAMES_URL).bearer_auth(token).json(&body).send().await {
+            match client
+                .post(ITEM_NAMES_URL)
+                .bearer_auth(token)
+                .json(&body)
+                .send()
+                .await
+            {
                 Ok(res) if res.status().is_success() => {
-                    let keys: Vec<String> = batch.iter().map(|r| item_name_fingerprint(r)).collect();
+                    let keys: Vec<String> =
+                        batch.iter().map(|r| item_name_fingerprint(r)).collect();
                     state.remember(&keys);
                     accepted += batch.len();
                 }
@@ -580,17 +615,27 @@ pub async fn upload_owned_lots_once(
     let mut accepted = 0usize;
 
     for file in crate::savedvars::saved_variables_paths(wow_retail_path) {
-        let Ok(source) = std::fs::read_to_string(&file) else { continue };
-        let Ok(data) = crate::savedvars::parse_saved_variables(&source) else { continue };
+        let Ok(source) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        let Ok(data) = crate::savedvars::parse_saved_variables(&source) else {
+            continue;
+        };
 
         let rows = pending_owned_lots(&data, &state, region);
 
         for batch in rows.chunks(MAX_OWNED_LOT_BATCH) {
             let body = serde_json::json!({ "region": region, "lots": batch });
-            let sent = client.post(OWNED_LOTS_URL).bearer_auth(token).json(&body).send().await;
+            let sent = client
+                .post(OWNED_LOTS_URL)
+                .bearer_auth(token)
+                .json(&body)
+                .send()
+                .await;
             match sent {
                 Ok(res) if res.status().is_success() => {
-                    let keys: Vec<String> = batch.iter().map(|l| owned_lot_fingerprint(l)).collect();
+                    let keys: Vec<String> =
+                        batch.iter().map(|l| owned_lot_fingerprint(l)).collect();
                     state.remember(&keys);
                     accepted += batch.len();
                 }
@@ -619,7 +664,9 @@ pub async fn upload_owned_lots_once(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::savedvars::{parse_saved_variables, GoldPoint, LedgerData, LedgerEntry, LiveObservation, OwnedLot};
+    use crate::savedvars::{
+        parse_saved_variables, GoldPoint, LedgerData, LedgerEntry, LiveObservation, OwnedLot,
+    };
 
     const REAL_FILE: &str = include_str!("../tests/fixtures/GoldCap.lua");
 
@@ -639,6 +686,7 @@ mod tests {
             at: 1_785_600_000,
             character: Some("Testchar-Dentarg".into()),
             region: Some("eu".into()),
+            run_code: None,
             decision_version: None,
             decision_status: None,
             decision_reasons: None,
@@ -693,7 +741,10 @@ mod tests {
 
     #[test]
     fn item_name_fingerprints_key_on_item_locale_and_time_with_their_own_prefix() {
-        assert_eq!(item_name_fingerprint(&name_report(201421, "enUS", 5)), "name|201421|enUS|5");
+        assert_eq!(
+            item_name_fingerprint(&name_report(201421, "enUS", 5)),
+            "name|201421|enUS|5"
+        );
     }
 
     #[test]
@@ -717,7 +768,8 @@ mod tests {
 
     #[tokio::test]
     async fn an_unpaired_item_name_pass_sends_nothing() {
-        let dir = std::env::temp_dir().join(format!("goldcap-names-unpaired-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("goldcap-names-unpaired-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let client = reqwest::Client::new();
@@ -749,7 +801,10 @@ mod tests {
             observations: vec![
                 observation(42, 5000), // already sent
                 observation(7, 6000),  // fresh
-                LiveObservation { region: "us".into(), ..observation(9, 6100) }, // wrong region
+                LiveObservation {
+                    region: "us".into(),
+                    ..observation(9, 6100)
+                }, // wrong region
             ],
             ..Default::default()
         };
@@ -819,7 +874,10 @@ mod tests {
             owned_lots: vec![
                 owned_lot(1, 1000, None), // already sent
                 owned_lot(2, 1100, None), // fresh
-                OwnedLot { region: "us".into(), ..owned_lot(3, 1200, None) }, // wrong region
+                OwnedLot {
+                    region: "us".into(),
+                    ..owned_lot(3, 1200, None)
+                }, // wrong region
             ],
             ..Default::default()
         };
@@ -833,14 +891,24 @@ mod tests {
         let state = UploadState::default();
         let data = LedgerData {
             owned_lots: vec![
-                OwnedLot { character: "Alice-Kazzak".into(), ..owned_lot(1, 1000, None) },
-                OwnedLot { character: "Bob-Kazzak".into(), unit_price: 999, ..owned_lot(1, 2000, None) },
+                OwnedLot {
+                    character: "Alice-Kazzak".into(),
+                    ..owned_lot(1, 1000, None)
+                },
+                OwnedLot {
+                    character: "Bob-Kazzak".into(),
+                    unit_price: 999,
+                    ..owned_lot(1, 2000, None)
+                },
             ],
             ..Default::default()
         };
         let pending = pending_owned_lots(&data, &state, "eu");
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].seen_at, 2000, "the newer seen_at row wins the collision");
+        assert_eq!(
+            pending[0].seen_at, 2000,
+            "the newer seen_at row wins the collision"
+        );
         assert_eq!(pending[0].unit_price, 999);
     }
 
@@ -946,7 +1014,11 @@ mod tests {
             owned_lots: vec![],
         };
         let (entries, _) = pending(&data, &state);
-        assert_eq!(entries.len(), 1, "a row whose contents changed must be re-sent");
+        assert_eq!(
+            entries.len(),
+            1,
+            "a row whose contents changed must be re-sent"
+        );
     }
 
     #[test]
@@ -1055,7 +1127,8 @@ mod tests {
     fn the_old_bare_array_state_file_still_loads() {
         // v1.0.0 wrote a bare JSON array of keys. Failing to read it would
         // re-upload the user's entire ledger on first launch of this build.
-        let dir = std::env::temp_dir().join(format!("goldcap-upload-legacy-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("goldcap-upload-legacy-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(STATE_FILE_NAME);
@@ -1064,7 +1137,11 @@ mod tests {
         let state = UploadState::load_from(&path);
         assert!(state.contains("a"));
         assert!(state.contains("b"));
-        assert_eq!(state.stats().total_sent, 0, "the old format carried no counters");
+        assert_eq!(
+            state.stats().total_sent,
+            0,
+            "the old format carried no counters"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1076,8 +1153,8 @@ mod tests {
         // bare string element can never satisfy that type, so the object
         // parse happened to fail and fall through. The leading-byte branch
         // gets this right on purpose instead.
-        let dir = std::env::temp_dir()
-            .join(format!("goldcap-upload-legacy-one-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("goldcap-upload-legacy-one-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(STATE_FILE_NAME);
@@ -1086,7 +1163,11 @@ mod tests {
         let state = UploadState::load_from(&path);
         assert!(state.contains("a"));
         assert_eq!(state.len(), 1);
-        assert_eq!(state.stats().total_sent, 0, "the old format carried no counters");
+        assert_eq!(
+            state.stats().total_sent,
+            0,
+            "the old format carried no counters"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1123,7 +1204,8 @@ mod tests {
 
     #[tokio::test]
     async fn an_unpaired_pass_returns_the_stored_stats_untouched() {
-        let dir = std::env::temp_dir().join(format!("goldcap-upload-unpaired-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("goldcap-upload-unpaired-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join(STATE_FILE_NAME);
         let mut state = UploadState::default();
@@ -1132,10 +1214,19 @@ mod tests {
 
         let logger = crate::logging::Logger::new(&dir).unwrap();
         let client = crate::sync::build_client();
-        let stats =
-            upload_once(&client, "", Path::new("/definitely/not/here"), &path, &logger).await;
+        let stats = upload_once(
+            &client,
+            "",
+            Path::new("/definitely/not/here"),
+            &path,
+            &logger,
+        )
+        .await;
 
-        assert_eq!(stats.total_sent, 42, "an unpaired companion still shows its history");
+        assert_eq!(
+            stats.total_sent, 42,
+            "an unpaired companion still shows its history"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
