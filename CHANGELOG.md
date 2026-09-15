@@ -12,9 +12,9 @@ data.
   crafting it beats buying it — and turn the line into its reagents when it
   does. Needs addon 0.12.0.
 - **Alerts and lists shared with you reach the game as well.** The items your
-  price alerts are firing on right now, and a list someone shared with you,
-  arrive as shopping runs of their own, each carrying the price ceiling it was
-  set at and the realm it was seen on.
+  price alerts are firing on right now arrive as a shopping run of their own,
+  each carrying the price ceiling it was set at and the realm it was seen on.
+  A list someone shared with you arrives as a shopping run too.
 
 ## 1.10.0 (unreleased)
 
