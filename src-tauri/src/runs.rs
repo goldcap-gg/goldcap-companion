@@ -54,6 +54,32 @@ where
     Ok(Option::<LenientNumber>::deserialize(d)?.and_then(|n| n.to_i64()))
 }
 
+/// Reads an optional field without ever failing the payload around it: the
+/// value is taken as plain JSON first and only then shaped into `T`, and
+/// anything that does not fit — a number where a string belongs, an object
+/// missing a key this build needs, a shape a later contract invented — reads
+/// as absent. A fetch that fails writes nothing, so a strict reader here
+/// would strand `Runs.lua` at its previous contents on every tick from then
+/// on; one fact the companion cannot read is cheaper than that by a mile.
+fn lenient_opt<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let raw = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(raw.and_then(|v| serde_json::from_value::<T>(v).ok()))
+}
+
+/// `lenient_opt` for a copper amount: a fraction rounds (see `LenientNumber`)
+/// and anything that is not a number at all reads as absent.
+fn lenient_opt_number<'de, D>(d: D) -> Result<Option<i64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: Option<LenientNumber> = lenient_opt(d)?;
+    Ok(raw.and_then(|n| n.to_i64()))
+}
+
 /// When the region's last 14 days say this item is usually cheapest. `hour`
 /// is 0–23 in UTC (the addon converts to server time), `pct` is how far under
 /// the overall mean that hour sits, as a negative whole percent.
@@ -64,6 +90,55 @@ pub struct WireCheapHour {
     pub hour: i64,
     #[serde(deserialize_with = "lenient_i64")]
     pub pct: i64,
+}
+
+/// Where a run came from, as the site would say it out loud: "Cooking 1–100".
+/// The wire also carries a `kind` ("profession" today); the companion does not
+/// read it, because the label is what the addon shows either way and serde
+/// drops what nothing asks for.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WireRunSource {
+    pub label: String,
+}
+
+/// The realm an alert hit was seen on. The addon shows it after the item
+/// name; searching the auction house on another realm simply finds nothing.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WireRealm {
+    pub id: u32,
+    pub name: String,
+}
+
+/// One reagent of one craft, priced the same way a run line is: `usual` is
+/// the site's reference price per unit and `vendor_unit` what a vendor
+/// charges, both in copper, both absent when nobody knows.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WireCraftReagent {
+    pub item_id: u32,
+    pub qty: u32,
+    pub name_en: String,
+    pub vendor: bool,
+    #[serde(default, deserialize_with = "lenient_opt_i64")]
+    pub usual: Option<i64>,
+    #[serde(default, deserialize_with = "lenient_opt_i64")]
+    pub vendor_unit: Option<i64>,
+}
+
+/// The cheapest fully priced recipe that makes this line's item, as the site
+/// costed it at fetch time: what one craft yields, what one craft's reagents
+/// cost at the region's prices, and the reagents themselves. The addon does
+/// the craft-or-buy comparison; the companion only carries it.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WireCraft {
+    pub recipe_id: u32,
+    pub crafted_qty: u32,
+    #[serde(deserialize_with = "lenient_i64")]
+    pub cost_copper: i64,
+    pub reagents: Vec<WireCraftReagent>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -83,6 +158,17 @@ pub struct WireRunLine {
     pub vendor_unit: Option<i64>,
     #[serde(default)]
     pub cheap_hour: Option<WireCheapHour>,
+    /// An absolute ceiling per unit, in copper — an alert run's target price.
+    /// Contract v3 and later. Absent means the addon's own USUAL × cap%, as
+    /// before; it is not the same as "no ceiling".
+    #[serde(default, deserialize_with = "lenient_opt_number")]
+    pub cap: Option<i64>,
+    /// Set when the line is a realm-bound alert hit rather than a commodity.
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub realm: Option<WireRealm>,
+    /// Set when a recipe makes this item and the site could price it whole.
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub craft: Option<WireCraft>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -92,6 +178,16 @@ pub struct WireRun {
     #[serde(default)]
     pub name: Option<String>,
     pub updated_at: String,
+    /// `"list"` or `"alert"`. Contract v3 and later; absent is a list, which
+    /// is what v1 and v2 always meant.
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub kind: Option<String>,
+    /// The owner's public display name, when this is a run the player follows
+    /// rather than one they saved.
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub shared_by: Option<String>,
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub source: Option<WireRunSource>,
     pub lines: Vec<WireRunLine>,
 }
 
@@ -237,6 +333,24 @@ mod tests {
             usual: None,
             vendor_unit: None,
             cheap_hour: None,
+            cap: None,
+            realm: None,
+            craft: None,
+        }
+    }
+
+    /// A run with none of the phase-3 facts, for `..plain_run()` in the
+    /// tests below: the four fields every test already spells out are
+    /// overridden by the literal, the three new ones come from here.
+    fn plain_run() -> WireRun {
+        WireRun {
+            code: "abcd2345".into(),
+            name: None,
+            updated_at: "2026-09-15T09:00:00.000Z".into(),
+            kind: None,
+            shared_by: None,
+            source: None,
+            lines: vec![],
         }
     }
 
@@ -252,6 +366,7 @@ mod tests {
                 name: Some("Cooking 1-100".into()),
                 updated_at: "2026-09-15T09:00:00.000Z".into(),
                 lines: vec![line(5, 210, false, "Plant Protein")],
+                ..plain_run()
             }],
         };
         let lua = render_runs_lua(&runs, 1_789_000_000).unwrap();
@@ -275,6 +390,7 @@ mod tests {
                 name: None,
                 updated_at: "2026-09-15T09:00:00.000Z".into(),
                 lines: vec![line(3, 1, true, "Deckhand's Shirt")],
+                ..plain_run()
             }],
         };
         let lua = render_runs_lua(&runs, 1).unwrap();
@@ -295,6 +411,7 @@ mod tests {
                 name: None,
                 updated_at: "not-a-date".into(),
                 lines: vec![line(3, 1, true, "Deckhand's Shirt")],
+                ..plain_run()
             }],
         };
         let err = render_runs_lua(&runs, 1).unwrap_err();
@@ -329,6 +446,7 @@ mod tests {
                 name: Some("O'Brien's \\ Emporium".into()),
                 updated_at: "2026-09-15T09:00:00.000Z".into(),
                 lines: vec![line(5, 210, false, "Plant Protein")],
+                ..plain_run()
             }],
         };
         let lua_source = render_runs_lua(&runs, 1_789_000_000).unwrap();
@@ -426,6 +544,7 @@ mod tests {
                     cheap_hour: Some(WireCheapHour { hour: 3, pct: -18 }),
                     ..line(2589, 20, false, "Linen Cloth")
                 }],
+                ..plain_run()
             }],
         };
         assert!(apply_fetch_result(dir.path(), Ok(runs), 7).unwrap());
@@ -448,6 +567,7 @@ mod tests {
                 name: None,
                 updated_at: "2026-09-15T09:00:00.000Z".into(),
                 lines: vec![line(5, 210, false, "Plant Protein")],
+                ..plain_run()
             }],
         };
         assert!(apply_fetch_result(dir.path(), Ok(runs), 7).unwrap());
@@ -491,6 +611,7 @@ mod tests {
                 name: Some("Cooking 1-100".into()),
                 updated_at: "2026-09-15T09:00:00.000Z".into(),
                 lines: vec![line(5, 210, false, "Plant Protein")],
+                ..plain_run()
             }],
         };
         let lua = render_runs_lua(&runs, 1_789_000_000).unwrap();
@@ -512,14 +633,12 @@ mod tests {
                 name: Some("Cooking 1-100".into()),
                 updated_at: "2026-09-15T09:00:00.000Z".into(),
                 lines: vec![WireRunLine {
-                    item_id: 2589,
-                    qty: 20,
-                    vendor: false,
-                    name_en: "Linen Cloth".into(),
                     usual: Some(450),
                     vendor_unit: Some(25),
                     cheap_hour: Some(WireCheapHour { hour: 3, pct: -18 }),
+                    ..line(2589, 20, false, "Linen Cloth")
                 }],
+                ..plain_run()
             }],
         };
         let lua = render_runs_lua(&runs, 1_789_000_000).unwrap();
@@ -543,6 +662,7 @@ mod tests {
                     name: None,
                     updated_at: "2026-09-15T09:00:00.000Z".into(),
                     lines: vec![l],
+                    ..plain_run()
                 }],
             };
             render_runs_lua(&runs, 1).unwrap()
@@ -594,6 +714,7 @@ mod tests {
                     vendor_unit: Some(0),
                     ..line(2589, 20, false, "Linen Cloth")
                 }],
+                ..plain_run()
             }],
         };
         let lua = render_runs_lua(&runs, 1).unwrap();
@@ -619,6 +740,7 @@ mod tests {
                     cheap_hour: Some(WireCheapHour { hour: 25, pct: -18 }),
                     ..line(2589, 20, false, "Linen Cloth")
                 }],
+                ..plain_run()
             }],
         };
         let lua = render_runs_lua(&runs, 1).unwrap();
@@ -689,6 +811,7 @@ mod tests {
                     },
                     line(159, 5, true, "Refreshing Spring Water"),
                 ],
+                ..plain_run()
             }],
         };
         let lua_source = render_runs_lua(&runs, 1_789_000_000).unwrap();
@@ -725,5 +848,105 @@ mod tests {
             .eval()
             .unwrap();
         assert_eq!(missing, None);
+    }
+
+    #[test]
+    fn a_v3_json_payload_carries_the_run_and_line_facts() {
+        let json = r#"{"v":3,"generatedAt":"2026-09-15T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[{"code":"a0000016","name":"Flask watch","updatedAt":"2026-09-15T09:00:00.000Z","kind":"alert","sharedBy":"Acromion","source":{"kind":"profession","label":"Cooking 1-100"},"lines":[{"itemId":212264,"qty":3,"vendor":false,"nameEn":"Flask of Alchemical Chaos","usual":120000,"cap":99900,"realm":{"id":1305,"name":"Kazzak"},"craft":{"recipeId":9876,"craftedQty":5,"costCopper":2300,"reagents":[{"itemId":224060,"qty":5,"nameEn":"Eversong Trout","vendor":false,"usual":400,"vendorUnit":null},{"itemId":2678,"qty":5,"nameEn":"Tavern Fixings","vendor":true,"usual":null,"vendorUnit":60}]}}]}]}"#;
+        let parsed: WireRuns = serde_json::from_str(json).unwrap();
+        let run = &parsed.runs[0];
+        assert_eq!(run.kind.as_deref(), Some("alert"));
+        assert_eq!(run.shared_by.as_deref(), Some("Acromion"));
+        assert_eq!(
+            run.source.as_ref().map(|s| s.label.as_str()),
+            Some("Cooking 1-100")
+        );
+        let l = &run.lines[0];
+        assert_eq!(l.cap, Some(99900));
+        assert_eq!(
+            l.realm,
+            Some(WireRealm {
+                id: 1305,
+                name: "Kazzak".into()
+            })
+        );
+        let craft = l.craft.as_ref().unwrap();
+        assert_eq!(craft.recipe_id, 9876);
+        assert_eq!(craft.crafted_qty, 5);
+        assert_eq!(craft.cost_copper, 2300);
+        assert_eq!(craft.reagents.len(), 2);
+        assert_eq!(craft.reagents[0].item_id, 224060);
+        assert_eq!(craft.reagents[0].qty, 5);
+        assert_eq!(craft.reagents[0].name_en, "Eversong Trout");
+        assert!(!craft.reagents[0].vendor);
+        assert_eq!(craft.reagents[0].usual, Some(400));
+        assert_eq!(craft.reagents[0].vendor_unit, None);
+        assert!(craft.reagents[1].vendor);
+        assert_eq!(craft.reagents[1].usual, None);
+        assert_eq!(craft.reagents[1].vendor_unit, Some(60));
+    }
+
+    #[test]
+    fn a_malformed_new_field_reads_as_absent_instead_of_failing_the_sync() {
+        // Every one of these would otherwise fail the whole response — and a
+        // failed response writes nothing, so Runs.lua would sit at yesterday's
+        // file silently, on this tick and every tick after it. One field the
+        // companion cannot read costs its own fact and nothing else.
+        let json = r#"{"v":3,"generatedAt":"2026-09-15T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[{"code":"abcd2345","name":null,"updatedAt":"2026-09-15T09:00:00.000Z","kind":7,"sharedBy":{"name":"Acromion"},"source":{"kind":"profession"},"lines":[{"itemId":2589,"qty":20,"vendor":false,"nameEn":"Linen Cloth","cap":"99900","realm":"Kazzak","craft":{"recipeId":9876,"craftedQty":5}}]}]}"#;
+        let parsed: WireRuns = serde_json::from_str(json).unwrap();
+        let run = &parsed.runs[0];
+        assert_eq!(run.kind, None, "a number is not a kind");
+        assert_eq!(run.shared_by, None, "an object is not a name");
+        assert_eq!(run.source, None, "a source without a label says nothing");
+        let l = &run.lines[0];
+        assert_eq!(l.cap, None, "a string is not copper");
+        assert_eq!(l.realm, None, "a string is not a realm");
+        assert_eq!(l.craft, None, "a craft without reagents cannot be split");
+        // The line itself is untouched by any of it.
+        assert_eq!(l.item_id, 2589);
+        assert_eq!(l.qty, 20);
+        assert_eq!(l.name_en, "Linen Cloth");
+    }
+
+    #[test]
+    fn a_v3_field_this_build_has_never_heard_of_is_ignored() {
+        // Additions only: a later contract must not strand this build.
+        let json = r#"{"v":3,"generatedAt":"2026-09-15T10:00:00.000Z","plan":"pro","freeLines":5,"mystery":true,"runs":[{"code":"abcd2345","name":null,"updatedAt":"2026-09-15T09:00:00.000Z","futureRunField":{"a":1},"lines":[{"itemId":2589,"qty":20,"vendor":false,"nameEn":"Linen Cloth","futureLineField":[1,2,3]}]}]}"#;
+        let parsed: WireRuns = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.runs[0].lines[0].item_id, 2589);
+    }
+
+    #[test]
+    fn a_v1_or_v2_payload_reads_the_v3_fields_as_absent() {
+        let v1 = r#"{"v":1,"generatedAt":"2026-09-15T10:00:00.000Z","plan":"free","freeLines":5,"runs":[{"code":"abcd2345","name":null,"updatedAt":"2026-09-15T09:00:00.000Z","lines":[{"itemId":5,"qty":210,"vendor":false,"nameEn":"Plant Protein"}]}]}"#;
+        let parsed: WireRuns = serde_json::from_str(v1).unwrap();
+        assert_eq!(parsed.runs[0].kind, None);
+        assert_eq!(parsed.runs[0].shared_by, None);
+        assert_eq!(parsed.runs[0].source, None);
+        assert_eq!(parsed.runs[0].lines[0].cap, None);
+        assert_eq!(parsed.runs[0].lines[0].realm, None);
+        assert_eq!(parsed.runs[0].lines[0].craft, None);
+
+        let nulls = r#"{"v":3,"generatedAt":"2026-09-15T10:00:00.000Z","plan":"free","freeLines":5,"runs":[{"code":"abcd2345","name":null,"updatedAt":"2026-09-15T09:00:00.000Z","kind":null,"sharedBy":null,"source":null,"lines":[{"itemId":5,"qty":210,"vendor":false,"nameEn":"Plant Protein","cap":null,"realm":null,"craft":null}]}]}"#;
+        let parsed: WireRuns = serde_json::from_str(nulls).unwrap();
+        assert_eq!(parsed.runs[0].kind, None);
+        assert_eq!(parsed.runs[0].shared_by, None);
+        assert_eq!(parsed.runs[0].source, None);
+        assert_eq!(parsed.runs[0].lines[0].cap, None);
+        assert_eq!(parsed.runs[0].lines[0].realm, None);
+        assert_eq!(parsed.runs[0].lines[0].craft, None);
+    }
+
+    #[test]
+    fn a_fractional_cap_or_craft_cost_rounds_instead_of_dropping_the_fact() {
+        // Same reason phase 2a rounds a price: these come out of medians, and
+        // one `.5` must cost nothing at all.
+        let json = r#"{"v":3,"generatedAt":"2026-09-15T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[{"code":"abcd2345","name":null,"updatedAt":"2026-09-15T09:00:00.000Z","lines":[{"itemId":2589,"qty":20,"vendor":false,"nameEn":"Linen Cloth","cap":99900.5,"craft":{"recipeId":9876,"craftedQty":5,"costCopper":2300.4,"reagents":[{"itemId":224060,"qty":5,"nameEn":"Eversong Trout","vendor":false,"usual":400.5,"vendorUnit":null}]}}]}]}"#;
+        let parsed: WireRuns = serde_json::from_str(json).unwrap();
+        let l = &parsed.runs[0].lines[0];
+        assert_eq!(l.cap, Some(99901));
+        let craft = l.craft.as_ref().unwrap();
+        assert_eq!(craft.cost_copper, 2300);
+        assert_eq!(craft.reagents[0].usual, Some(401));
     }
 }
