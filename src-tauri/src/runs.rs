@@ -4,6 +4,12 @@
 //! id, quantity, vendor flag and English name; v2 adds the site's reference
 //! price, the vendor's unit price and the region's cheap hour, all optional,
 //! so a v1 server and a v2 server both render through the same code.
+//! v3 adds, on a run, its kind (`k`), who shared it (`by`) and the plan it
+//! came from (`src`), and on a line an absolute price ceiling (`cc`), the
+//! realm an alert hit was seen on (`rl`) and the recipe that crafts it
+//! (`cr`) — every one of them optional, and every one of them read through
+//! `lenient_opt`, so a field this build cannot make sense of costs its own
+//! fact and never the whole sync.
 
 use crate::ledger_summary::parse_iso_utc;
 use crate::luafile::escape_lua_string;
@@ -201,6 +207,55 @@ pub struct WireRuns {
     pub runs: Vec<WireRun>,
 }
 
+/// A string the addon can put in front of a player, or nothing at all: an
+/// empty or whitespace-only value would render as `by = ''` and read in game
+/// as "from" with a hole where a name belongs.
+fn shown_text(s: &str) -> Option<&str> {
+    let t = s.trim();
+    (!t.is_empty()).then_some(t)
+}
+
+/// A craft as the addon reads it, or nothing at all. Every guard here names
+/// something the addon would otherwise have to do the impossible with: a
+/// recipe it cannot identify, a yield it would divide a need by, a cost of
+/// nothing to compare a price against, a split with no reagents to split
+/// into. Half a craft is worse than no craft.
+fn render_craft(craft: &WireCraft) -> Option<String> {
+    if craft.recipe_id == 0
+        || craft.crafted_qty == 0
+        || craft.cost_copper <= 0
+        || craft.reagents.is_empty()
+    {
+        return None;
+    }
+    let mut out = format!(
+        ", cr = {{ r = {}, n = {}, c = {}, i = {{ ",
+        craft.recipe_id, craft.crafted_qty, craft.cost_copper
+    );
+    for (i, reagent) in craft.reagents.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&format!(
+            "{{ i = {}, q = {}, n = '{}', v = {}",
+            reagent.item_id,
+            reagent.qty,
+            escape_lua_string(&reagent.name_en),
+            reagent.vendor
+        ));
+        // Same rule as a run line's prices: unknown is absent, never zero.
+        if let Some(usual) = reagent.usual.filter(|v| *v > 0) {
+            out.push_str(&format!(", u = {usual}"));
+        }
+        if let Some(vendor_unit) = reagent.vendor_unit.filter(|v| *v > 0) {
+            out.push_str(&format!(", vu = {vendor_unit}"));
+        }
+        out.push_str(" }");
+    }
+    out.push_str(" } }");
+    Some(out)
+}
+
 /// Renders `Runs.lua`'s contents: the addon-side buy list, keyed off the
 /// same short field names as the rest of `GoldCap_AppData` (`i`/`q`/`v`/`n`
 /// on a line, plus `u`/`vu`/`ch`/`cp` when the site priced the line) to keep
@@ -228,6 +283,19 @@ pub fn render_runs_lua(runs: &WireRuns, generated_at: i64) -> Result<String, Str
         out.push_str(&format!("{{ code = '{}', ", escape_lua_string(&run.code)));
         if let Some(name) = &run.name {
             out.push_str(&format!("name = '{}', ", escape_lua_string(name)));
+        }
+        // Contract v3 run facts. `k` is written only for an alert run: a
+        // missing `k` is the ordinary list run v1 and v2 always meant, so
+        // writing the default would put a key that says nothing into every
+        // table in the file.
+        if run.kind.as_deref() == Some("alert") {
+            out.push_str("k = 'alert', ");
+        }
+        if let Some(by) = run.shared_by.as_deref().and_then(shown_text) {
+            out.push_str(&format!("by = '{}', ", escape_lua_string(by)));
+        }
+        if let Some(src) = run.source.as_ref().and_then(|s| shown_text(&s.label)) {
+            out.push_str(&format!("src = '{}', ", escape_lua_string(src)));
         }
         let updated_at = parse_iso_utc(&run.updated_at).ok_or_else(|| {
             format!(
@@ -264,6 +332,27 @@ pub fn render_runs_lua(runs: &WireRuns, generated_at: i64) -> Result<String, Str
                     out.push_str(&format!(", ch = {}, cp = {}", cheap.hour, cheap.pct));
                 }
             }
+            // Contract v3 line facts, under the same rule as the v2 ones: a
+            // fact the site did not send is absent from the table, and a
+            // fact it sent in a shape the addon cannot act on is dropped
+            // whole rather than written half.
+            if let Some(cap) = line.cap.filter(|v| *v > 0) {
+                out.push_str(&format!(", cc = {cap}"));
+            }
+            if let Some(realm) = line
+                .realm
+                .as_ref()
+                .filter(|r| r.id > 0 && shown_text(&r.name).is_some())
+            {
+                out.push_str(&format!(
+                    ", rl = {{ id = {}, n = '{}' }}",
+                    realm.id,
+                    escape_lua_string(realm.name.trim())
+                ));
+            }
+            if let Some(craft) = line.craft.as_ref().and_then(render_craft) {
+                out.push_str(&craft);
+            }
             out.push_str(" }");
         }
         out.push_str(" } }");
@@ -290,11 +379,13 @@ pub async fn fetch_runs(client: &reqwest::Client, token: &str) -> Result<WireRun
 }
 
 /// Runs contracts this build understands. v1 is the phase-1 shape; v2 adds
-/// the optional per-line price facts. An unknown version is refused rather
-/// than rendered half-understood — the addon would then be reading a file
-/// whose meaning this build cannot vouch for, and a stale correct file beats
-/// a fresh misread one.
-const SUPPORTED_VERSIONS: [u32; 2] = [1, 2];
+/// the optional per-line price facts; v3 adds a run's kind, who shared it and
+/// where it came from, plus a line's absolute cap, its realm and the recipe
+/// that crafts it. An unknown version is refused rather than rendered
+/// half-understood — the addon would then be reading a file whose meaning
+/// this build cannot vouch for, and a stale correct file beats a fresh
+/// misread one.
+const SUPPORTED_VERSIONS: [u32; 3] = [1, 2, 3];
 
 /// The write seam `sync_once` calls: `Ok(true)` means it wrote, and every
 /// failure — a fetch error, a version this build does not support, or an
@@ -516,7 +607,7 @@ mod tests {
     fn an_unsupported_version_is_refused_before_writing() {
         let dir = tempfile::tempdir().unwrap();
         let runs = WireRuns {
-            v: 3,
+            v: 4,
             generated_at: String::new(),
             plan: "free".into(),
             free_lines: 5,
@@ -616,7 +707,12 @@ mod tests {
         };
         let lua = render_runs_lua(&runs, 1_789_000_000).unwrap();
         assert!(lua.contains("n = 'Plant Protein' }"));
-        for key in [", u = ", ", vu = ", ", ch = ", ", cp = "] {
+        for key in [
+            ", u = ", ", vu = ", ", ch = ", ", cp = ", ", cc = ", ", rl = ", ", cr = ",
+        ] {
+            assert!(!lua.contains(key), "a v1 render leaked {key}");
+        }
+        for key in ["k = 'alert'", "by = '", "src = '"] {
             assert!(!lua.contains(key), "a v1 render leaked {key}");
         }
     }
@@ -948,5 +1044,480 @@ mod tests {
         let craft = l.craft.as_ref().unwrap();
         assert_eq!(craft.cost_copper, 2300);
         assert_eq!(craft.reagents[0].usual, Some(401));
+    }
+
+    #[test]
+    fn a_v3_alert_run_renders_its_kind_cap_and_realm() {
+        let runs = WireRuns {
+            v: 3,
+            generated_at: "2026-09-15T10:00:00.000Z".into(),
+            plan: "pro".into(),
+            free_lines: 5,
+            runs: vec![WireRun {
+                code: "a0000016".into(),
+                name: Some("Flask watch".into()),
+                updated_at: "2026-09-15T09:00:00.000Z".into(),
+                kind: Some("alert".into()),
+                lines: vec![WireRunLine {
+                    usual: Some(120_000),
+                    cap: Some(99_900),
+                    realm: Some(WireRealm {
+                        id: 1305,
+                        name: "Kazzak".into(),
+                    }),
+                    ..line(212264, 3, false, "Flask of Alchemical Chaos")
+                }],
+                ..plain_run()
+            }],
+        };
+        let lua = render_runs_lua(&runs, 1_789_000_000).unwrap();
+        let updated_at = crate::ledger_summary::parse_iso_utc("2026-09-15T09:00:00.000Z").unwrap();
+        let expected = format!(
+            "GoldCap_AppRuns = {{ v = 3, generatedAt = 1789000000, plan = 'pro', freeLines = 5, runs = {{ {{ code = 'a0000016', name = 'Flask watch', k = 'alert', updatedAt = {updated_at}, lines = {{ {{ i = 212264, q = 3, v = false, n = 'Flask of Alchemical Chaos', u = 120000, cc = 99900, rl = {{ id = 1305, n = 'Kazzak' }} }} }} }} }} }}\n"
+        );
+        assert_eq!(lua, expected);
+    }
+
+    #[test]
+    fn a_v3_followed_run_renders_by_src_and_the_craft() {
+        let runs = WireRuns {
+            v: 3,
+            generated_at: "2026-09-15T10:00:00.000Z".into(),
+            plan: "pro".into(),
+            free_lines: 5,
+            runs: vec![WireRun {
+                code: "abcd2345".into(),
+                name: Some("Cooking 1-100".into()),
+                updated_at: "2026-09-15T09:00:00.000Z".into(),
+                shared_by: Some("Acromion".into()),
+                source: Some(WireRunSource {
+                    label: "Cooking 1-100".into(),
+                }),
+                lines: vec![WireRunLine {
+                    craft: Some(WireCraft {
+                        recipe_id: 9876,
+                        crafted_qty: 5,
+                        cost_copper: 2300,
+                        reagents: vec![
+                            WireCraftReagent {
+                                item_id: 224060,
+                                qty: 5,
+                                name_en: "Eversong Trout".into(),
+                                vendor: false,
+                                usual: Some(400),
+                                vendor_unit: None,
+                            },
+                            WireCraftReagent {
+                                item_id: 2678,
+                                qty: 5,
+                                name_en: "Tavern Fixings".into(),
+                                vendor: true,
+                                usual: None,
+                                vendor_unit: Some(60),
+                            },
+                        ],
+                    }),
+                    ..line(222724, 461, false, "Thalassian Fillet")
+                }],
+                ..plain_run()
+            }],
+        };
+        let lua = render_runs_lua(&runs, 1_789_000_000).unwrap();
+        let updated_at = crate::ledger_summary::parse_iso_utc("2026-09-15T09:00:00.000Z").unwrap();
+        let expected = format!(
+            "GoldCap_AppRuns = {{ v = 3, generatedAt = 1789000000, plan = 'pro', freeLines = 5, runs = {{ {{ code = 'abcd2345', name = 'Cooking 1-100', by = 'Acromion', src = 'Cooking 1-100', updatedAt = {updated_at}, lines = {{ {{ i = 222724, q = 461, v = false, n = 'Thalassian Fillet', cr = {{ r = 9876, n = 5, c = 2300, i = {{ {{ i = 224060, q = 5, n = 'Eversong Trout', v = false, u = 400 }}, {{ i = 2678, q = 5, n = 'Tavern Fixings', v = true, vu = 60 }} }} }} }} }} }} }} }}\n"
+        );
+        assert_eq!(lua, expected);
+    }
+
+    #[test]
+    fn a_list_run_never_writes_the_default_kind() {
+        // Absent `k` is what v1 and v2 always meant; writing it would be a
+        // key in every table in the file that says nothing.
+        for kind in [None, Some("list"), Some("mystery")] {
+            let runs = WireRuns {
+                v: 3,
+                generated_at: "2026-09-15T10:00:00.000Z".into(),
+                plan: "pro".into(),
+                free_lines: 5,
+                runs: vec![WireRun {
+                    kind: kind.map(Into::into),
+                    lines: vec![line(5, 210, false, "Plant Protein")],
+                    ..plain_run()
+                }],
+            };
+            let lua = render_runs_lua(&runs, 1).unwrap();
+            assert!(!lua.contains("k = "), "wrote a kind for {kind:?}");
+        }
+    }
+
+    #[test]
+    fn a_blank_shared_name_or_source_label_is_dropped_rather_than_rendered_empty() {
+        // `by = ''` would read in game as "from" with a hole after it.
+        let runs = WireRuns {
+            v: 3,
+            generated_at: "2026-09-15T10:00:00.000Z".into(),
+            plan: "pro".into(),
+            free_lines: 5,
+            runs: vec![WireRun {
+                shared_by: Some("   ".into()),
+                source: Some(WireRunSource { label: "".into() }),
+                lines: vec![line(5, 210, false, "Plant Protein")],
+                ..plain_run()
+            }],
+        };
+        let lua = render_runs_lua(&runs, 1).unwrap();
+        assert!(!lua.contains("by = "));
+        assert!(!lua.contains("src = "));
+    }
+
+    #[test]
+    fn a_cap_of_zero_or_less_is_dropped_rather_than_rendered() {
+        // A ceiling of nothing would buy nothing; absent means "use the
+        // addon's own cap%", which is the behaviour every v2 line has.
+        for cap in [Some(0), Some(-1)] {
+            let runs = WireRuns {
+                v: 3,
+                generated_at: "2026-09-15T10:00:00.000Z".into(),
+                plan: "pro".into(),
+                free_lines: 5,
+                runs: vec![WireRun {
+                    lines: vec![WireRunLine {
+                        cap,
+                        ..line(2589, 20, false, "Linen Cloth")
+                    }],
+                    ..plain_run()
+                }],
+            };
+            let lua = render_runs_lua(&runs, 1).unwrap();
+            assert!(!lua.contains(", cc = "), "wrote a cap of {cap:?}");
+        }
+    }
+
+    #[test]
+    fn a_realm_the_addon_could_not_use_is_dropped_whole() {
+        for realm in [
+            WireRealm {
+                id: 0,
+                name: "Kazzak".into(),
+            },
+            WireRealm {
+                id: 1305,
+                name: "  ".into(),
+            },
+        ] {
+            let runs = WireRuns {
+                v: 3,
+                generated_at: "2026-09-15T10:00:00.000Z".into(),
+                plan: "pro".into(),
+                free_lines: 5,
+                runs: vec![WireRun {
+                    lines: vec![WireRunLine {
+                        realm: Some(realm.clone()),
+                        ..line(2589, 20, false, "Linen Cloth")
+                    }],
+                    ..plain_run()
+                }],
+            };
+            let lua = render_runs_lua(&runs, 1).unwrap();
+            assert!(!lua.contains(", rl = "), "wrote realm {realm:?}");
+        }
+    }
+
+    #[test]
+    fn a_craft_the_addon_could_not_act_on_is_dropped_whole() {
+        // Each of these is something the addon would have to do the
+        // impossible with: name no recipe, divide a need by a yield of zero,
+        // compare against a cost of nothing, split into no reagents.
+        let good = WireCraft {
+            recipe_id: 9876,
+            crafted_qty: 5,
+            cost_copper: 2300,
+            reagents: vec![WireCraftReagent {
+                item_id: 224060,
+                qty: 5,
+                name_en: "Eversong Trout".into(),
+                vendor: false,
+                usual: Some(400),
+                vendor_unit: None,
+            }],
+        };
+        let broken = [
+            WireCraft {
+                recipe_id: 0,
+                ..good.clone()
+            },
+            WireCraft {
+                crafted_qty: 0,
+                ..good.clone()
+            },
+            WireCraft {
+                cost_copper: 0,
+                ..good.clone()
+            },
+            WireCraft {
+                reagents: vec![],
+                ..good.clone()
+            },
+        ];
+        for craft in broken {
+            let runs = WireRuns {
+                v: 3,
+                generated_at: "2026-09-15T10:00:00.000Z".into(),
+                plan: "pro".into(),
+                free_lines: 5,
+                runs: vec![WireRun {
+                    lines: vec![WireRunLine {
+                        craft: Some(craft.clone()),
+                        ..line(222724, 461, false, "Thalassian Fillet")
+                    }],
+                    ..plain_run()
+                }],
+            };
+            let lua = render_runs_lua(&runs, 1).unwrap();
+            assert!(!lua.contains(", cr = "), "wrote craft {craft:?}");
+        }
+
+        // …and the good one still renders, so the guards are not a blanket.
+        let runs = WireRuns {
+            v: 3,
+            generated_at: "2026-09-15T10:00:00.000Z".into(),
+            plan: "pro".into(),
+            free_lines: 5,
+            runs: vec![WireRun {
+                lines: vec![WireRunLine {
+                    craft: Some(good),
+                    ..line(222724, 461, false, "Thalassian Fillet")
+                }],
+                ..plain_run()
+            }],
+        };
+        let lua = render_runs_lua(&runs, 1).unwrap();
+        assert!(lua.contains(", cr = { r = 9876, n = 5, c = 2300, i = { "));
+    }
+
+    #[test]
+    fn a_reagents_unknown_price_is_omitted_the_way_a_lines_is() {
+        let runs = WireRuns {
+            v: 3,
+            generated_at: "2026-09-15T10:00:00.000Z".into(),
+            plan: "pro".into(),
+            free_lines: 5,
+            runs: vec![WireRun {
+                lines: vec![WireRunLine {
+                    craft: Some(WireCraft {
+                        recipe_id: 9876,
+                        crafted_qty: 5,
+                        cost_copper: 2300,
+                        reagents: vec![WireCraftReagent {
+                            item_id: 224060,
+                            qty: 5,
+                            name_en: "Eversong Trout".into(),
+                            vendor: false,
+                            usual: Some(0),
+                            vendor_unit: Some(0),
+                        }],
+                    }),
+                    ..line(222724, 461, false, "Thalassian Fillet")
+                }],
+                ..plain_run()
+            }],
+        };
+        let lua = render_runs_lua(&runs, 1).unwrap();
+        assert!(lua.contains("{ i = 224060, q = 5, n = 'Eversong Trout', v = false }"));
+    }
+
+    #[test]
+    fn the_new_strings_are_escaped_like_every_other_name() {
+        let runs = WireRuns {
+            v: 3,
+            generated_at: "2026-09-15T10:00:00.000Z".into(),
+            plan: "pro".into(),
+            free_lines: 5,
+            runs: vec![WireRun {
+                shared_by: Some("O'Brien".into()),
+                source: Some(WireRunSource {
+                    label: "Cooking's 1-100".into(),
+                }),
+                lines: vec![WireRunLine {
+                    realm: Some(WireRealm {
+                        id: 1305,
+                        name: "Cho'gall".into(),
+                    }),
+                    craft: Some(WireCraft {
+                        recipe_id: 9876,
+                        crafted_qty: 5,
+                        cost_copper: 2300,
+                        reagents: vec![WireCraftReagent {
+                            item_id: 3,
+                            qty: 1,
+                            name_en: "Deckhand's Shirt".into(),
+                            vendor: true,
+                            usual: None,
+                            vendor_unit: Some(60),
+                        }],
+                    }),
+                    ..line(222724, 461, false, "Thalassian Fillet")
+                }],
+                ..plain_run()
+            }],
+        };
+        let lua = render_runs_lua(&runs, 1).unwrap();
+        assert!(lua.contains("by = 'O\\'Brien'"));
+        assert!(lua.contains("src = 'Cooking\\'s 1-100'"));
+        assert!(lua.contains("n = 'Cho\\'gall'"));
+        assert!(lua.contains("n = 'Deckhand\\'s Shirt'"));
+    }
+
+    #[test]
+    fn a_v3_payload_is_written_with_its_own_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs = WireRuns {
+            v: 3,
+            generated_at: "2026-09-15T10:00:00.000Z".into(),
+            plan: "pro".into(),
+            free_lines: 5,
+            runs: vec![WireRun {
+                code: "a0000016".into(),
+                name: Some("Flask watch".into()),
+                kind: Some("alert".into()),
+                lines: vec![WireRunLine {
+                    cap: Some(99_900),
+                    ..line(212264, 3, false, "Flask of Alchemical Chaos")
+                }],
+                ..plain_run()
+            }],
+        };
+        assert!(apply_fetch_result(dir.path(), Ok(runs), 7).unwrap());
+        let s = std::fs::read_to_string(dir.path().join(crate::luafile::RUNS_FILE_NAME)).unwrap();
+        assert!(s.starts_with("GoldCap_AppRuns = { v = 3, generatedAt = 7"));
+        assert!(s.contains("k = 'alert'"));
+        assert!(s.contains(", cc = 99900"));
+    }
+
+    #[test]
+    fn a_v3_render_loads_in_a_sandboxed_lua_vm_with_the_new_fields_readable() {
+        use mlua::{Lua, LuaOptions, StdLib};
+
+        let runs = WireRuns {
+            v: 3,
+            generated_at: "2026-09-15T10:00:00.000Z".into(),
+            plan: "pro".into(),
+            free_lines: 5,
+            runs: vec![
+                WireRun {
+                    code: "a0000016".into(),
+                    name: Some("Flask watch".into()),
+                    kind: Some("alert".into()),
+                    lines: vec![WireRunLine {
+                        cap: Some(99_900),
+                        realm: Some(WireRealm {
+                            id: 1305,
+                            name: "Kazzak".into(),
+                        }),
+                        ..line(212264, 3, false, "Flask of Alchemical Chaos")
+                    }],
+                    ..plain_run()
+                },
+                WireRun {
+                    code: "abcd2345".into(),
+                    name: Some("Cooking 1-100".into()),
+                    shared_by: Some("Acromion".into()),
+                    source: Some(WireRunSource {
+                        label: "Cooking 1-100".into(),
+                    }),
+                    lines: vec![WireRunLine {
+                        craft: Some(WireCraft {
+                            recipe_id: 9876,
+                            crafted_qty: 5,
+                            cost_copper: 2300,
+                            reagents: vec![WireCraftReagent {
+                                item_id: 224060,
+                                qty: 5,
+                                name_en: "Eversong Trout".into(),
+                                vendor: false,
+                                usual: Some(400),
+                                vendor_unit: None,
+                            }],
+                        }),
+                        ..line(222724, 461, false, "Thalassian Fillet")
+                    }],
+                    ..plain_run()
+                },
+            ],
+        };
+        let lua_source = render_runs_lua(&runs, 1_789_000_000).unwrap();
+
+        let lua = Lua::new_with(StdLib::NONE, LuaOptions::default()).unwrap();
+        lua.load(&lua_source).exec().unwrap();
+
+        let v: u32 = lua.load("return GoldCap_AppRuns.v").eval().unwrap();
+        assert_eq!(v, 3);
+        let k: String = lua.load("return GoldCap_AppRuns.runs[1].k").eval().unwrap();
+        assert_eq!(k, "alert");
+        let cc: i64 = lua
+            .load("return GoldCap_AppRuns.runs[1].lines[1].cc")
+            .eval()
+            .unwrap();
+        assert_eq!(cc, 99_900);
+        let realm_id: i64 = lua
+            .load("return GoldCap_AppRuns.runs[1].lines[1].rl.id")
+            .eval()
+            .unwrap();
+        assert_eq!(realm_id, 1305);
+        let realm_name: String = lua
+            .load("return GoldCap_AppRuns.runs[1].lines[1].rl.n")
+            .eval()
+            .unwrap();
+        assert_eq!(realm_name, "Kazzak");
+
+        let by: String = lua
+            .load("return GoldCap_AppRuns.runs[2].by")
+            .eval()
+            .unwrap();
+        assert_eq!(by, "Acromion");
+        let src: String = lua
+            .load("return GoldCap_AppRuns.runs[2].src")
+            .eval()
+            .unwrap();
+        assert_eq!(src, "Cooking 1-100");
+        let recipe: i64 = lua
+            .load("return GoldCap_AppRuns.runs[2].lines[1].cr.r")
+            .eval()
+            .unwrap();
+        assert_eq!(recipe, 9876);
+        let crafted_qty: i64 = lua
+            .load("return GoldCap_AppRuns.runs[2].lines[1].cr.n")
+            .eval()
+            .unwrap();
+        assert_eq!(crafted_qty, 5);
+        let cost: i64 = lua
+            .load("return GoldCap_AppRuns.runs[2].lines[1].cr.c")
+            .eval()
+            .unwrap();
+        assert_eq!(cost, 2300);
+        let reagent_count: i64 = lua
+            .load("return #GoldCap_AppRuns.runs[2].lines[1].cr.i")
+            .eval()
+            .unwrap();
+        assert_eq!(reagent_count, 1);
+        let reagent_name: String = lua
+            .load("return GoldCap_AppRuns.runs[2].lines[1].cr.i[1].n")
+            .eval()
+            .unwrap();
+        assert_eq!(reagent_name, "Eversong Trout");
+        let reagent_usual: i64 = lua
+            .load("return GoldCap_AppRuns.runs[2].lines[1].cr.i[1].u")
+            .eval()
+            .unwrap();
+        assert_eq!(reagent_usual, 400);
+
+        // The alert run has no craft and the followed run has no cap: both
+        // read as nil in game rather than as a zero.
+        let missing: Option<i64> = lua
+            .load("return GoldCap_AppRuns.runs[2].lines[1].cc")
+            .eval()
+            .unwrap();
+        assert_eq!(missing, None);
     }
 }
