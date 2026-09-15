@@ -4,6 +4,12 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
+## 1.9.0 (unreleased)
+
+- **Your saved lists reach the addon.** Lists with quantities saved on goldcap.gg
+  (a profession's shopping list, for one) show up in the addon's BUY tab the next
+  time the auction house opens. Needs addon 0.10.
+
 ## 1.8.0 (2026-09-08)
 
 - **Sends goldcap.gg your posted and cancelled auctions.** With addon 0.8.0, the game
