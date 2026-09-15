@@ -4,6 +4,18 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
+## 1.11.0 (unreleased)
+
+- **Shopping lists now carry what it would cost to craft an item.** When
+  goldcap.gg knows a recipe for something on your list, the Companion brings
+  its reagents and their prices along too, so the BUY tab can say whether
+  crafting it beats buying it — and turn the line into its reagents when it
+  does. Needs addon 0.12.0.
+- **Alerts and lists shared with you reach the game as well.** The items your
+  price alerts are firing on right now, and a list someone shared with you,
+  arrive as shopping runs of their own, each carrying the price ceiling it was
+  set at and the realm it was seen on.
+
 ## 1.10.0 (unreleased)
 
 - **Shopping lists arrive with prices.** A list from goldcap.gg now brings the
