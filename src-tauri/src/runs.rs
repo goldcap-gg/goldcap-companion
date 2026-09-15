@@ -190,10 +190,19 @@ pub async fn fetch_runs(client: &reqwest::Client, token: &str) -> Result<WireRun
     res.json::<WireRuns>().await.map_err(|e| e.to_string())
 }
 
+/// Runs contracts this build understands. v1 is the phase-1 shape; v2 adds
+/// the optional per-line price facts. An unknown version is refused rather
+/// than rendered half-understood — the addon would then be reading a file
+/// whose meaning this build cannot vouch for, and a stale correct file beats
+/// a fresh misread one.
+const SUPPORTED_VERSIONS: [u32; 2] = [1, 2];
+
 /// The write seam `sync_once` calls: `Ok(true)` means it wrote, and every
-/// failure — a fetch error, an unsupported `v`, or an unparseable
-/// `updatedAt` inside `render_runs_lua` — comes back as `Err` before any
-/// filesystem operation, leaving a previously written `Runs.lua` untouched.
+/// failure — a fetch error, a version this build does not support, or an
+/// unparseable `updatedAt` inside `render_runs_lua` — comes back as `Err`
+/// before any filesystem operation, leaving a previously written `Runs.lua`
+/// untouched. The rendered `GoldCap_AppRuns.v` is the version the server
+/// sent, not a constant: a v1 server keeps producing a v1 file.
 /// `Ok(false)` is part of the shared shape with `ledger_summary`'s seam but
 /// is never actually returned here.
 pub fn apply_fetch_result(
@@ -202,7 +211,7 @@ pub fn apply_fetch_result(
     generated_at: i64,
 ) -> Result<bool, String> {
     let runs = fetched?;
-    if runs.v != 1 {
+    if !SUPPORTED_VERSIONS.contains(&runs.v) {
         return Err(format!("runs: unsupported version {}", runs.v));
     }
     let contents = render_runs_lua(&runs, generated_at)?;
@@ -383,10 +392,10 @@ mod tests {
     }
 
     #[test]
-    fn a_wrong_version_is_refused_before_writing() {
+    fn an_unsupported_version_is_refused_before_writing() {
         let dir = tempfile::tempdir().unwrap();
         let runs = WireRuns {
-            v: 2,
+            v: 3,
             generated_at: String::new(),
             plan: "free".into(),
             free_lines: 5,
@@ -394,6 +403,73 @@ mod tests {
         };
         assert!(apply_fetch_result(dir.path(), Ok(runs), 7).is_err());
         assert!(!dir.path().join(crate::luafile::RUNS_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn a_v2_payload_is_written_with_its_own_version_and_prices() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs = WireRuns {
+            v: 2,
+            generated_at: "2026-09-15T10:00:00.000Z".into(),
+            plan: "pro".into(),
+            free_lines: 5,
+            runs: vec![WireRun {
+                code: "abcd2345".into(),
+                name: Some("Cooking 1-100".into()),
+                updated_at: "2026-09-15T09:00:00.000Z".into(),
+                lines: vec![WireRunLine {
+                    usual: Some(450),
+                    vendor_unit: Some(25),
+                    cheap_hour: Some(WireCheapHour { hour: 3, pct: -18 }),
+                    ..line(2589, 20, false, "Linen Cloth")
+                }],
+            }],
+        };
+        assert!(apply_fetch_result(dir.path(), Ok(runs), 7).unwrap());
+        let s = std::fs::read_to_string(dir.path().join(crate::luafile::RUNS_FILE_NAME)).unwrap();
+        assert!(s.starts_with("GoldCap_AppRuns = { v = 2, generatedAt = 7"));
+        assert!(s.contains("u = 450, vu = 25, ch = 3, cp = -18"));
+    }
+
+    #[test]
+    fn a_v1_server_still_gets_its_file_written() {
+        // A 1.10 companion in front of a site that has not shipped 2a yet.
+        let dir = tempfile::tempdir().unwrap();
+        let runs = WireRuns {
+            v: 1,
+            generated_at: "2026-09-15T10:00:00.000Z".into(),
+            plan: "free".into(),
+            free_lines: 5,
+            runs: vec![WireRun {
+                code: "abcd2345".into(),
+                name: None,
+                updated_at: "2026-09-15T09:00:00.000Z".into(),
+                lines: vec![line(5, 210, false, "Plant Protein")],
+            }],
+        };
+        assert!(apply_fetch_result(dir.path(), Ok(runs), 7).unwrap());
+        let s = std::fs::read_to_string(dir.path().join(crate::luafile::RUNS_FILE_NAME)).unwrap();
+        assert!(s.starts_with("GoldCap_AppRuns = { v = 1, generatedAt = 7"));
+        assert!(s.contains("n = 'Plant Protein' }"));
+        assert!(!s.contains(", u = "));
+    }
+
+    #[test]
+    fn an_unsupported_version_leaves_a_previously_written_file_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(crate::luafile::RUNS_FILE_NAME), "old").unwrap();
+        let runs = WireRuns {
+            v: 99,
+            generated_at: String::new(),
+            plan: "free".into(),
+            free_lines: 5,
+            runs: vec![],
+        };
+        assert!(apply_fetch_result(dir.path(), Ok(runs), 7).is_err());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(crate::luafile::RUNS_FILE_NAME)).unwrap(),
+            "old"
+        );
     }
 
     #[test]
