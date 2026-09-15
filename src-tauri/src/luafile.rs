@@ -18,6 +18,10 @@ pub const LUA_FILE_NAME: &str = "AppData.lua";
 /// previous snapshot on disk (nothing rewrites this file on failure).
 pub const LEDGER_FILE_NAME: &str = "LedgerSummary.lua";
 
+/// Third data file in the same mini-addon: the "Buy runs" list. Same
+/// separation as `LEDGER_FILE_NAME` — its own file, its own write path.
+pub const RUNS_FILE_NAME: &str = "Runs.lua";
+
 /// Static contents of `GoldCap_AppData.toc`. Never changes at runtime; the
 /// companion only (re)writes it if it's missing or a game patch changed the
 /// expected Interface version out from under an older build of this file.
@@ -28,6 +32,7 @@ pub const TOC_CONTENTS: &str = "\
 ## LoadOnDemand: 0
 AppData.lua
 LedgerSummary.lua
+Runs.lua
 ";
 
 /// `{wowRetailPath}/Interface/AddOns/GoldCap_AppData`.

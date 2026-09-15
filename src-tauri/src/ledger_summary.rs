@@ -389,7 +389,10 @@ mod tests {
     }
 
     #[test]
-    fn toc_lists_both_files() {
-        assert!(crate::luafile::TOC_CONTENTS.contains("AppData.lua\nLedgerSummary.lua\n"));
+    fn toc_lists_all_three_files() {
+        assert!(crate::luafile::TOC_CONTENTS.contains(&format!(
+            "AppData.lua\nLedgerSummary.lua\n{}\n",
+            crate::luafile::RUNS_FILE_NAME
+        )));
     }
 }
