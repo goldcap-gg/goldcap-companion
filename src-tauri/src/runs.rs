@@ -37,10 +37,11 @@ pub struct WireRuns {
 /// Renders `Runs.lua`'s contents: the addon-side buy list, keyed off the
 /// same short field names as the rest of `GoldCap_AppData` (`i`/`q`/`v`/`n`
 /// on a line) to keep the in-game table small. `updatedAt` on each run is
-/// re-derived from its ISO timestamp the same way `LedgerSummary.lua` does;
-/// an unparseable timestamp renders as `0` rather than failing the whole
-/// file — one bad run must not blank the others.
-pub fn render_runs_lua(runs: &WireRuns, generated_at: i64) -> String {
+/// re-derived from its ISO timestamp the same way `LedgerSummary.lua`'s
+/// `sale_rows` does; an unparseable timestamp fails the whole render rather
+/// than silently rendering as the Unix epoch — the caller (Task 2) must not
+/// write a file that lies about a run's freshness.
+pub fn render_runs_lua(runs: &WireRuns, generated_at: i64) -> Result<String, String> {
     let mut out = String::new();
     out.push_str(&format!(
         "GoldCap_AppRuns = {{ v = 1, generatedAt = {}, plan = '{}', freeLines = {}, runs = {{ ",
@@ -56,10 +57,10 @@ pub fn render_runs_lua(runs: &WireRuns, generated_at: i64) -> String {
         if let Some(name) = &run.name {
             out.push_str(&format!("name = '{}', ", escape_lua_string(name)));
         }
-        out.push_str(&format!(
-            "updatedAt = {}, lines = {{ ",
-            parse_iso_utc(&run.updated_at).unwrap_or(0)
-        ));
+        let updated_at = parse_iso_utc(&run.updated_at).ok_or_else(|| {
+            format!("runs: bad updatedAt {:?} on run {}", run.updated_at, run.code)
+        })?;
+        out.push_str(&format!("updatedAt = {}, lines = {{ ", updated_at));
         for (li, line) in run.lines.iter().enumerate() {
             if li > 0 {
                 out.push_str(", ");
@@ -75,7 +76,7 @@ pub fn render_runs_lua(runs: &WireRuns, generated_at: i64) -> String {
         out.push_str(" } }");
     }
     out.push_str(" } }\n");
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -101,7 +102,7 @@ mod tests {
                 }],
             }],
         };
-        let lua = render_runs_lua(&runs, 1_789_000_000);
+        let lua = render_runs_lua(&runs, 1_789_000_000).unwrap();
         let updated_at = crate::ledger_summary::parse_iso_utc("2026-09-15T09:00:00.000Z").unwrap();
         let expected = format!(
             "GoldCap_AppRuns = {{ v = 1, generatedAt = 1789000000, plan = 'pro', freeLines = 5, runs = {{ {{ code = 'abcd2345', name = 'Cooking 1-100', updatedAt = {}, lines = {{ {{ i = 5, q = 210, v = false, n = 'Plant Protein' }} }} }} }} }}\n",
@@ -129,10 +130,33 @@ mod tests {
                 }],
             }],
         };
-        let lua = render_runs_lua(&runs, 1);
+        let lua = render_runs_lua(&runs, 1).unwrap();
         assert!(!lua.contains("name ="));
         assert!(lua.contains("n = 'Deckhand\\'s Shirt'"));
         assert!(lua.contains("v = true"));
+    }
+
+    #[test]
+    fn an_unparseable_updated_at_fails_the_whole_render_rather_than_lying_as_epoch() {
+        let runs = WireRuns {
+            v: 1,
+            generated_at: "2026-09-15T10:00:00.000Z".into(),
+            plan: "free".into(),
+            free_lines: 5,
+            runs: vec![WireRun {
+                code: "abcd2345".into(),
+                name: None,
+                updated_at: "not-a-date".into(),
+                lines: vec![WireRunLine {
+                    item_id: 3,
+                    qty: 1,
+                    vendor: true,
+                    name_en: "Deckhand's Shirt".into(),
+                }],
+            }],
+        };
+        let err = render_runs_lua(&runs, 1).unwrap_err();
+        assert!(err.contains("abcd2345"));
     }
 
     #[test]
