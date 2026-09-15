@@ -53,13 +53,6 @@ where
         .ok_or_else(|| D::Error::custom("runs: number out of range"))
 }
 
-fn lenient_opt_i64<'de, D>(d: D) -> Result<Option<i64>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Ok(Option::<LenientNumber>::deserialize(d)?.and_then(|n| n.to_i64()))
-}
-
 /// Reads an optional field without ever failing the payload around it: the
 /// value is taken as plain JSON first and only then shaped into `T`, and
 /// anything that does not fit — a number where a string belongs, an object
@@ -127,9 +120,9 @@ pub struct WireCraftReagent {
     pub qty: u32,
     pub name_en: String,
     pub vendor: bool,
-    #[serde(default, deserialize_with = "lenient_opt_i64")]
+    #[serde(default, deserialize_with = "lenient_opt_number")]
     pub usual: Option<i64>,
-    #[serde(default, deserialize_with = "lenient_opt_i64")]
+    #[serde(default, deserialize_with = "lenient_opt_number")]
     pub vendor_unit: Option<i64>,
 }
 
@@ -157,12 +150,12 @@ pub struct WireRunLine {
     /// The site's reference price per unit at fetch time, in copper. Contract
     /// v2 and later; absent on a v1 response and on a line the site has no
     /// price for, and then the addon falls back to the import's `mv`.
-    #[serde(default, deserialize_with = "lenient_opt_i64")]
+    #[serde(default, deserialize_with = "lenient_opt_number")]
     pub usual: Option<i64>,
     /// What a vendor charges per unit, in copper. Absent when nobody sells it.
-    #[serde(default, deserialize_with = "lenient_opt_i64")]
+    #[serde(default, deserialize_with = "lenient_opt_number")]
     pub vendor_unit: Option<i64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_opt")]
     pub cheap_hour: Option<WireCheapHour>,
     /// An absolute ceiling per unit, in copper — an alert run's target price.
     /// Contract v3 and later. Absent means the addon's own USUAL × cap%, as
@@ -181,7 +174,7 @@ pub struct WireRunLine {
 #[serde(rename_all = "camelCase")]
 pub struct WireRun {
     pub code: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_opt")]
     pub name: Option<String>,
     pub updated_at: String,
     /// `"list"` or `"alert"`. Contract v3 and later; absent is a list, which
@@ -219,12 +212,14 @@ fn shown_text(s: &str) -> Option<&str> {
 /// something the addon would otherwise have to do the impossible with: a
 /// recipe it cannot identify, a yield it would divide a need by, a cost of
 /// nothing to compare a price against, a split with no reagents to split
-/// into. Half a craft is worse than no craft.
+/// into, or a reagent with no item behind it or none of it actually needed.
+/// Half a craft is worse than no craft.
 fn render_craft(craft: &WireCraft) -> Option<String> {
     if craft.recipe_id == 0
         || craft.crafted_qty == 0
         || craft.cost_copper <= 0
         || craft.reagents.is_empty()
+        || craft.reagents.iter().any(|r| r.item_id == 0 || r.qty == 0)
     {
         return None;
     }
@@ -1005,6 +1000,46 @@ mod tests {
     }
 
     #[test]
+    fn a_malformed_v2_field_inside_a_v3_payload_reads_as_absent_too() {
+        // v2's `usual`/`vendorUnit`/`cheapHour`, a reagent's own `usual`, and
+        // the run's `name` used to be read strictly, so a v3 payload with one
+        // bad v2-era value failed the whole `WireRuns` parse — and a failed
+        // parse writes nothing, stranding Runs.lua exactly like the v3-only
+        // fields the test above guards against.
+        let json = r#"{"v":3,"generatedAt":"2026-09-15T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[{"code":"abcd2345","name":5,"updatedAt":"2026-09-15T09:00:00.000Z","lines":[{"itemId":2589,"qty":20,"vendor":false,"nameEn":"Linen Cloth","usual":"450","vendorUnit":"25","cheapHour":3,"craft":{"recipeId":9876,"craftedQty":5,"costCopper":2300,"reagents":[{"itemId":224060,"qty":5,"nameEn":"Eversong Trout","vendor":false,"usual":"400","vendorUnit":"60"}]}}]}]}"#;
+        let parsed: WireRuns = serde_json::from_str(json).unwrap();
+        let run = &parsed.runs[0];
+        assert_eq!(run.name, None, "a number is not a run name");
+        let l = &run.lines[0];
+        assert_eq!(l.usual, None, "a string is not copper");
+        assert_eq!(l.vendor_unit, None, "a string is not copper");
+        assert_eq!(l.cheap_hour, None, "a number is not a cheap-hour object");
+        let reagent = &l.craft.as_ref().unwrap().reagents[0];
+        assert_eq!(reagent.usual, None, "a string is not copper");
+        assert_eq!(reagent.vendor_unit, None, "a string is not copper");
+        // The line's other facts survive the bad neighbours untouched.
+        assert_eq!(l.item_id, 2589);
+        assert_eq!(l.qty, 20);
+        assert_eq!(l.name_en, "Linen Cloth");
+
+        let lua = render_runs_lua(&parsed, 1).unwrap();
+        assert!(!lua.contains(", u = "), "rendered usual from a bad string");
+        assert!(
+            !lua.contains(", vu = "),
+            "rendered vendor_unit from a bad string"
+        );
+        assert!(
+            !lua.contains(", ch = "),
+            "rendered cheap_hour from a bad shape"
+        );
+        assert!(!lua.contains(", cp = "), "rendered cheap_hour's pct");
+        assert!(
+            !lua.contains("name = "),
+            "rendered a name from a bad number"
+        );
+    }
+
+    #[test]
     fn a_v3_field_this_build_has_never_heard_of_is_ignored() {
         // Additions only: a later contract must not strand this build.
         let json = r#"{"v":3,"generatedAt":"2026-09-15T10:00:00.000Z","plan":"pro","freeLines":5,"mystery":true,"runs":[{"code":"abcd2345","name":null,"updatedAt":"2026-09-15T09:00:00.000Z","futureRunField":{"a":1},"lines":[{"itemId":2589,"qty":20,"vendor":false,"nameEn":"Linen Cloth","futureLineField":[1,2,3]}]}]}"#;
@@ -1257,6 +1292,20 @@ mod tests {
             },
             WireCraft {
                 reagents: vec![],
+                ..good.clone()
+            },
+            WireCraft {
+                reagents: vec![WireCraftReagent {
+                    item_id: 0,
+                    ..good.reagents[0].clone()
+                }],
+                ..good.clone()
+            },
+            WireCraft {
+                reagents: vec![WireCraftReagent {
+                    qty: 0,
+                    ..good.reagents[0].clone()
+                }],
                 ..good.clone()
             },
         ];
