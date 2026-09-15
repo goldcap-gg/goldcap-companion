@@ -20,6 +20,7 @@ pub struct WireRunLine {
 #[serde(rename_all = "camelCase")]
 pub struct WireRun {
     pub code: String,
+    #[serde(default)]
     pub name: Option<String>,
     pub updated_at: String,
     pub lines: Vec<WireRunLine>,
@@ -44,8 +45,12 @@ pub struct WireRuns {
 /// write a file that lies about a run's freshness.
 pub fn render_runs_lua(runs: &WireRuns, generated_at: i64) -> Result<String, String> {
     let mut out = String::new();
+    // `v` is rendered straight from the wire payload rather than hard-coded:
+    // the version gate itself lives in `apply_fetch_result`, which refuses
+    // `v != 1` before this function is ever called.
     out.push_str(&format!(
-        "GoldCap_AppRuns = {{ v = 1, generatedAt = {}, plan = '{}', freeLines = {}, runs = {{ ",
+        "GoldCap_AppRuns = {{ v = {}, generatedAt = {}, plan = '{}', freeLines = {}, runs = {{ ",
+        runs.v,
         generated_at,
         escape_lua_string(&runs.plan),
         runs.free_lines
@@ -92,7 +97,7 @@ pub async fn fetch_runs(client: &reqwest::Client, token: &str) -> Result<WireRun
         .await
         .map_err(|e| e.to_string())?;
     if !res.status().is_success() {
-        return Err(format!("runs: http {}", res.status()));
+        return Err(format!("http {}", res.status()));
     }
     res.json::<WireRuns>().await.map_err(|e| e.to_string())
 }
@@ -207,6 +212,69 @@ mod tests {
     }
 
     #[test]
+    fn a_run_missing_the_name_key_entirely_still_deserialises() {
+        let json = r#"{"v":1,"generatedAt":"2026-09-15T10:00:00.000Z","plan":"free","freeLines":5,"runs":[{"code":"abcd2345","updatedAt":"2026-09-15T09:00:00.000Z","lines":[]}]}"#;
+        let parsed: WireRuns = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.runs[0].name, None);
+    }
+
+    #[test]
+    fn the_rendered_lua_loads_in_a_sandboxed_lua_vm() {
+        use mlua::{Lua, LuaOptions, StdLib};
+
+        let runs = WireRuns {
+            v: 1,
+            generated_at: "2026-09-15T10:00:00.000Z".into(),
+            plan: "pro".into(),
+            free_lines: 5,
+            runs: vec![WireRun {
+                code: "abcd2345".into(),
+                name: Some("O'Brien's \\ Emporium".into()),
+                updated_at: "2026-09-15T09:00:00.000Z".into(),
+                lines: vec![WireRunLine {
+                    item_id: 5,
+                    qty: 210,
+                    vendor: false,
+                    name_en: "Plant Protein".into(),
+                }],
+            }],
+        };
+        let lua_source = render_runs_lua(&runs, 1_789_000_000).unwrap();
+
+        // No standard library: this mirrors savedvars.rs's sandbox, since the
+        // addon loads this same file into a live WoW Lua environment.
+        let lua = Lua::new_with(StdLib::NONE, LuaOptions::default()).unwrap();
+        lua.load(&lua_source).exec().unwrap();
+
+        let v: u32 = lua.load("return GoldCap_AppRuns.v").eval().unwrap();
+        assert_eq!(v, 1);
+        let name: String = lua
+            .load("return GoldCap_AppRuns.runs[1].lines[1].n")
+            .eval()
+            .unwrap();
+        assert_eq!(name, "Plant Protein");
+        let run_name: String = lua
+            .load("return GoldCap_AppRuns.runs[1].name")
+            .eval()
+            .unwrap();
+        assert_eq!(run_name, "O'Brien's \\ Emporium");
+
+        // An empty-runs render also loads.
+        let empty = WireRuns {
+            v: 1,
+            generated_at: "2026-09-15T10:00:00.000Z".into(),
+            plan: "free".into(),
+            free_lines: 5,
+            runs: vec![],
+        };
+        let empty_source = render_runs_lua(&empty, 1).unwrap();
+        let lua2 = Lua::new_with(StdLib::NONE, LuaOptions::default()).unwrap();
+        lua2.load(&empty_source).exec().unwrap();
+        let count: i64 = lua2.load("return #GoldCap_AppRuns.runs").eval().unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
     fn a_fetch_error_leaves_the_previous_file_alone() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(crate::luafile::RUNS_FILE_NAME), "old").unwrap();
@@ -228,7 +296,7 @@ mod tests {
             free_lines: 5,
             runs: vec![],
         };
-        assert_eq!(apply_fetch_result(dir.path(), Ok(runs), 7).unwrap(), true);
+        assert!(apply_fetch_result(dir.path(), Ok(runs), 7).unwrap());
         let s = std::fs::read_to_string(dir.path().join(crate::luafile::RUNS_FILE_NAME)).unwrap();
         assert!(s.starts_with("GoldCap_AppRuns = { v = 1, generatedAt = 7"));
         assert!(!dir.path().join("Runs.lua.tmp").exists());

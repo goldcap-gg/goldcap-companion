@@ -372,8 +372,9 @@ pub async fn sync_once(
     // Runs.lua on disk untouched — apply_fetch_result performs no
     // filesystem operation on Err. Unpaired = silent no-op, same rule as
     // the other passengers.
-    if !config.companion_token.is_empty() {
+    if !config.companion_token.trim().is_empty() {
         let fetched = crate::runs::fetch_runs(client, &config.companion_token).await;
+        let failed = fetched.as_ref().err().cloned();
         match crate::runs::apply_fetch_result(
             &luafile::addon_dir(Path::new(&config.wow_retail_path)),
             fetched,
@@ -381,7 +382,13 @@ pub async fn sync_once(
         ) {
             Ok(true) => logger.info("runs: written"),
             Ok(false) => {}
-            Err(e) => logger.error(&format!("runs: {e}")),
+            Err(e) => {
+                if failed.as_deref() == Some(e.as_str()) {
+                    logger.error(&format!("runs fetch failed: {e}"));
+                } else {
+                    logger.error(&format!("runs write failed: {e}"));
+                }
+            }
         }
     }
 
