@@ -4,7 +4,7 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
-## 1.11.0 (unreleased)
+## 1.11.0 (2026-09-16)
 
 - **Shopping lists now carry what it would cost to craft an item.** When
   goldcap.gg knows a recipe for something on your list, the Companion brings
@@ -16,8 +16,6 @@ data.
   each carrying the price ceiling it was set at and the realm it was seen on.
   A list someone shared with you arrives as a shopping run too.
 
-## 1.10.0 (unreleased)
-
 - **Shopping lists arrive with prices.** A list from goldcap.gg now brings the
   site's price for each item along with it, so the addon's BUY tab knows what
   something usually costs — and what a vendor charges for it — even for items
@@ -25,8 +23,6 @@ data.
 - **What you buy from a list reaches your ledger on goldcap.gg.** Purchases made
   in the BUY tab now upload with the list they came from, so the site can total
   what a shopping run actually cost you.
-
-## 1.9.0 (unreleased)
 
 - **Your saved lists reach the addon.** Lists with quantities saved on goldcap.gg
   (a profession's shopping list, for one) show up in the addon's BUY tab next
