@@ -80,5 +80,9 @@ it and refuses anything that does not match.
 Source-available: read it, audit it, build it for yourself. Redistributing it, or
 reusing the code elsewhere, needs permission — see [LICENSE](LICENSE).
 
-Something looks wrong, or you have a question: open an issue, or mail
-support@goldcap.gg.
+## Questions, bugs and ideas
+
+Open an issue here, or post on the [GoldCap Discord](https://goldcap.gg/discord):
+**#help** for questions, **#bug-reports** when something is broken,
+**#feature-requests** for what you would like it to do. Both places are read.
+For anything you would rather not post in public: support@goldcap.gg.
