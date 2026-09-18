@@ -1,0 +1,30 @@
+GoldCap Companion — source-available licence
+Copyright (c) 2026 GoldCap (goldcap.gg). All rights reserved.
+
+This source code is published so that anyone can read it, audit it, and build
+it for their own use before trusting the installers we publish. That is the
+whole purpose of it being here.
+
+You may:
+
+  - read, copy and study this source code;
+  - build it and run your own build, for your own use;
+  - open issues and submit pull requests against this repository.
+
+You may not, without prior written permission:
+
+  - redistribute this software or builds of it, modified or unmodified,
+    including under another name or on another download page or addon site;
+  - use the GoldCap name, logo or branding for anything you distribute;
+  - use this source code, in whole or in part, in another product or service.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+The fonts under ui/fonts/ are third-party and carry their own licences — see
+the OFL-*.txt files beside them.

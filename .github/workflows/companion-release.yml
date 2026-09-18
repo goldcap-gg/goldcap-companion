@@ -1,0 +1,362 @@
+name: Companion Release
+
+# Builds unsigned companion installers and publishes them in two places:
+#   1. A GitHub Release (on companion-v* tag pushes) — the per-tag record,
+#      publicly downloadable, which is also what lets anyone compare the
+#      bytes they got against the bytes a tag produced.
+#   2. The VPS downloads dir (/opt/wow-auction/downloads), served by Caddy
+#      at https://goldcap.gg/downloads/ — this is the user-facing download
+#      the site links to. Stable asset names (no version in the filename)
+#      keep those URLs permanent:
+#        https://goldcap.gg/downloads/GoldCap-Companion-Setup.exe
+#        https://goldcap.gg/downloads/GoldCap-Companion.dmg
+#
+# Prereqs for the /downloads URL to work (one-time, and the Caddy route and
+# compose mount that serve it live in the private goldcap site repo, not
+# here): the downloads route must be deployed to the VPS by a site release,
+# and /opt/wow-auction/downloads must be writable by the deploy SSH user
+# (create it as that user BEFORE the first deploy of the compose change —
+# a docker-created bind-mount dir is root-owned and scp would then fail).
+#
+# Release procedure: bump `version` in src-tauri/tauri.conf.json
+# (and Cargo.toml to match), merge to main, then push a companion-vX.Y.Z tag.
+# Builds are updater-signed (secrets TAURI_SIGNING_PRIVATE_KEY and
+# TAURI_SIGNING_PRIVATE_KEY_PASSWORD; the private key itself is held by the
+# owner outside the repo) — Windows SmartScreen may still warn on first run,
+# but the in-app updater verifies the signature before applying an update.
+# Each release additionally publishes updater.json plus versioned installer
+# artifacts (GoldCap-Companion_<ver>_x64-setup.exe / _universal.app.tar.gz
+# + .sig) that installed companions poll for updates. Old versioned
+# artifacts accumulate on the VPS downloads dir by design — see the
+# "Write the updater manifest" step for why that's load-bearing.
+on:
+  push:
+    tags: ["companion-v*"]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: companion-installer-windows
+          - os: macos-latest
+            artifact: companion-installer-macos
+    runs-on: ${{ matrix.os }}
+    # Comfortably above the observed run time — this caps a hung job, not a
+    # merely slow one.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # macOS: both archs so --target universal-apple-darwin can link a
+          # fat binary that runs on Intel and Apple Silicon alike.
+          targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Run tests
+        # The tests are platform-independent, and the Windows leg already
+        # runs them — running them again on the macOS leg is minutes of
+        # duplicate work for the same result. Skip on macOS, keep on Windows.
+        if: matrix.os != 'macos-latest'
+        working-directory: src-tauri
+        run: cargo test --locked
+
+      # No package.json anywhere in this repo — tauri-action installs a
+      # global @tauri-apps/cli itself and drives `tauri build` with it.
+      - name: Build installers
+        uses: tauri-apps/tauri-action@v0
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: .
+          args: ${{ matrix.os == 'macos-latest' && '--target universal-apple-darwin' || '' }}
+
+      # Tauri names bundles "GoldCap Companion_<version>_<arch>-setup.exe" —
+      # copy to stable, versionless names so the site's download URLs never
+      # change across releases.
+      - name: Collect installer under a stable name (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          Copy-Item "src-tauri/target/release/bundle/nsis/*-setup.exe" "out/GoldCap-Companion-Setup.exe"
+
+          # Also collect a versioned copy + its updater signature, so the
+          # in-app updater can fetch a byte-stream that never changes under
+          # a previously-published signature (version parsed from Tauri's
+          # own bundle name so workflow_dispatch runs without a tag still
+          # produce a usable filename).
+          $exe = Get-Item "src-tauri/target/release/bundle/nsis/*-setup.exe"
+          $ver = $exe.Name -replace '^.*_([0-9][0-9.]*)_.*$', '$1'
+          if ($ver -notmatch '^[0-9]') { throw "could not parse version from $($exe.Name)" }
+          Copy-Item $exe.FullName "out/GoldCap-Companion_${ver}_x64-setup.exe"
+          Copy-Item "$($exe.FullName).sig" "out/GoldCap-Companion_${ver}_x64-setup.exe.sig"
+
+      - name: Collect installer under a stable name (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          mkdir -p out
+          cp src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg out/GoldCap-Companion.dmg
+
+          # Also collect a versioned copy + its updater signature — same
+          # reasoning as the Windows leg above.
+          dmg=$(basename src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg)
+          ver=$(printf '%s' "$dmg" | sed -E 's/^.*_([0-9][0-9.]+)_.*$/\1/')
+          [[ "$ver" =~ ^[0-9] ]] || { echo "could not parse version from $dmg" >&2; exit 1; }
+          appgz=(src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz)
+          cp "${appgz[0]}" "out/GoldCap-Companion_${ver}_universal.app.tar.gz"
+          cp "${appgz[0]}.sig" "out/GoldCap-Companion_${ver}_universal.app.tar.gz.sig"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: out/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    # Comfortably above the observed run time — stops a hung job, not a slow
+    # but healthy one.
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      # Must come BEFORE download-artifact: checkout cleans the workspace, so
+      # running it afterwards would wipe the installers. It is here only so
+      # `uses: ./.github/actions/discord-notify` at the end of this job can be
+      # read from the workspace.
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: installers
+          merge-multiple: true
+
+      - name: Create GitHub release
+        if: startsWith(github.ref, 'refs/tags/companion-v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          notes="Unsigned builds (no OS code signing — Windows SmartScreen will warn) — Windows NSIS installer + macOS universal DMG. Updater artifacts are minisign-signed. Public download: https://goldcap.gg/downloads/"
+          # Idempotent on purpose. A later step in this job can fail (the smoke
+          # test did, on companion-v1.7.0), and re-running the job then died
+          # here on "release already exists" — so the one recovery path this
+          # job has was blocked by its own first step. Re-uploading the same
+          # assets over themselves is the correct no-op.
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" installers/* \
+              --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" installers/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Companion ${GITHUB_REF_NAME#companion-v}" \
+              --notes "$notes" \
+              --verify-tag
+          fi
+
+      # Same tailnet-only SSH path as deploy.yml — public port 22 is closed.
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+
+      # Guarded the same as the manifest step below: a workflow_dispatch run
+      # from main has no tag, so without this guard it would still overwrite
+      # the VPS installers with an untagged build while an unrelated tagged
+      # release's latest.json (and its checksums) stayed in place — the exact
+      # mismatch that step's comment warns about.
+      - name: Ensure downloads dir exists on VPS
+        if: startsWith(github.ref, 'refs/tags/companion-v')
+        uses: appleboy/ssh-action@v1.2.5
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          script: mkdir -p /opt/wow-auction/downloads
+
+      - name: Write the release manifest
+        if: startsWith(github.ref, 'refs/tags/companion-v')
+        run: |
+          set -euo pipefail
+          # The download page reads this instead of a version baked at site
+          # build time: a companion tag ships without a web deploy, so a
+          # baked version would start lying the moment it shipped.
+          #
+          # Written into installers/ (not the workspace root) so the
+          # existing "installers/*" scp source below picks it up alongside
+          # the two installers with no second connection and no separate
+          # source pattern to keep in sync.
+          #
+          # The byte/hash/timestamp lookups are hoisted into plain assignments
+          # rather than inlined in the heredoc: `set -e` does not fire on a
+          # failed command substitution that lives inside a heredoc body, so
+          # an inlined `$(stat ...)` failure would silently emit malformed
+          # JSON (e.g. an empty `"bytes": ,`) instead of failing the step. As
+          # plain assignments, a failure here exits the step non-zero before
+          # any JSON is written.
+          win="installers/GoldCap-Companion-Setup.exe"
+          mac="installers/GoldCap-Companion.dmg"
+          win_bytes=$(stat -c%s "$win")
+          win_sha=$(sha256sum "$win" | cut -d' ' -f1)
+          mac_bytes=$(stat -c%s "$mac")
+          mac_sha=$(sha256sum "$mac" | cut -d' ' -f1)
+          released_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          cat > installers/latest.json <<JSON
+          {
+            "version": "${GITHUB_REF_NAME#companion-v}",
+            "releasedAt": "$released_at",
+            "windows": {
+              "file": "GoldCap-Companion-Setup.exe",
+              "bytes": $win_bytes,
+              "sha256": "$win_sha"
+            },
+            "macos": {
+              "file": "GoldCap-Companion.dmg",
+              "bytes": $mac_bytes,
+              "sha256": "$mac_sha"
+            }
+          }
+          JSON
+          cat installers/latest.json
+
+      - name: Write the updater manifest
+        if: startsWith(github.ref, 'refs/tags/companion-v')
+        run: |
+          set -euo pipefail
+          # Tauri-format manifest for the in-app updater. Versioned artifact
+          # URLs mean Cloudflare can cache the binaries forever without ever
+          # serving a stale byte-stream against a fresh signature; .json is
+          # not in Cloudflare's default cached-extension list (latest.json
+          # already relies on this). Re-cutting an EXISTING companion-vX.Y.Z
+          # tag with different bytes is the exception: the `.gz` archive is
+          # edge-cached (max-age 300), so for up to ~5 minutes Cloudflare can
+          # still serve the old cached body against the newly published
+          # signature — self-healing once the cache entry expires, so don't
+          # panic-debug signature-mismatch errors right after a re-tag.
+          #
+          # This step derives `ver` from the pushed tag, while the collect
+          # steps above derive their `ver` from the built bundle filename
+          # (itself sourced from tauri.conf.json) — the two must agree, which
+          # the release procedure (bump the version, THEN tag) guarantees by
+          # convention rather than by any check in this workflow.
+          #
+          # Same hoisting rule as the "Write the release manifest" step
+          # above: plain assignments, not inlined `$(...)` inside the
+          # heredoc, so a failed read (e.g. a missing .sig) fails the step
+          # before any JSON is written instead of silently emitting an
+          # empty signature field.
+          ver="${GITHUB_REF_NAME#companion-v}"
+          base="https://goldcap.gg/downloads"
+          win="installers/GoldCap-Companion_${ver}_x64-setup.exe"
+          mac="installers/GoldCap-Companion_${ver}_universal.app.tar.gz"
+          win_sig=$(cat "$win.sig")
+          mac_sig=$(cat "$mac.sig")
+          pub_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          cat > installers/updater.json <<JSON
+          {
+            "version": "$ver",
+            "pub_date": "$pub_date",
+            "platforms": {
+              "windows-x86_64": { "url": "$base/GoldCap-Companion_${ver}_x64-setup.exe", "signature": "$win_sig" },
+              "darwin-aarch64": { "url": "$base/GoldCap-Companion_${ver}_universal.app.tar.gz", "signature": "$mac_sig" },
+              "darwin-x86_64": { "url": "$base/GoldCap-Companion_${ver}_universal.app.tar.gz", "signature": "$mac_sig" }
+            }
+          }
+          JSON
+          cat installers/updater.json
+
+      # Same guard as the manifest step above, and for the same reason: an
+      # unguarded upload here is what let a manual workflow_dispatch run from
+      # main overwrite the published .exe/.dmg while leaving the previous
+      # latest.json (and its now-mismatched checksums) in place. A user who
+      # verifies the hash — the entire point of the unsigned-binary warning on
+      # the download page — would conclude the file had been tampered with.
+      - name: Upload installers to VPS
+        if: startsWith(github.ref, 'refs/tags/companion-v')
+        uses: appleboy/scp-action@v1.0.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          source: "installers/*"
+          target: /opt/wow-auction/downloads
+          strip_components: 1
+          overwrite: true
+
+      # Fails until the Caddy /downloads route from this branch has been
+      # deployed to the VPS via a normal main-branch deploy — expected on
+      # any run before that lands. pipefail is required: GitHub's default
+      # run shell is `bash -e` WITHOUT pipefail, so `curl -f | head` would
+      # otherwise report head's exit code and mask a 404 (it did once).
+      # Both checks bypass the CDN cache deliberately.
+      #
+      # /downloads/ is served with `max-age=300`, and this step runs seconds
+      # after the upload — so it read a five-minute-old updater.json and saw
+      # the PREVIOUS release's version. That failed the publish job for
+      # companion-v1.7.0 even though every artifact had landed correctly, and
+      # the failure skipped the Discord announcement with it. What this step
+      # is for is proving the VPS is serving what we just uploaded, which is
+      # a question about the origin, not about what an edge happens to hold.
+      - name: Smoke test public download URL
+        run: |
+          set -o pipefail
+          bust="cb=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          curl -fsSI -H 'Cache-Control: no-cache' \
+            "https://goldcap.gg/downloads/GoldCap-Companion-Setup.exe?$bust" | head -n 5
+          if [[ "$GITHUB_REF" == refs/tags/companion-v* ]]; then
+            curl -fsS -H 'Cache-Control: no-cache' \
+              "https://goldcap.gg/downloads/updater.json?$bust" \
+              | grep -F "\"version\": \"${GITHUB_REF_NAME#companion-v}\""
+          fi
+
+      # The announcement said a new build exists and nothing about what is in
+      # it, which is the only part a player reads. The notes live in
+      # CHANGELOG.md, whose top section is this release.
+      - name: Read this release's notes
+        if: startsWith(github.ref, 'refs/tags/companion-v')
+        id: notes
+        run: |
+          set -euo pipefail
+          # From the first "## " heading to the line before the next, heading
+          # dropped: the version is already the embed's title.
+          body=$(awk '/^## /{n++; if (n == 2) exit} n == 1' CHANGELOG.md | tail -n +2)
+          # Discord rejects a description over 4096 characters outright, so an
+          # over-long release would post NOTHING. Trim on a line boundary.
+          if [ "${#body}" -gt 3400 ]; then
+            body=$(printf '%s' "$body" | head -c 3400 | sed '$d')
+            body="$body"$'\n'"…"
+          fi
+          body="$body"$'\n\n'"Existing installs update themselves; new ones start at the downloads page."
+          {
+            echo 'body<<GOLDCAP_NOTES_EOF'
+            printf '%s\n' "$body"
+            echo 'GOLDCAP_NOTES_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      # After the smoke test, so the download link in the embed is one that
+      # has just been proven to serve.
+      - name: Announce in Discord
+        if: startsWith(github.ref, 'refs/tags/companion-v')
+        uses: ./.github/actions/discord-notify
+        with:
+          webhook: ${{ secrets.DISCORD_RELEASES_WEBHOOK }}
+          status: success
+          title: "Companion ${{ github.ref_name }}"
+          url: https://goldcap.gg/downloads/
+          # One expression, never inside a block scalar: a multi-line value
+          # pasted into one carries its newlines past the block's indentation.
+          description: ${{ steps.notes.outputs.body }}

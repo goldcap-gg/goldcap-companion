@@ -1,0 +1,66 @@
+name: Discord notify
+description: Post one embed to a Discord webhook. A missing webhook is a no-op, not a failure.
+
+inputs:
+  webhook:
+    description: Discord webhook URL. Empty (a fork, or the secret not set yet) skips the post.
+    required: false
+    default: ""
+  title:
+    description: Embed title.
+    required: true
+  description:
+    description: Embed body. Markdown works; keep it under ~4000 characters.
+    required: false
+    default: ""
+  url:
+    description: Link the title points at.
+    required: false
+    default: ""
+  status:
+    description: success | failure | neutral — picks the stripe colour.
+    required: false
+    default: neutral
+
+runs:
+  using: composite
+  steps:
+    - name: Post to Discord
+      shell: bash
+      env:
+        WEBHOOK: ${{ inputs.webhook }}
+        TITLE: ${{ inputs.title }}
+        DESCRIPTION: ${{ inputs.description }}
+        URL: ${{ inputs.url }}
+        STATUS: ${{ inputs.status }}
+      run: |
+        set -euo pipefail
+        # Forks and PRs from outside the repo get no secrets. Announcing that as
+        # a red step would train everyone to ignore red steps, so: say it and go.
+        if [ -z "$WEBHOOK" ]; then
+          echo "No Discord webhook configured — skipping."
+          exit 0
+        fi
+        case "$STATUS" in
+          success) color=3908445 ;;   # 0x3BA55D
+          failure) color=15548997 ;;  # 0xED4245
+          *)       color=10070709 ;;  # 0x99AAB5
+        esac
+        # jq builds the JSON so a backtick, quote or newline in a release note
+        # can't break out of the payload.
+        payload=$(jq -n \
+          --arg title "$TITLE" \
+          --arg description "$DESCRIPTION" \
+          --arg url "$URL" \
+          --argjson color "$color" \
+          '{embeds: [({title: $title, description: $description, color: $color}
+                      + (if $url == "" then {} else {url: $url} end))]}')
+        code=$(curl -sS -o /tmp/discord-notify.out -w '%{http_code}' \
+          -X POST -H 'Content-Type: application/json' -d "$payload" "$WEBHOOK")
+        # A dead webhook must not fail a green deploy — the deploy already
+        # happened. Report loudly, exit 0.
+        if [ "$code" != "204" ] && [ "$code" != "200" ]; then
+          echo "::warning::Discord webhook returned HTTP $code: $(cat /tmp/discord-notify.out)"
+        else
+          echo "Posted to Discord (HTTP $code)."
+        fi
