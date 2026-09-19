@@ -40,7 +40,7 @@ The complete list. Every address is ours, and nothing else is contacted.
 | `POST api.goldcap.gg/v1/companion/claim` | trades your pairing code for a token |
 | `POST /v1/ledger/upload`, `/v1/live-observations`, `/v1/owned-lots`, `/v1/addon/item-names` | your own rows, from the addon's saved data |
 | `GET /v1/lists/companion`, `/v1/ledger/summary/companion` | what the window shows you |
-| `GET goldcap.gg/downloads/updater.json` | checking for a new version |
+| `GET goldcap.gg/downloads/updater.json` | checking for a new version, every four hours — unless you turn that off in Settings and check with the button instead |
 
 Every `POST` in that list is refused by the app itself until you pair it, so an
 unpaired companion only ever reads. There is no usage tracking of any kind. The

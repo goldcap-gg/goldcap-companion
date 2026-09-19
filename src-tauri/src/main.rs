@@ -51,6 +51,7 @@ fn main() {
             commands::open_account_page,
             commands::list_region_realms,
             commands::update_ready,
+            commands::check_for_updates,
             commands::install_update,
         ])
         .setup(|app| {
@@ -138,7 +139,8 @@ fn main() {
             });
 
             // Silent auto-update: check shortly after startup, then every
-            // few hours; the tray offers the restart when one is staged.
+            // few hours unless Settings turned it off; the tray offers the
+            // restart when one is staged.
             tauri::async_runtime::spawn(updater::run_loop(
                 handle.clone(),
                 updater_logger,

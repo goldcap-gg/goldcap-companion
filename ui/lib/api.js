@@ -20,3 +20,5 @@ export const openAccountPage = () => invoke("open_account_page");
 /** The update waiting to be applied, or null. See lib/updateBanner.js. */
 export const updateReady = () => invoke("update_ready");
 export const installUpdate = () => invoke("install_update");
+/** Check right now; the update that is waiting, or null when up to date. */
+export const checkForUpdates = () => invoke("check_for_updates");

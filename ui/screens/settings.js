@@ -8,7 +8,7 @@ const PRESET_INTERVALS = [15, 30, 60];
 //
 // Only one thing here is structural: the Account group, which swaps between
 // two entirely different sets of controls depending on whether a token is
-// present. Everything else (path, region, realm, interval, startup) only
+// present. Everything else (path, region, realm, interval, startup, updates) only
 // ever changes a value that is already on screen, so those groups are built
 // once and updated in place — see the paintX() closures below. That is what
 // keeps a keystroke in the custom-interval field, or a click on a segment,
@@ -435,8 +435,52 @@ export function render(el, ctx) {
       startupBox.checked = Boolean(config.launchAtStartup);
     }
 
+    const autoUpdate = document.createElement("label");
+    autoUpdate.className = "checkbox-row";
+    const autoUpdateBox = document.createElement("input");
+    autoUpdateBox.type = "checkbox";
+    autoUpdateBox.id = "settings-auto-update";
+    autoUpdateBox.addEventListener("change", async () => {
+      await persist({ autoUpdate: autoUpdateBox.checked });
+      if (disposed) return;
+      paintAutoUpdate();
+    });
+    autoUpdate.append(autoUpdateBox, document.createTextNode("Check for updates automatically"));
+    sync.append(autoUpdate);
+
+    function paintAutoUpdate() {
+      autoUpdateBox.checked = Boolean(config.autoUpdate);
+    }
+
+    // Works whichever way the box above is set — it is the way to update for
+    // someone who turned the background check off. A found update shows up
+    // in the bar above the screens, same as one the background check found.
+    const check = document.createElement("button");
+    check.className = "btn";
+    check.type = "button";
+    check.textContent = "Check for updates";
+    check.addEventListener("click", async () => {
+      check.disabled = true;
+      try {
+        const update = await ctx.api.checkForUpdates();
+        if (disposed) return;
+        ctx.toast(
+          update
+            ? `Version ${update.version} is ready to install`
+            : "You're on the latest version",
+        );
+      } catch (e) {
+        if (disposed) return;
+        ctx.toast(`Could not check for updates: ${e}`, true);
+      } finally {
+        check.disabled = false;
+      }
+    });
+    sync.append(check);
+
     paintInterval();
     paintStartup();
+    paintAutoUpdate();
   }
 
   // ---- account -----------------------------------------------------------

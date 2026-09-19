@@ -243,6 +243,21 @@ pub fn update_ready(app: AppHandle) -> Option<crate::updater::UpdateView> {
     staged.as_ref().map(|s| crate::updater::view(s.kind(), s.version()))
 }
 
+/// The Settings screen's "Check for updates" button: one check right now,
+/// whether or not the background check is on. It is the same check the
+/// background one runs, so a found update is downloaded, staged and offered
+/// in exactly the same way. `None` means this is the latest version.
+#[tauri::command]
+pub async fn check_for_updates(
+    app: AppHandle,
+) -> Result<Option<crate::updater::UpdateView>, String> {
+    use tauri::Manager;
+    let logger = app.state::<AppState>().logger.clone();
+    crate::updater::check_once(&app, &logger)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// The button in that banner: apply whatever is staged (restart, run the
 /// installer, or open the downloads page — see updater::apply_staged).
 #[tauri::command]
