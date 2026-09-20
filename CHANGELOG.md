@@ -4,7 +4,7 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
-## 1.12.0 (unreleased)
+## 1.12.0 (2026-09-20)
 
 - **You decide when the Companion looks for updates.** Settings has a new
   "Check for updates automatically" box. Untick it and the Companion never
