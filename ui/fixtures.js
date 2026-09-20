@@ -10,6 +10,7 @@ const configured = {
   wowRetailPath: "C:\\Program Files (x86)\\World of Warcraft\\_retail_",
   intervalMinutes: 30,
   launchAtStartup: true,
+  autoUpdate: true,
   companionToken: "tok",
 };
 
@@ -69,6 +70,7 @@ export const FIXTURES = {
       wowRetailPath: "C:\\Program Files (x86)\\World of Warcraft\\_retail_",
       intervalMinutes: 45,
       launchAtStartup: false,
+      autoUpdate: false,
       companionToken: "tok",
     },
     detectedPath: "C:\\Program Files (x86)\\World of Warcraft\\_retail_",
@@ -84,6 +86,9 @@ export const FIXTURES = {
 
   "everything works": {
     config: configured,
+    // Settings → "Check for updates" finds this one; in every other fixture
+    // the check answers that this is the latest version.
+    update: { version: "1.2.1", kind: "pending", action: "Install and restart" },
     status: {
       configured: true, paired: true, region: "eu", realmSlug: "dentarg",
       syncing: false, nextTickAt: NOW + 1560, intervalMinutes: 30, version: "1.2.0",

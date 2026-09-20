@@ -1,6 +1,6 @@
 //! Companion configuration: region + realm to sync, the WoW `_retail_`
-//! install path, sync cadence, and the launch-at-startup toggle. Persisted
-//! as pretty JSON at `{app config dir}/config.json`.
+//! install path, sync cadence, and the launch-at-startup and auto-update
+//! toggles. Persisted as pretty JSON at `{app config dir}/config.json`.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -53,6 +53,10 @@ fn default_launch_at_startup() -> bool {
     true
 }
 
+fn default_auto_update() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
@@ -80,6 +84,14 @@ pub struct Config {
     /// choice (explicit or not) is never silently flipped by an update.
     #[serde(default = "default_launch_at_startup")]
     pub launch_at_startup: bool,
+    /// Look for a new version in the background and download it when one is
+    /// out. Off means the companion never asks at all until the player
+    /// presses "Check for updates" in Settings. Installing is a separate
+    /// click on Windows either way. Defaults to on, and — like
+    /// `launch_at_startup` — a config written before this existed reads as
+    /// on, so an existing install keeps updating the way it always has.
+    #[serde(default = "default_auto_update")]
+    pub auto_update: bool,
     /// Long-lived upload token from pairing with goldcap.gg. Empty until the
     /// player pairs; an empty token disables upload entirely rather than
     /// failing a tick, so an unpaired companion still syncs prices normally.
@@ -96,6 +108,7 @@ impl Default for Config {
             wow_retail_path: String::new(),
             interval_minutes: default_interval_minutes(),
             launch_at_startup: default_launch_at_startup(),
+            auto_update: default_auto_update(),
             companion_token: String::new(),
         }
     }
@@ -285,6 +298,7 @@ mod tests {
         assert_eq!(cfg.wow_retail_path, "");
         assert_eq!(cfg.interval_minutes, 30);
         assert!(cfg.launch_at_startup);
+        assert!(cfg.auto_update);
     }
 
     #[test]
@@ -323,6 +337,7 @@ mod tests {
         assert!(json.contains("\"wowRetailPath\""));
         assert!(json.contains("\"intervalMinutes\":30"));
         assert!(json.contains("\"launchAtStartup\":true"));
+        assert!(json.contains("\"autoUpdate\":true"));
         assert!(json.contains("\"companionToken\":\"\""));
     }
 
@@ -343,6 +358,15 @@ mod tests {
         assert!(!existing.realm_auto, "an upgrade must not repoint someone's realm");
 
         assert!(Config::default().realm_auto, "a fresh install follows the last realm played");
+    }
+
+    // Every companion out there was written before this switch existed, and
+    // each of them has been updating itself; reading that file must not
+    // quietly turn updates off.
+    #[test]
+    fn a_config_from_before_the_switch_keeps_updating_itself() {
+        let existing: Config = serde_json::from_str(r#"{"realmSlug": "dentarg"}"#).unwrap();
+        assert!(existing.auto_update);
     }
 
     #[test]
@@ -367,6 +391,7 @@ mod tests {
             wow_retail_path: "/tmp/wow/_retail_".into(),
             interval_minutes: 45,
             launch_at_startup: true,
+            auto_update: false,
             companion_token: "tok".into(),
         };
         cfg.save_to(&path).unwrap();

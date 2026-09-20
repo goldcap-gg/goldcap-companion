@@ -4,6 +4,15 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
+## 1.12.0 (2026-09-20)
+
+- **You decide when the Companion looks for updates.** Settings has a new
+  "Check for updates automatically" box. Untick it and the Companion never
+  checks for or downloads a new version on its own; the "Check for updates"
+  button under it does that when you ask. It stays on unless you change it.
+  On Windows an update has always waited for your click before installing —
+  that part is unchanged.
+
 ## 1.11.0 (2026-09-16)
 
 - **Shopping lists now carry what it would cost to craft an item.** When

@@ -1,4 +1,6 @@
 //! Auto-update: silent periodic check + download, tray-driven restart.
+//! The periodic check can be switched off in Settings (`autoUpdate`); the
+//! "Check for updates" button there runs the same check on demand.
 //!
 //! Platform split (spec 2026-08-11): macOS installs immediately (the
 //! extracted .app applies on next launch) and the tray offers a restart;
@@ -109,23 +111,47 @@ impl Staged {
 #[derive(Default)]
 pub struct UpdaterState {
     pub staged: Mutex<Option<Staged>>,
+    /// Held for a whole check. The Settings button and the periodic tick can
+    /// land together; without this both would download the same update, and
+    /// on macOS both would extract it over the running .app at once.
+    checking: tokio::sync::Mutex<()>,
 }
 
 /// Startup-delayed periodic check. Never dialogs; failures log and the
-/// next tick retries from scratch.
+/// next tick retries from scratch. With `autoUpdate` off a tick does
+/// nothing at all — not even the request to goldcap.gg — and the setting is
+/// read fresh every tick, so flipping it needs no restart.
 pub async fn run_loop(app: AppHandle, logger: Arc<Logger>) {
+    use tauri::Manager;
     tokio::time::sleep(CHECK_STARTUP_DELAY).await;
     loop {
-        if let Err(e) = check_once(&app, &logger).await {
-            logger.error(&format!("update check failed: {e}"));
+        let enabled = app
+            .state::<crate::state::AppState>()
+            .config
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .auto_update;
+        if enabled {
+            if let Err(e) = check_once(&app, &logger).await {
+                logger.error(&format!("update check failed: {e}"));
+            }
+        } else {
+            logger.info("update check skipped: turned off in Settings");
         }
         tokio::time::sleep(CHECK_INTERVAL).await;
     }
 }
 
-async fn check_once(app: &AppHandle, logger: &Logger) -> tauri_plugin_updater::Result<()> {
+/// One check: find, download and stage an update, and say so. Returns the
+/// update that is now waiting — found just now or on an earlier check — or
+/// `None` when this is the latest version.
+pub async fn check_once(
+    app: &AppHandle,
+    logger: &Logger,
+) -> tauri_plugin_updater::Result<Option<UpdateView>> {
     use tauri::Manager;
     let state = app.state::<UpdaterState>();
+    let _checking = state.checking.lock().await;
 
     // Something is already staged: don't download again, just keep the
     // tray offer visible. The guard must be dropped before touching the
@@ -133,17 +159,19 @@ async fn check_once(app: &AppHandle, logger: &Logger) -> tauri_plugin_updater::R
     // thread's menu handler (apply_staged) takes this same mutex, so
     // calling it while still holding the guard is a lock-order inversion
     // that can deadlock (same pattern as tray::refresh).
-    let staged_label = {
+    let already = {
         let staged = state.staged.lock().unwrap_or_else(|p| p.into_inner());
-        staged.as_ref().map(|s| tray_label(s.kind(), s.version()))
+        staged
+            .as_ref()
+            .map(|s| (tray_label(s.kind(), s.version()), view(s.kind(), s.version())))
     };
-    if let Some(label) = staged_label {
+    if let Some((label, waiting)) = already {
         tray::show_update_item(app, &label);
-        return Ok(());
+        return Ok(Some(waiting));
     }
 
     let Some(update) = app.updater()?.check().await? else {
-        return Ok(());
+        return Ok(None);
     };
     let version = update.version.clone();
     logger.info(&format!("update available: v{version}, downloading"));
@@ -178,7 +206,7 @@ async fn check_once(app: &AppHandle, logger: &Logger) -> tauri_plugin_updater::R
     *state.staged.lock().unwrap_or_else(|p| p.into_inner()) = Some(staged);
     tray::show_update_item(app, &label);
     announce(app, &announcement, logger);
-    Ok(())
+    Ok(Some(announcement))
 }
 
 /// Say it where someone will see it.
