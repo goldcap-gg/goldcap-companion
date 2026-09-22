@@ -212,9 +212,10 @@ pub struct WireRunLine {
     #[serde(default, deserialize_with = "lenient_opt")]
     pub craft: Option<WireCraft>,
     /// The lowest item level that counts, on a gear line whose alert-group
-    /// member has one. Added 2026-09; absent means any level does. A value
-    /// that is not a whole non-negative number reads as absent — the line
-    /// loses its floor, never itself.
+    /// member has one. Added 2026-09; absent means any level does. Anything
+    /// that is not a whole number from 0 to `u32::MAX` reads as absent — the
+    /// line loses its floor, never itself. 0 means no floor and is not
+    /// written.
     #[serde(default, deserialize_with = "lenient_opt")]
     pub min_ilvl: Option<u32>,
 }
@@ -1808,12 +1809,13 @@ mod tests {
     fn a_malformed_group_name_keeps_its_slot_so_later_indexes_do_not_shift() {
         use mlua::{Lua, LuaOptions, StdLib};
 
-        let json = r#"{"v":3,"generatedAt":"2026-09-22T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[],"groups":["Transmog",7,"Ore"],"caps":[{"i":1,"c":100,"g":2},{"i":2,"c":100,"g":1}]}"#;
+        let json = r#"{"v":3,"generatedAt":"2026-09-22T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[],"groups":["Transmog",7,"Ore","  "],"caps":[{"i":1,"c":100,"g":2},{"i":2,"c":100,"g":1},{"i":3,"c":100,"g":3}]}"#;
         let parsed: WireRuns = serde_json::from_str(json).unwrap();
-        assert_eq!(parsed.groups.len(), 3, "{:?}", parsed.groups);
+        assert_eq!(parsed.groups.len(), 4, "{:?}", parsed.groups);
         let lua_source = render_runs_lua(&parsed, 1_700_000_000).unwrap();
-        // The cap in "Ore" still says "Ore"; the cap in the unreadable group says nothing.
-        assert!(lua_source.contains("groups = { 'Transmog', '', 'Ore' }, caps = { { i = 1, c = 100, g = 3 }, { i = 2, c = 100 } }"), "{lua_source}");
+        // The cap in "Ore" still says "Ore"; the caps in the unreadable group
+        // and in the blank-named one say nothing.
+        assert!(lua_source.contains("groups = { 'Transmog', '', 'Ore', '  ' }, caps = { { i = 1, c = 100, g = 3 }, { i = 2, c = 100 }, { i = 3, c = 100 } }"), "{lua_source}");
 
         let lua = Lua::new_with(StdLib::NONE, LuaOptions::default()).unwrap();
         lua.load(&lua_source).exec().unwrap();
@@ -1826,10 +1828,11 @@ mod tests {
 
     #[test]
     fn a_cap_without_a_group_on_the_wire_names_no_group() {
-        let json = r#"{"v":3,"generatedAt":"2026-09-22T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[],"groups":["Transmog"],"caps":[{"i":5,"c":100},{"i":6,"c":100,"g":null},{"i":7,"c":100,"g":"x"},{"i":8,"c":100,"g":0}]}"#;
+        let json = r#"{"v":3,"generatedAt":"2026-09-22T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[],"groups":["Transmog"],"caps":[{"i":5,"c":100},{"i":6,"c":100,"g":null},{"i":7,"c":100,"g":"x"},{"i":8,"c":100,"g":0},{"i":9,"c":100,"g":-1}]}"#;
         let parsed: WireRuns = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.caps[4].group, None, "a negative index is no group");
         let lua = render_runs_lua(&parsed, 1_700_000_000).unwrap();
-        assert!(lua.contains("caps = { { i = 5, c = 100 }, { i = 6, c = 100 }, { i = 7, c = 100 }, { i = 8, c = 100, g = 1 } }"), "{lua}");
+        assert!(lua.contains("caps = { { i = 5, c = 100 }, { i = 6, c = 100 }, { i = 7, c = 100 }, { i = 8, c = 100, g = 1 }, { i = 9, c = 100 } }"), "{lua}");
     }
 
     #[test]
