@@ -4,6 +4,13 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
+## 1.13.0 (unreleased)
+
+- The Companion now hands the addon the prices of your alert groups — every
+  item with a price you set, or a target the site computed — so the in-game
+  sniper can watch them live at the auction house. Needs the matching addon
+  release; older addons ignore the extra data.
+
 ## 1.12.0 (2026-09-20)
 
 - **You decide when the Companion looks for updates.** Settings has a new
