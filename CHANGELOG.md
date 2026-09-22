@@ -8,8 +8,10 @@ data.
 
 - The Companion now hands the addon the prices of your alert groups — every
   item with a price you set, or a target the site computed — so the in-game
-  sniper can watch them live at the auction house. Needs the matching addon
-  release; older addons ignore the extra data.
+  sniper can watch them live at the auction house. When an alert fires on
+  gear you gave a minimum item level, its line in the BUY tab carries that
+  level too. Needs the matching addon release; older addons ignore the extra
+  data.
 
 ## 1.12.0 (2026-09-20)
 

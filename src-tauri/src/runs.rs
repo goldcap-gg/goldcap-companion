@@ -9,7 +9,8 @@
 //! realm an alert hit was seen on (`rl`) and the recipe that crafts it
 //! (`cr`) — every one of them optional, and every one of them read through
 //! `lenient_opt`, so a field this build cannot make sense of costs its own
-//! fact and never the whole sync.
+//! fact and never the whole sync. Since 2026-09 a gear line may also carry
+//! its member's lowest item level (`minIlvl`), read and written the same way.
 
 use crate::ledger_summary::parse_iso_utc;
 use crate::luafile::escape_lua_string;
@@ -210,6 +211,12 @@ pub struct WireRunLine {
     /// Set when a recipe makes this item and the site could price it whole.
     #[serde(default, deserialize_with = "lenient_opt")]
     pub craft: Option<WireCraft>,
+    /// The lowest item level that counts, on a gear line whose alert-group
+    /// member has one. Added 2026-09; absent means any level does. A value
+    /// that is not a whole non-negative number reads as absent — the line
+    /// loses its floor, never itself.
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub min_ilvl: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -404,6 +411,12 @@ pub fn render_runs_lua(runs: &WireRuns, generated_at: i64) -> Result<String, Str
             if let Some(cap) = line.cap.filter(|v| *v > 0) {
                 out.push_str(&format!(", cc = {cap}"));
             }
+            // A gear member's item-level floor, under the wire's own name.
+            // Zero is no floor, so it is not written: a line without one
+            // renders the bytes it always did.
+            if let Some(min_ilvl) = line.min_ilvl.filter(|v| *v > 0) {
+                out.push_str(&format!(", minIlvl = {min_ilvl}"));
+            }
             if let Some(realm) = line
                 .realm
                 .as_ref()
@@ -537,6 +550,7 @@ mod tests {
             cap: None,
             realm: None,
             craft: None,
+            min_ilvl: None,
         }
     }
 
@@ -854,7 +868,14 @@ mod tests {
         let lua = render_runs_lua(&runs, 1_789_000_000).unwrap();
         assert!(lua.contains("n = 'Plant Protein' }"));
         for key in [
-            ", u = ", ", vu = ", ", ch = ", ", cp = ", ", cc = ", ", rl = ", ", cr = ",
+            ", u = ",
+            ", vu = ",
+            ", ch = ",
+            ", cp = ",
+            ", cc = ",
+            ", rl = ",
+            ", cr = ",
+            ", minIlvl = ",
         ] {
             assert!(!lua.contains(key), "a v1 render leaked {key}");
         }
@@ -1901,5 +1922,92 @@ mod tests {
             .eval()
             .unwrap();
         assert_eq!(m2, None);
+    }
+
+    /// A v3 alert run with one gear line on it, for the item-level floor
+    /// tests below. `floor` is spliced into the line as it stands: `""` for
+    /// no key at all, `,"minIlvl":625` for a floor.
+    fn gear_alert_json(floor: &str) -> String {
+        format!(
+            r#"{{"v":3,"generatedAt":"2026-09-23T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[{{"code":"a0000016","name":"Gear watch","updatedAt":"2026-09-15T09:00:00.000Z","kind":"alert","sharedBy":null,"source":null,"lines":[{{"itemId":222440,"qty":1,"vendor":false,"nameEn":"Everforged Longsword","usual":null,"vendorUnit":null,"cheapHour":null,"cap":1500000,"realm":{{"id":1305,"name":"Kazzak"}},"craft":null{floor}}}]}}]}}"#
+        )
+    }
+
+    /// What this build wrote for `gear_alert_json("")` before a line could
+    /// carry a floor — the file a line without one must still produce.
+    fn gear_alert_lua_without_a_floor() -> String {
+        let updated_at = crate::ledger_summary::parse_iso_utc("2026-09-15T09:00:00.000Z").unwrap();
+        format!(
+            "GoldCap_AppRuns = {{ v = 3, generatedAt = 1789000000, plan = 'pro', freeLines = 5, runs = {{ {{ code = 'a0000016', name = 'Gear watch', k = 'alert', updatedAt = {updated_at}, lines = {{ {{ i = 222440, q = 1, v = false, n = 'Everforged Longsword', cc = 1500000, rl = {{ id = 1305, n = 'Kazzak' }} }} }} }} }} }}\n"
+        )
+    }
+
+    #[test]
+    fn a_gear_line_renders_its_min_ilvl_after_its_cap() {
+        let parsed: WireRuns = serde_json::from_str(&gear_alert_json(r#","minIlvl":625"#)).unwrap();
+        assert_eq!(parsed.runs[0].lines[0].min_ilvl, Some(625));
+        let lua = render_runs_lua(&parsed, 1_789_000_000).unwrap();
+        let updated_at = crate::ledger_summary::parse_iso_utc("2026-09-15T09:00:00.000Z").unwrap();
+        let expected = format!(
+            "GoldCap_AppRuns = {{ v = 3, generatedAt = 1789000000, plan = 'pro', freeLines = 5, runs = {{ {{ code = 'a0000016', name = 'Gear watch', k = 'alert', updatedAt = {updated_at}, lines = {{ {{ i = 222440, q = 1, v = false, n = 'Everforged Longsword', cc = 1500000, minIlvl = 625, rl = {{ id = 1305, n = 'Kazzak' }} }} }} }} }} }}\n"
+        );
+        assert_eq!(lua, expected);
+    }
+
+    #[test]
+    fn a_line_without_a_floor_renders_byte_for_byte_what_this_build_always_wrote() {
+        // Nearly every file has no gated gear on it, and none of those may
+        // change by a byte: no key, a null and a zero all mean "any level".
+        for floor in ["", r#","minIlvl":null"#, r#","minIlvl":0"#] {
+            let parsed: WireRuns = serde_json::from_str(&gear_alert_json(floor)).unwrap();
+            let lua = render_runs_lua(&parsed, 1_789_000_000).unwrap();
+            assert_eq!(lua, gear_alert_lua_without_a_floor(), "floor {floor:?}");
+        }
+    }
+
+    #[test]
+    fn a_malformed_min_ilvl_drops_the_floor_and_keeps_the_line() {
+        // A floor this build cannot read costs the floor and nothing else:
+        // failing the payload would strand Runs.lua at yesterday's file, and
+        // dropping the line would take a firing alert off the BUY tab.
+        for floor in [
+            r#""625""#,
+            "-625",
+            "625.5",
+            "4294967296",
+            "true",
+            "[625]",
+            r#"{"l":625}"#,
+        ] {
+            let json = gear_alert_json(&format!(r#","minIlvl":{floor}"#));
+            let parsed: WireRuns = serde_json::from_str(&json)
+                .unwrap_or_else(|e| panic!("minIlvl {floor} failed the payload: {e}"));
+            assert_eq!(parsed.runs[0].lines[0].min_ilvl, None, "minIlvl {floor}");
+            let lua = render_runs_lua(&parsed, 1_789_000_000).unwrap();
+            assert_eq!(lua, gear_alert_lua_without_a_floor(), "minIlvl {floor}");
+        }
+    }
+
+    #[test]
+    fn a_min_ilvl_loads_in_a_sandboxed_lua_vm_and_a_line_without_one_reads_nil() {
+        use mlua::{Lua, LuaOptions, StdLib};
+
+        let json = r#"{"v":3,"generatedAt":"2026-09-23T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[{"code":"a0000016","name":"Gear watch","updatedAt":"2026-09-15T09:00:00.000Z","kind":"alert","lines":[{"itemId":222440,"qty":1,"vendor":false,"nameEn":"Everforged Longsword","cap":1500000,"minIlvl":625},{"itemId":212264,"qty":3,"vendor":false,"nameEn":"Flask of Alchemical Chaos","cap":99900}]}]}"#;
+        let parsed: WireRuns = serde_json::from_str(json).unwrap();
+        let lua_source = render_runs_lua(&parsed, 1_789_000_000).unwrap();
+
+        let lua = Lua::new_with(StdLib::NONE, LuaOptions::default()).unwrap();
+        lua.load(&lua_source).exec().unwrap();
+
+        let floor: Option<i64> = lua
+            .load("return GoldCap_AppRuns.runs[1].lines[1].minIlvl")
+            .eval()
+            .unwrap();
+        assert_eq!(floor, Some(625));
+        let none: Option<i64> = lua
+            .load("return GoldCap_AppRuns.runs[1].lines[2].minIlvl")
+            .eval()
+            .unwrap();
+        assert_eq!(none, None);
     }
 }
