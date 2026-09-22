@@ -98,6 +98,29 @@ where
     })
 }
 
+/// `lenient_vec` for names a cap addresses by position (`caps[].g`). A name
+/// that is not a string keeps its slot as an empty one instead of being
+/// dropped: dropping it would shift every later name down one and file each
+/// cap after it under its neighbour's group. The render then gives no cap a
+/// label that points at the empty slot. A missing or non-list value reads as
+/// empty.
+fn lenient_names<'de, D>(d: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(match raw {
+        Some(serde_json::Value::Array(items)) => items
+            .into_iter()
+            .map(|v| match v {
+                serde_json::Value::String(s) => s,
+                _ => String::new(),
+            })
+            .collect(),
+        _ => Vec::new(),
+    })
+}
+
 /// When the region's last 14 days say this item is usually cheapest. `hour`
 /// is 0–23 in UTC (the addon converts to server time), `pct` is how far under
 /// the overall mean that hour sits, as a negative whole percent.
@@ -223,9 +246,10 @@ pub struct WireCap {
     /// Lowest item level that counts; 0 = any variant.
     #[serde(rename = "l", default)]
     pub min_ilvl: u32,
-    /// 0-based index into `groups`.
-    #[serde(rename = "g", default)]
-    pub group: u32,
+    /// 0-based index into `groups`. Absent or unreadable means the cap
+    /// belongs to no group — never "the first one".
+    #[serde(rename = "g", default, deserialize_with = "lenient_opt")]
+    pub group: Option<u32>,
     /// True when `cap` was typed by the player rather than derived from the market.
     #[serde(rename = "m", default)]
     pub manual: bool,
@@ -240,7 +264,7 @@ pub struct WireRuns {
     pub free_lines: u32,
     pub runs: Vec<WireRun>,
     /// Alert-group names, indexed by `caps[].group`. Absent before 2026-09.
-    #[serde(default, deserialize_with = "lenient_vec")]
+    #[serde(default, deserialize_with = "lenient_names")]
     pub groups: Vec<String>,
     #[serde(default, deserialize_with = "lenient_vec")]
     pub caps: Vec<WireCap>,
@@ -402,7 +426,10 @@ pub fn render_runs_lua(runs: &WireRuns, generated_at: i64) -> Result<String, Str
     // Alert-group caps, 2026-09: written after `runs` under the same rule as
     // every v2/v3 fact — absent when there is nothing usable, never an empty
     // table, so a server without them yields the file this build always
-    // wrote. `g` goes out 1-based for Lua and only when it indexes `groups`.
+    // wrote. `g` goes out 1-based for Lua and only when it indexes a name the
+    // addon can show: a cap with no group, one off the end, or one on a name
+    // that did not survive the wire goes out without a label rather than
+    // under a blank one.
     let usable: Vec<&WireCap> = runs
         .caps
         .iter()
@@ -417,6 +444,11 @@ pub fn render_runs_lua(runs: &WireRuns, generated_at: i64) -> Result<String, Str
             out.push_str(&format!("'{}'", escape_lua_string(name)));
         }
         out.push_str(" }, caps = { ");
+        let labelled = |g: &u32| {
+            runs.groups
+                .get(*g as usize)
+                .is_some_and(|name| shown_text(name).is_some())
+        };
         for (ci, cap) in usable.iter().enumerate() {
             if ci > 0 {
                 out.push_str(", ");
@@ -425,8 +457,8 @@ pub fn render_runs_lua(runs: &WireRuns, generated_at: i64) -> Result<String, Str
             if cap.min_ilvl > 0 {
                 out.push_str(&format!(", l = {}", cap.min_ilvl));
             }
-            if (cap.group as usize) < runs.groups.len() {
-                out.push_str(&format!(", g = {}", cap.group + 1));
+            if let Some(g) = cap.group.filter(labelled) {
+                out.push_str(&format!(", g = {}", g + 1));
             }
             if cap.manual {
                 out.push_str(", m = true");
@@ -1729,8 +1761,8 @@ mod tests {
         let parsed: WireRuns = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.groups, vec!["Transmog".to_string(), "Ore".to_string()]);
         assert_eq!(parsed.caps.len(), 2);
-        assert_eq!(parsed.caps[0], WireCap { item_id: 212345, cap: 1_500_000, min_ilvl: 610, group: 0, manual: true });
-        assert_eq!(parsed.caps[1].manual, false);
+        assert_eq!(parsed.caps[0], WireCap { item_id: 212345, cap: 1_500_000, min_ilvl: 610, group: Some(0), manual: true });
+        assert!(!parsed.caps[1].manual);
     }
 
     #[test]
@@ -1752,12 +1784,40 @@ mod tests {
     }
 
     #[test]
+    fn a_malformed_group_name_keeps_its_slot_so_later_indexes_do_not_shift() {
+        use mlua::{Lua, LuaOptions, StdLib};
+
+        let json = r#"{"v":3,"generatedAt":"2026-09-22T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[],"groups":["Transmog",7,"Ore"],"caps":[{"i":1,"c":100,"g":2},{"i":2,"c":100,"g":1}]}"#;
+        let parsed: WireRuns = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.groups.len(), 3, "{:?}", parsed.groups);
+        let lua_source = render_runs_lua(&parsed, 1_700_000_000).unwrap();
+        // The cap in "Ore" still says "Ore"; the cap in the unreadable group says nothing.
+        assert!(lua_source.contains("groups = { 'Transmog', '', 'Ore' }, caps = { { i = 1, c = 100, g = 3 }, { i = 2, c = 100 } }"), "{lua_source}");
+
+        let lua = Lua::new_with(StdLib::NONE, LuaOptions::default()).unwrap();
+        lua.load(&lua_source).exec().unwrap();
+        let label: String = lua
+            .load("local r = GoldCap_AppRuns; return r.groups[r.caps[1].g]")
+            .eval()
+            .unwrap();
+        assert_eq!(label, "Ore");
+    }
+
+    #[test]
+    fn a_cap_without_a_group_on_the_wire_names_no_group() {
+        let json = r#"{"v":3,"generatedAt":"2026-09-22T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[],"groups":["Transmog"],"caps":[{"i":5,"c":100},{"i":6,"c":100,"g":null},{"i":7,"c":100,"g":"x"},{"i":8,"c":100,"g":0}]}"#;
+        let parsed: WireRuns = serde_json::from_str(json).unwrap();
+        let lua = render_runs_lua(&parsed, 1_700_000_000).unwrap();
+        assert!(lua.contains("caps = { { i = 5, c = 100 }, { i = 6, c = 100 }, { i = 7, c = 100 }, { i = 8, c = 100, g = 1 } }"), "{lua}");
+    }
+
+    #[test]
     fn caps_render_after_runs_with_one_based_group_indexes_and_defaults_omitted() {
         let mut runs = v3_empty();
         runs.groups = vec!["Transmog".into(), "O'Ore".into()];
         runs.caps = vec![
-            WireCap { item_id: 212345, cap: 1_500_000, min_ilvl: 610, group: 0, manual: true },
-            WireCap { item_id: 190311, cap: 4200, min_ilvl: 0, group: 1, manual: false },
+            WireCap { item_id: 212345, cap: 1_500_000, min_ilvl: 610, group: Some(0), manual: true },
+            WireCap { item_id: 190311, cap: 4200, min_ilvl: 0, group: Some(1), manual: false },
         ];
         let lua = render_runs_lua(&runs, 1_700_000_000).unwrap();
         assert!(lua.ends_with(", groups = { 'Transmog', 'O\\'Ore' }, caps = { { i = 212345, c = 1500000, l = 610, g = 1, m = true }, { i = 190311, c = 4200, g = 2 } } }\n"), "{lua}");
@@ -1768,10 +1828,10 @@ mod tests {
         let mut runs = v3_empty();
         runs.groups = vec!["G".into()];
         runs.caps = vec![
-            WireCap { item_id: 0, cap: 100, min_ilvl: 0, group: 0, manual: false },     // no item
-            WireCap { item_id: 5, cap: 0, min_ilvl: 0, group: 0, manual: false },       // no price
-            WireCap { item_id: 6, cap: 100, min_ilvl: 0, group: 9, manual: false },     // group index off the end → kept, without g
-            WireCap { item_id: 7, cap: 100, min_ilvl: 0, group: 0, manual: false },
+            WireCap { item_id: 0, cap: 100, min_ilvl: 0, group: Some(0), manual: false },     // no item
+            WireCap { item_id: 5, cap: 0, min_ilvl: 0, group: Some(0), manual: false },       // no price
+            WireCap { item_id: 6, cap: 100, min_ilvl: 0, group: Some(9), manual: false },     // group index off the end → kept, without g
+            WireCap { item_id: 7, cap: 100, min_ilvl: 0, group: Some(0), manual: false },
         ];
         let lua = render_runs_lua(&runs, 1_700_000_000).unwrap();
         assert!(lua.contains("caps = { { i = 6, c = 100 }, { i = 7, c = 100, g = 1 } }"), "{lua}");
@@ -1781,7 +1841,7 @@ mod tests {
     fn only_unusable_caps_means_no_caps_key_at_all() {
         let mut runs = v3_empty();
         runs.groups = vec!["G".into()];
-        runs.caps = vec![WireCap { item_id: 0, cap: 0, min_ilvl: 0, group: 0, manual: false }];
+        runs.caps = vec![WireCap { item_id: 0, cap: 0, min_ilvl: 0, group: Some(0), manual: false }];
         let lua = render_runs_lua(&runs, 1_700_000_000).unwrap();
         assert!(!lua.contains("caps") && !lua.contains("groups"), "{lua}");
     }
@@ -1793,8 +1853,8 @@ mod tests {
         let mut runs = v3_empty();
         runs.groups = vec!["Transmog".into()];
         runs.caps = vec![
-            WireCap { item_id: 212345, cap: 1_500_000, min_ilvl: 610, group: 0, manual: true },
-            WireCap { item_id: 190311, cap: 4200, min_ilvl: 0, group: 0, manual: false },
+            WireCap { item_id: 212345, cap: 1_500_000, min_ilvl: 610, group: Some(0), manual: true },
+            WireCap { item_id: 190311, cap: 4200, min_ilvl: 0, group: Some(0), manual: false },
         ];
         let lua_source = render_runs_lua(&runs, 1_700_000_000).unwrap();
 
