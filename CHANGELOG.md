@@ -4,7 +4,7 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
-## 1.13.0 (unreleased)
+## 1.13.0 (2026-09-24)
 
 - The Companion now hands the addon the prices of your alert groups — every
   item with a price you set, or a target the site computed — so the in-game
