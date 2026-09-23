@@ -1,4 +1,4 @@
-import { relativeTime, countdown } from "../lib/format.js";
+import { relativeTime, countdown, groupDigits } from "../lib/format.js";
 import { brandMarkSvg } from "../lib/brandMark.js";
 
 const POLL_MS = 5000;
@@ -177,7 +177,7 @@ export function render(el, ctx) {
       const { row, detailEl } = stageRow(k, snapshot[k], ctx, canPair);
       return { row, stage: snapshot[k], el: detailEl };
     });
-    stageDetails = rows.map(({ stage, el }) => ({ stage, el }));
+    stageDetails = rows.map(({ stage, el }, i) => ({ key: ORDER[i], stage, el }));
     stages.replaceChildren(...rows.map(({ row }) => row));
 
     action.textContent = snapshot.syncing ? "Syncing…" : "Sync now";
@@ -195,9 +195,15 @@ export function render(el, ctx) {
     if (!snapshot) return;
     const now = Math.floor(Date.now() / 1000);
 
-    for (const { stage, el } of stageDetails) {
+    for (const { key, stage, el } of stageDetails) {
       const age = relativeTime(stage.at, now);
-      el.textContent = age ? `${stage.detail} · ${age}` : stage.detail;
+      let text = age ? `${stage.detail} · ${age}` : stage.detail;
+      // The whole-market payload rides the prices leg: how many items it carried and how
+      // old its snapshot is, re-dated every second like the stage's own age.
+      if (key === "prices" && snapshot.marketItems) {
+        text += ` · ${groupDigits(snapshot.marketItems)} market items, priced ${relativeTime(snapshot.marketTs, now)}`;
+      }
+      el.textContent = text;
     }
 
     const left = countdown(snapshot.nextTickAt, now);

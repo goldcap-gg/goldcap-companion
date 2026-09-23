@@ -12,6 +12,11 @@ data.
   gear you gave a minimum item level, its line in the BUY tab shows that item
   level too. Needs the matching addon release; older addons ignore the extra
   data.
+- The Companion now also brings the prices of every commodity in your region,
+  and how well each one sells, not just the few hundred busiest, so the addon's
+  tooltips and sniper cover the whole market. The Status screen says how many
+  items that was and how fresh they are. Needs the matching addon release;
+  older addons ignore it.
 
 ## 1.12.0 (2026-09-20)
 

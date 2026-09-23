@@ -75,6 +75,9 @@ pub struct SyncStatus {
     /// interval changes so the countdown never reflects a stale setting.
     pub next_tick_at: Option<SystemTime>,
     pub upload: crate::upload::UploadStats,
+    /// The whole-market payload written with the last successful tick: how many items
+    /// it carried and its snapshot time. `None` when none was written.
+    pub region: Option<crate::region::RegionSummary>,
 }
 
 impl SyncStatus {
@@ -293,11 +296,24 @@ pub async fn sync_once(
     // failure after a successful fetch must not make the prices stage look
     // broken (the site was reached fine), and must not erase the fact that
     // this tick's fetch really did just succeed.
+    // The whole-market payload rides the same write as a passenger: asked only after a
+    // good import string, and whatever it does -- 304, failure, too old -- the import
+    // string below is written.
+    let mut region_summary = None;
     let (fetched_ok, sync_error) = match fetch_result {
-        Ok(body) => match apply_import_string(Path::new(&config.wow_retail_path), &body, None) {
-            Ok(()) => (true, None),
-            Err(e) => (true, Some(e)),
-        },
+        Ok(body) => {
+            let (region_body, summary) =
+                crate::region::refresh(client, &region, logger, luafile::now_unix()).await;
+            region_summary = summary;
+            match apply_import_string(
+                Path::new(&config.wow_retail_path),
+                &body,
+                region_body.as_deref(),
+            ) {
+                Ok(()) => (true, None),
+                Err(e) => (true, Some(e)),
+            }
+        }
         Err(e) => (false, Some(e)),
     };
 
@@ -324,6 +340,7 @@ pub async fn sync_once(
         if fetched_ok {
             s.last_success_at = Some(SystemTime::now());
             s.last_success_realm = Some(realm_slug.clone());
+            s.region = region_summary;
         }
         match &sync_error {
             None => {
