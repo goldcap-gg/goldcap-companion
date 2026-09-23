@@ -146,7 +146,7 @@ async fn fetch_from(
     if let Some(tag) = etag {
         request = request.header(reqwest::header::IF_NONE_MATCH, tag);
     }
-    let resp = request.send().await.map_err(|e| e.to_string())?;
+    let mut resp = request.send().await.map_err(|e| e.to_string())?;
     match resp.status().as_u16() {
         304 => return Ok(Fetched::NotModified),
         200 => {}
@@ -163,7 +163,17 @@ async fn fetch_from(
         .get(reqwest::header::ETAG)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    let body = resp.text().await.map_err(|e| e.to_string())?;
+    // Read under a running cap, not with `text()`: a hop that answers chunked declares no
+    // length for the check above, and `text()` would buffer whatever it sent for 60 s.
+    let mut bytes = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+        if bytes.len() + chunk.len() > MAX_BODY_BYTES {
+            return Err("region data too large".to_string());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    // What `text()` does without reqwest's `charset` feature, which this build leaves off.
+    let body = String::from_utf8_lossy(&bytes).into_owned();
     Ok(Fetched::Fresh { body, etag })
 }
 
@@ -376,9 +386,23 @@ mod tests {
             }
             tx.send(String::from_utf8_lossy(&request).into_owned())
                 .unwrap();
-            stream.write_all(response.as_bytes()).unwrap();
+            // The client may hang up mid-answer (that is what a refused body looks like).
+            let _ = stream.write_all(response.as_bytes());
         });
         (url, rx)
+    }
+
+    /// A 200 with no Content-Length whose body comes in HTTP/1.1 chunks, the way a hop
+    /// that re-encodes answers.
+    fn chunked_answer(parts: &[&str]) -> String {
+        let mut out = String::from(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+        );
+        for part in parts {
+            out.push_str(&format!("{:x}\r\n{part}\r\n", part.len()));
+        }
+        out.push_str("0\r\n\r\n");
+        out
     }
 
     #[tokio::test]
@@ -427,5 +451,30 @@ mod tests {
         );
         let fetched = fetch_from(&crate::sync::build_client(), &url, "eu", None).await;
         assert!(fetched.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_chunked_answer_is_read_whole() {
+        let (head, rest) = BODY.split_at(10);
+        let (middle, tail) = rest.split_at(20);
+        let (url, _seen) = serve_once(chunked_answer(&[head, middle, tail]));
+        let fetched = fetch_from(&crate::sync::build_client(), &url, "eu", None).await;
+        assert_eq!(
+            fetched,
+            Ok(Fetched::Fresh {
+                body: BODY.to_string(),
+                etag: None,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_chunked_answer_over_eight_megabytes_is_refused() {
+        let part = "9".repeat(64 * 1024);
+        let parts = vec![part.as_str(); MAX_BODY_BYTES / part.len() + 1];
+        let (url, _seen) = serve_once(chunked_answer(&parts));
+        let fetched = fetch_from(&crate::sync::build_client(), &url, "eu", None).await;
+        let error = fetched.expect_err("a body past the cap must not come back as Fresh");
+        assert!(error.contains("too large"), "{error}");
     }
 }
