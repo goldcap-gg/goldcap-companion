@@ -125,14 +125,6 @@ pub fn to_write<'a>(kept: Option<&'a KeptPayload>, region: &str, now: i64) -> Op
         .map(|k| k.body.as_str())
 }
 
-pub async fn fetch(
-    client: &reqwest::Client,
-    region: &str,
-    etag: Option<&str>,
-) -> Result<Fetched, String> {
-    fetch_from(client, REGION_DATA_URL, region, etag).await
-}
-
 async fn fetch_from(
     client: &reqwest::Client,
     url: &str,
@@ -192,18 +184,30 @@ pub async fn refresh(
     logger: &Logger,
     now: i64,
 ) -> (Option<String>, Option<RegionSummary>) {
-    let previous = kept_store()
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .take();
+    refresh_at(client, REGION_DATA_URL, kept_store(), region, logger, now).await
+}
+
+/// `refresh` against a given URL and store, so whole ticks run in tests against a local
+/// server without touching the process's own kept payload. The ETag comes from what was
+/// kept *before* this tick, and the store is always put back.
+async fn refresh_at(
+    client: &reqwest::Client,
+    url: &str,
+    store: &Mutex<Option<KeptPayload>>,
+    region: &str,
+    logger: &Logger,
+    now: i64,
+) -> (Option<String>, Option<RegionSummary>) {
+    let previous = store.lock().unwrap_or_else(|p| p.into_inner()).take();
     let etag = if_none_match(previous.as_ref(), region).map(str::to_string);
-    let fetched = fetch(client, region, etag.as_deref()).await;
+    let fetched = fetch_from(client, url, region, etag.as_deref()).await;
     let unchanged = matches!(fetched, Ok(Fetched::NotModified));
     let (kept, outcome) = settle(previous, fetched, region);
     match outcome {
         Ok(summary) => logger.info(&format!(
-            "region data {region}: {} items, {} min old{}",
+            "region data {region}: {} {}, {} min old{}",
             summary.items,
+            if summary.items == 1 { "item" } else { "items" },
             (now - summary.ts).max(0) / 60,
             if unchanged { " (unchanged)" } else { "" }
         )),
@@ -220,7 +224,7 @@ pub async fn refresh(
             "region data {region}: older than 3 h, not written"
         ));
     }
-    *kept_store().lock().unwrap_or_else(|p| p.into_inner()) = kept;
+    *store.lock().unwrap_or_else(|p| p.into_inner()) = kept;
     (body, summary)
 }
 
@@ -451,6 +455,108 @@ mod tests {
         );
         let fetched = fetch_from(&crate::sync::build_client(), &url, "eu", None).await;
         assert!(fetched.is_err());
+    }
+
+    fn test_logger(label: &str) -> (Logger, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "goldcap-companion-region-{label}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        (Logger::new(&dir).unwrap(), dir)
+    }
+
+    fn log_of(dir: &std::path::Path) -> String {
+        std::fs::read_to_string(dir.join(crate::logging::LOG_FILE_NAME)).unwrap_or_default()
+    }
+
+    const NOT_MODIFIED: &str =
+        "HTTP/1.1 304 Not Modified\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
+    #[tokio::test]
+    async fn a_region_switch_between_ticks_neither_revalidates_nor_writes_the_old_payload() {
+        let client = crate::sync::build_client();
+        let store = Mutex::new(None);
+        let (logger, dir) = test_logger("switch");
+        let ts = 1_789_819_200;
+        let now = ts + 600;
+        let one = format!("GCM1;eu;{ts};I:1=2");
+
+        // Tick 1, eu: a fresh one-item payload is kept and handed back to write.
+        let (url, _seen) = serve_once(format!(
+            "HTTP/1.1 200 OK\r\nETag: \"gcm1-eu-{ts}\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{one}",
+            one.len()
+        ));
+        let first = refresh_at(&client, &url, &store, "eu", &logger, now).await;
+        assert_eq!(
+            first,
+            (Some(one.clone()), Some(RegionSummary { items: 1, ts }))
+        );
+
+        // Tick 2, eu: revalidated with the kept ETag, and the 304 hands back the same body.
+        let (url, seen) = serve_once(NOT_MODIFIED.to_string());
+        let second = refresh_at(&client, &url, &store, "eu", &logger, now).await;
+        assert_eq!(second, first);
+        let request = seen.recv().unwrap().to_ascii_lowercase();
+        assert!(
+            request.contains(&format!("if-none-match: \"gcm1-eu-{ts}\"")),
+            "{request}"
+        );
+
+        // Tick 3, the setting now says us: the eu ETag stays home, and a 304 (a proxy's)
+        // writes nothing -- neither the eu payload nor anything else.
+        let (url, seen) = serve_once(NOT_MODIFIED.to_string());
+        let third = refresh_at(&client, &url, &store, "us", &logger, now).await;
+        assert_eq!(third, (None, None));
+        let request = seen.recv().unwrap().to_ascii_lowercase();
+        assert!(!request.contains("if-none-match"), "{request}");
+        assert!(request.contains("region=us"), "{request}");
+        assert_eq!(*store.lock().unwrap(), None);
+
+        let log = log_of(&dir);
+        assert!(
+            log.contains("region data eu: 1 item, 10 min old\n"),
+            "{log}"
+        );
+        assert!(
+            log.contains("region data eu: 1 item, 10 min old (unchanged)\n"),
+            "{log}"
+        );
+        assert!(log.contains("region data us failed"), "{log}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_region_failure_still_lets_the_import_string_be_written() {
+        let client = crate::sync::build_client();
+        let store = Mutex::new(None);
+        let (logger, dir) = test_logger("failure");
+        let (url, _seen) = serve_once(
+            "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 16\r\nConnection: close\r\n\r\n<html>502</html>"
+                .to_string(),
+        );
+
+        let leg = refresh_at(&client, &url, &store, "eu", &logger, 1_789_819_200).await;
+        assert_eq!(leg, (None, None));
+
+        let wow = dir.join("wow");
+        std::fs::create_dir_all(&wow).unwrap();
+        let written = crate::sync::write_prices(&wow, "GCS1;eu;dentarg;1;abc", leg);
+        assert_eq!(written.unwrap(), None);
+        let lua = crate::luafile::addon_dir(&wow).join(crate::luafile::LUA_FILE_NAME);
+        let contents = std::fs::read_to_string(lua).unwrap();
+        assert!(
+            contents.starts_with(
+                "GoldCap_AppData = { importString = 'GCS1;eu;dentarg;1;abc', writtenAt = "
+            ),
+            "{contents}"
+        );
+        let log = log_of(&dir);
+        assert!(
+            log.contains("region data eu failed: unexpected status 502"),
+            "{log}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]
