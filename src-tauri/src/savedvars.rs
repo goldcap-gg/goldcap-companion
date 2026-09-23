@@ -155,6 +155,28 @@ pub struct ItemNameReport {
     pub expansion_id: Option<i64>,
 }
 
+/// `GoldCapDB.client`: which game client wrote this file. Stamped by the addon on every
+/// load (Core/Game.lua). A file written before the stamp existed has none and is read as
+/// retail, exactly as before.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClientPassport {
+    pub interface: i64,
+    pub build: String,
+}
+
+/// Retail's interface numbers are six digits; every other WoW client is below
+/// (Classic Era 11508, Anniversary 20505, MoP Classic 50500, Forever 16001).
+pub const RETAIL_MIN_INTERFACE: i64 = 100_000;
+
+impl ClientPassport {
+    pub fn is_retail(&self) -> bool {
+        self.interface >= RETAIL_MIN_INTERFACE
+    }
+    pub fn header_value(&self) -> String {
+        format!("{}/{}", self.interface, self.build)
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LedgerData {
     pub entries: Vec<LedgerEntry>,
@@ -162,6 +184,7 @@ pub struct LedgerData {
     pub observations: Vec<LiveObservation>,
     pub item_names: Vec<ItemNameReport>,
     pub owned_lots: Vec<OwnedLot>,
+    pub client: Option<ClientPassport>,
 }
 
 /// Every `WTF/Account/<ACCOUNT>/SavedVariables/GoldCap.lua` on disk. One per
@@ -316,6 +339,18 @@ pub fn parse_saved_variables(lua_source: &str) -> Result<LedgerData, String> {
     };
 
     let mut data = LedgerData::default();
+
+    if let Ok(Value::Table(client)) = db.get::<Value>("client") {
+        // Anything unreadable is "no passport", never an error: a damaged stamp must not
+        // cost the player their ledger upload.
+        if let (Some(interface), Some(build)) =
+            (opt_int(&client, "interface"), opt_string(&client, "build"))
+        {
+            if interface > 0 && !build.trim().is_empty() {
+                data.client = Some(ClientPassport { interface, build });
+            }
+        }
+    }
 
     if let Ok(Value::Table(ledger)) = db.get::<Value>("ledger") {
         for row in ledger.sequence_values::<Table>().flatten() {
@@ -1127,5 +1162,43 @@ GoldCapDB = { ["ledger"] = {
         assert!(v.get("totalQty").is_none());
         assert!(v.get("region").is_none());
         assert_eq!(v["levels"][0]["unit"], 1000);
+    }
+
+    #[test]
+    fn a_file_without_a_client_table_has_no_passport() {
+        let data = parse_saved_variables("GoldCapDB = { [\"settings\"] = {} }").unwrap();
+        assert_eq!(data.client, None);
+    }
+
+    #[test]
+    fn the_client_table_becomes_a_passport() {
+        let src = r#"GoldCapDB = { client = { interface = 16001, build = "1.60.1.69977", regionId = 90 } }"#;
+        let data = parse_saved_variables(src).unwrap();
+        let passport = data.client.expect("passport");
+        assert_eq!(passport.interface, 16001);
+        assert_eq!(passport.build, "1.60.1.69977");
+        assert!(!passport.is_retail());
+        assert_eq!(passport.header_value(), "16001/1.60.1.69977");
+    }
+
+    #[test]
+    fn a_retail_passport_is_retail() {
+        let src = r#"GoldCapDB = { client = { interface = 120100, build = "12.1.0.69933" } }"#;
+        let passport = parse_saved_variables(src).unwrap().client.unwrap();
+        assert!(passport.is_retail());
+    }
+
+    #[test]
+    fn a_junk_client_table_reads_as_no_passport_and_keeps_the_rest() {
+        for src in [
+            r#"GoldCapDB = { client = { interface = "x", build = "1.0" }, ledger = {} }"#,
+            r#"GoldCapDB = { client = { interface = 16001 }, ledger = {} }"#,
+            r#"GoldCapDB = { client = { interface = -1, build = "1.0" }, ledger = {} }"#,
+            r#"GoldCapDB = { client = { interface = 16001, build = "" }, ledger = {} }"#,
+            r#"GoldCapDB = { client = "16001", ledger = {} }"#,
+        ] {
+            let data = parse_saved_variables(src).unwrap();
+            assert_eq!(data.client, None, "{src}");
+        }
     }
 }
