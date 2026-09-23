@@ -71,13 +71,23 @@ pub fn escape_lua_string(s: &str) -> String {
 }
 
 /// Renders `AppData.lua`'s contents:
-/// `GoldCap_AppData = { importString = '...', writtenAt = 1752345678 }`.
-pub fn render_app_data_lua(import_string: &str, written_at: i64) -> String {
-    format!(
-        "GoldCap_AppData = {{ importString = '{}', writtenAt = {} }}\n",
-        escape_lua_string(import_string),
-        written_at
-    )
+/// `GoldCap_AppData = { importString = '...', writtenAt = 1752345678 }`, plus
+/// `regionString = '...'` between the two when the companion holds a region payload
+/// (`region.rs`). Without one the file is byte-identical to a build that never had it.
+pub fn render_app_data_lua(import_string: &str, region_string: Option<&str>, written_at: i64) -> String {
+    match region_string {
+        Some(region) => format!(
+            "GoldCap_AppData = {{ importString = '{}', regionString = '{}', writtenAt = {} }}\n",
+            escape_lua_string(import_string),
+            escape_lua_string(region),
+            written_at
+        ),
+        None => format!(
+            "GoldCap_AppData = {{ importString = '{}', writtenAt = {} }}\n",
+            escape_lua_string(import_string),
+            written_at
+        ),
+    }
 }
 
 pub fn now_unix() -> i64 {
@@ -125,8 +135,13 @@ pub fn ensure_toc(dir: &Path) -> io::Result<bool> {
 
 /// Atomically (re)writes `AppData.lua` inside `dir`. Call `ensure_toc`
 /// first (or otherwise guarantee `dir` exists) before calling this.
-pub fn write_app_data_lua(dir: &Path, import_string: &str, written_at: i64) -> io::Result<()> {
-    let contents = render_app_data_lua(import_string, written_at);
+pub fn write_app_data_lua(
+    dir: &Path,
+    import_string: &str,
+    region_string: Option<&str>,
+    written_at: i64,
+) -> io::Result<()> {
+    let contents = render_app_data_lua(import_string, region_string, written_at);
     write_atomic(&dir.join(LUA_FILE_NAME), &contents)
 }
 
@@ -198,7 +213,7 @@ mod tests {
 
     #[test]
     fn render_app_data_lua_matches_expected_shape() {
-        let rendered = render_app_data_lua("GCS1;eu;dentarg;1;abc", 1_752_345_678);
+        let rendered = render_app_data_lua("GCS1;eu;dentarg;1;abc", None, 1_752_345_678);
         assert_eq!(
             rendered,
             "GoldCap_AppData = { importString = 'GCS1;eu;dentarg;1;abc', writtenAt = 1752345678 }\n"
@@ -206,9 +221,28 @@ mod tests {
     }
 
     #[test]
+    fn render_app_data_lua_carries_the_region_string_between_the_two() {
+        let rendered = render_app_data_lua(
+            "GCS1;eu;dentarg;1;abc",
+            Some("GCM1;eu;1789819200;I:1=2"),
+            42,
+        );
+        assert_eq!(
+            rendered,
+            "GoldCap_AppData = { importString = 'GCS1;eu;dentarg;1;abc', regionString = 'GCM1;eu;1789819200;I:1=2', writtenAt = 42 }\n"
+        );
+    }
+
+    #[test]
     fn render_app_data_lua_escapes_embedded_quote() {
-        let rendered = render_app_data_lua("GCS1;it's-fine", 1);
+        let rendered = render_app_data_lua("GCS1;it's-fine", None, 1);
         assert!(rendered.contains(r"GCS1;it\'s-fine"));
+    }
+
+    #[test]
+    fn render_app_data_lua_escapes_the_region_string_too() {
+        let rendered = render_app_data_lua("GCS1;a", Some("GCM1;it's\\\nfine"), 1);
+        assert!(rendered.contains(r"regionString = 'GCM1;it\'s\\\nfine'"), "{rendered}");
     }
 
     #[test]
@@ -283,13 +317,25 @@ mod tests {
     fn write_app_data_lua_writes_expected_file() {
         let dir = temp_dir("appdata");
         fs::create_dir_all(&dir).unwrap();
-        write_app_data_lua(&dir, "GCS1;eu;dentarg;1;abc", 42).unwrap();
+        write_app_data_lua(&dir, "GCS1;eu;dentarg;1;abc", None, 42).unwrap();
 
         let contents = fs::read_to_string(dir.join(LUA_FILE_NAME)).unwrap();
         assert_eq!(
             contents,
             "GoldCap_AppData = { importString = 'GCS1;eu;dentarg;1;abc', writtenAt = 42 }\n"
         );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn write_app_data_lua_writes_the_region_string_atomically() {
+        let dir = temp_dir("appdata-region");
+        fs::create_dir_all(&dir).unwrap();
+        write_app_data_lua(&dir, "GCS1;eu;dentarg;1;abc", Some("GCM1;eu;1;I:1=2"), 42).unwrap();
+
+        let contents = fs::read_to_string(dir.join(LUA_FILE_NAME)).unwrap();
+        assert!(contents.contains("regionString = 'GCM1;eu;1;I:1=2'"));
+        assert!(!tmp_path_for(&dir.join(LUA_FILE_NAME)).exists());
         fs::remove_dir_all(&dir).ok();
     }
 

@@ -170,11 +170,16 @@ pub async fn fetch_import_string(
     Ok(body)
 }
 
-/// Writes a freshly fetched import string into `{wow_retail_path}/Interface/AddOns/GoldCap_AppData/`.
-pub fn apply_import_string(wow_retail_path: &Path, import_string: &str) -> Result<(), SyncError> {
+/// Writes a freshly fetched import string -- and the region payload, when there is
+/// one to write -- into `{wow_retail_path}/Interface/AddOns/GoldCap_AppData/`.
+pub fn apply_import_string(
+    wow_retail_path: &Path,
+    import_string: &str,
+    region_string: Option<&str>,
+) -> Result<(), SyncError> {
     let dir = luafile::addon_dir(wow_retail_path);
     luafile::ensure_toc(&dir).map_err(|e| SyncError::Write(e.to_string()))?;
-    luafile::write_app_data_lua(&dir, import_string, luafile::now_unix())
+    luafile::write_app_data_lua(&dir, import_string, region_string, luafile::now_unix())
         .map_err(|e| SyncError::Write(e.to_string()))
 }
 
@@ -289,7 +294,7 @@ pub async fn sync_once(
     // broken (the site was reached fine), and must not erase the fact that
     // this tick's fetch really did just succeed.
     let (fetched_ok, sync_error) = match fetch_result {
-        Ok(body) => match apply_import_string(Path::new(&config.wow_retail_path), &body) {
+        Ok(body) => match apply_import_string(Path::new(&config.wow_retail_path), &body, None) {
             Ok(()) => (true, None),
             Err(e) => (true, Some(e)),
         },
@@ -613,7 +618,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        apply_import_string(&dir, "GCS1;eu;dentarg;1;abc").unwrap();
+        apply_import_string(&dir, "GCS1;eu;dentarg;1;abc", None).unwrap();
 
         let addon_dir = dir.join("Interface").join("AddOns").join("GoldCap_AppData");
         assert!(addon_dir.join("GoldCap_AppData.toc").exists());
