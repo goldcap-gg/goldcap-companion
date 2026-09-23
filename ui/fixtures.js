@@ -92,6 +92,9 @@ export const FIXTURES = {
     status: {
       configured: true, paired: true, region: "eu", realmSlug: "dentarg",
       syncing: false, nextTickAt: NOW + 1560, intervalMinutes: 30, version: "1.2.0",
+      // The whole-market payload the last good tick wrote. get_status sends null for both
+      // without one; the fixtures that leave them out render the same.
+      marketItems: 9439, marketTs: NOW - 2400,
       prices: stage("ok", NOW - 240, "Fetched from goldcap.gg"),
       addon: stage("ok", NOW - 240, "Written to GoldCap_AppData"),
       ledger: stage("ok", NOW - 240, "142 rows sent · queue empty"),
@@ -103,6 +106,7 @@ export const FIXTURES = {
     status: {
       configured: true, paired: true, region: "eu", realmSlug: "dentarg",
       syncing: true, nextTickAt: NOW + 1800, intervalMinutes: 30, version: "1.2.0",
+      marketItems: 9439, marketTs: NOW - 5400,
       prices: stage("ok", NOW - 1800, "Fetched from goldcap.gg"),
       addon: stage("ok", NOW - 1800, "Written to GoldCap_AppData"),
       ledger: stage("ok", NOW - 1800, "142 rows sent · 8 queued"),
