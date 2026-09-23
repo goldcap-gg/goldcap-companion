@@ -80,6 +80,16 @@ where
     Ok(raw.and_then(|n| n.to_i64()))
 }
 
+/// `lenient_opt` for a yes/no flag whose absence means no: anything that is
+/// not a JSON boolean reads as false.
+fn lenient_flag<'de, D>(d: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: Option<bool> = lenient_opt(d)?;
+    Ok(raw.unwrap_or(false))
+}
+
 /// `lenient_opt` for a list: each entry is shaped on its own, and one that
 /// does not fit is dropped by itself — a thousand caps must not vanish
 /// because the site once sent a `"i":"nope"`. A missing or non-list value
@@ -251,15 +261,21 @@ pub struct WireCap {
     /// Ceiling per unit, copper — the member's own price or the group's computed target.
     #[serde(rename = "c", deserialize_with = "lenient_i64")]
     pub cap: i64,
-    /// Lowest item level that counts; 0 = any variant.
+    /// Lowest item level that counts; 0 = any variant, and so is a missing
+    /// `l`. Read strictly on purpose: an `l` this build cannot read (null, a
+    /// negative, a fraction, a string) drops the whole cap. Reading it as 0
+    /// would turn "1500g for 610+" into "1500g for any variant", and the
+    /// sniper would pay the 610 price for a lower copy. No cap beats that.
     #[serde(rename = "l", default)]
     pub min_ilvl: u32,
     /// 0-based index into `groups`. Absent or unreadable means the cap
     /// belongs to no group — never "the first one".
     #[serde(rename = "g", default, deserialize_with = "lenient_opt")]
     pub group: Option<u32>,
-    /// True when `cap` was typed by the player rather than derived from the market.
-    #[serde(rename = "m", default)]
+    /// True when `cap` was typed by the player rather than derived from the
+    /// market. Only a label in game, so an unreadable `m` costs the flag
+    /// (read as false), never the cap.
+    #[serde(rename = "m", default, deserialize_with = "lenient_flag")]
     pub manual: bool,
 }
 
@@ -330,9 +346,14 @@ fn render_craft(craft: &WireCraft) -> Option<String> {
 }
 
 /// Renders `Runs.lua`'s contents: the addon-side buy list, keyed off the
-/// same short field names as the rest of `GoldCap_AppData` (`i`/`q`/`v`/`n`
-/// on a line, plus `u`/`vu`/`ch`/`cp` when the site priced the line) to keep
-/// the in-game table small. `updatedAt` on each run is re-derived from its
+/// same short field names as the rest of `GoldCap_AppData` to keep the
+/// in-game table small. A line is `i`/`q`/`v`/`n`, plus `u`/`vu`/`ch`/`cp`
+/// when the site priced it (v2), `cc`/`rl`/`cr` for its cap, realm and
+/// craft (v3) and `minIlvl` for a gear member's floor (2026-09); a run adds
+/// `k`/`by`/`src` (v3). After `runs` come the alert groups' names
+/// (`groups`) and their caps (`caps`, each `i`/`c`/`l`/`g`/`m`). An
+/// optional key is left out when the site sent nothing usable for it,
+/// rather than written empty. `updatedAt` on each run is re-derived from its
 /// ISO timestamp the same way `LedgerSummary.lua`'s `sale_rows` does; an
 /// unparseable timestamp fails the whole render rather than silently
 /// rendering as the Unix epoch — `apply_fetch_result` must not write a file
@@ -440,7 +461,9 @@ pub fn render_runs_lua(runs: &WireRuns, generated_at: i64) -> Result<String, Str
     // Alert-group caps, 2026-09: written after `runs` under the same rule as
     // every v2/v3 fact — absent when there is nothing usable, never an empty
     // table, so a server without them yields the file this build always
-    // wrote. `g` goes out 1-based for Lua and only when it indexes a name the
+    // wrote. `groups` goes out only when the site named any (the addon reads
+    // a missing one as none), each name trimmed like every other name in the
+    // file. `g` goes out 1-based for Lua and only when it indexes a name the
     // addon can show: a cap with no group, one off the end, or one on a name
     // that did not survive the wire goes out without a label rather than
     // under a blank one.
@@ -450,14 +473,17 @@ pub fn render_runs_lua(runs: &WireRuns, generated_at: i64) -> Result<String, Str
         .filter(|c| c.item_id > 0 && c.cap > 0)
         .collect();
     if !usable.is_empty() {
-        out.push_str(", groups = { ");
-        for (gi, name) in runs.groups.iter().enumerate() {
-            if gi > 0 {
-                out.push_str(", ");
+        if !runs.groups.is_empty() {
+            out.push_str(", groups = { ");
+            for (gi, name) in runs.groups.iter().enumerate() {
+                if gi > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&format!("'{}'", escape_lua_string(name.trim())));
             }
-            out.push_str(&format!("'{}'", escape_lua_string(name)));
+            out.push_str(" }");
         }
-        out.push_str(" }, caps = { ");
+        out.push_str(", caps = { ");
         let labelled = |g: &u32| {
             runs.groups
                 .get(*g as usize)
@@ -1815,7 +1841,7 @@ mod tests {
         let lua_source = render_runs_lua(&parsed, 1_700_000_000).unwrap();
         // The cap in "Ore" still says "Ore"; the caps in the unreadable group
         // and in the blank-named one say nothing.
-        assert!(lua_source.contains("groups = { 'Transmog', '', 'Ore', '  ' }, caps = { { i = 1, c = 100, g = 3 }, { i = 2, c = 100 }, { i = 3, c = 100 } }"), "{lua_source}");
+        assert!(lua_source.contains("groups = { 'Transmog', '', 'Ore', '' }, caps = { { i = 1, c = 100, g = 3 }, { i = 2, c = 100 }, { i = 3, c = 100 } }"), "{lua_source}");
 
         let lua = Lua::new_with(StdLib::NONE, LuaOptions::default()).unwrap();
         lua.load(&lua_source).exec().unwrap();
@@ -1833,6 +1859,62 @@ mod tests {
         assert_eq!(parsed.caps[4].group, None, "a negative index is no group");
         let lua = render_runs_lua(&parsed, 1_700_000_000).unwrap();
         assert!(lua.contains("caps = { { i = 5, c = 100 }, { i = 6, c = 100 }, { i = 7, c = 100 }, { i = 8, c = 100, g = 1 }, { i = 9, c = 100 } }"), "{lua}");
+    }
+
+    #[test]
+    fn a_cap_whose_min_ilvl_cannot_be_read_is_dropped_whole() {
+        // Reading a bad `l` as 0 would turn "1500g for 610+" into "1500g for
+        // any variant", and the sniper would pay a 610 price for a lower copy.
+        let json = r#"{"v":3,"generatedAt":"2026-09-22T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[],"groups":["Transmog"],"caps":[{"i":1,"c":1500000,"l":null,"g":0},{"i":2,"c":1500000,"l":-1,"g":0},{"i":3,"c":1500000,"l":610.0,"g":0},{"i":4,"c":1500000,"l":"610","g":0},{"i":5,"c":1500000,"l":610,"g":0}]}"#;
+        let parsed: WireRuns = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.caps.len(), 1, "{:?}", parsed.caps);
+        assert_eq!((parsed.caps[0].item_id, parsed.caps[0].min_ilvl), (5, 610));
+        let lua = render_runs_lua(&parsed, 1_700_000_000).unwrap();
+        assert!(
+            lua.contains("caps = { { i = 5, c = 1500000, l = 610, g = 1 } }"),
+            "{lua}"
+        );
+    }
+
+    #[test]
+    fn a_malformed_manual_flag_costs_only_the_flag() {
+        // The addon never acts on `m`, so a bad one must not take the cap with it.
+        let json = r#"{"v":3,"generatedAt":"2026-09-22T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[],"groups":["Transmog"],"caps":[{"i":1,"c":100,"g":0,"m":null},{"i":2,"c":100,"g":0,"m":1},{"i":3,"c":100,"g":0,"m":"yes"},{"i":4,"c":100,"g":0,"m":true}]}"#;
+        let parsed: WireRuns = serde_json::from_str(json).unwrap();
+        let manual: Vec<bool> = parsed.caps.iter().map(|c| c.manual).collect();
+        assert_eq!(manual, vec![false, false, false, true]);
+        let lua = render_runs_lua(&parsed, 1_700_000_000).unwrap();
+        assert!(lua.contains("caps = { { i = 1, c = 100, g = 1 }, { i = 2, c = 100, g = 1 }, { i = 3, c = 100, g = 1 }, { i = 4, c = 100, g = 1, m = true } }"), "{lua}");
+    }
+
+    #[test]
+    fn a_group_name_is_written_trimmed_like_every_other_name() {
+        let json = r#"{"v":3,"generatedAt":"2026-09-22T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[],"groups":[" Transmog ","  Ore"],"caps":[{"i":1,"c":100,"g":0},{"i":2,"c":100,"g":1}]}"#;
+        let parsed: WireRuns = serde_json::from_str(json).unwrap();
+        let lua = render_runs_lua(&parsed, 1_700_000_000).unwrap();
+        assert!(lua.contains("groups = { 'Transmog', 'Ore' }, caps = { { i = 1, c = 100, g = 1 }, { i = 2, c = 100, g = 2 } }"), "{lua}");
+    }
+
+    #[test]
+    fn caps_without_group_names_write_no_groups_table() {
+        // The addon reads an absent `groups` as none; an empty table says the same thing longer.
+        for groups in [
+            "",
+            r#","groups":[]"#,
+            r#","groups":null"#,
+            r#","groups":"x""#,
+        ] {
+            let json = format!(
+                r#"{{"v":3,"generatedAt":"2026-09-22T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[]{groups},"caps":[{{"i":5,"c":100,"g":0}}]}}"#
+            );
+            let parsed: WireRuns = serde_json::from_str(&json).unwrap();
+            let lua = render_runs_lua(&parsed, 1_700_000_000).unwrap();
+            assert_eq!(
+                lua,
+                "GoldCap_AppRuns = { v = 3, generatedAt = 1700000000, plan = 'pro', freeLines = 5, runs = {  }, caps = { { i = 5, c = 100 } } }\n",
+                "groups {groups:?}"
+            );
+        }
     }
 
     #[test]
