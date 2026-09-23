@@ -177,6 +177,22 @@ impl ClientPassport {
     }
 }
 
+/// Matches the API's `^\d{1,7}$` on the interface half of the header.
+fn is_valid_passport_interface(interface: i64) -> bool {
+    (1..=9_999_999).contains(&interface)
+}
+
+/// Matches the API's `^\d+(\.\d+){0,5}$` on the build half of the header: 1 to 6
+/// dot-separated groups, each non-empty and all ASCII digits. No regex crate needed.
+fn is_valid_passport_build(build: &str) -> bool {
+    let groups: Vec<&str> = build.split('.').collect();
+    !groups.is_empty()
+        && groups.len() <= 6
+        && groups
+            .iter()
+            .all(|g| !g.is_empty() && g.bytes().all(|b| b.is_ascii_digit()))
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LedgerData {
     pub entries: Vec<LedgerEntry>,
@@ -342,11 +358,15 @@ pub fn parse_saved_variables(lua_source: &str) -> Result<LedgerData, String> {
 
     if let Ok(Value::Table(client)) = db.get::<Value>("client") {
         // Anything unreadable is "no passport", never an error: a damaged stamp must not
-        // cost the player their ledger upload.
+        // cost the player their ledger upload. The shape accepted here must match what the
+        // API accepts (interface `^\d{1,7}$`, build `^\d+(\.\d+){0,5}$`): a passport the
+        // server would reject as malformed is worse than no passport at all — a bad stamp
+        // like `build = "12.1.0-ptr"` would 400 and stall every upload from that file.
         if let (Some(interface), Some(build)) =
             (opt_int(&client, "interface"), opt_string(&client, "build"))
         {
-            if interface > 0 && !build.trim().is_empty() {
+            let build = build.trim().to_string();
+            if is_valid_passport_interface(interface) && is_valid_passport_build(&build) {
                 data.client = Some(ClientPassport { interface, build });
             }
         }
@@ -1196,6 +1216,11 @@ GoldCapDB = { ["ledger"] = {
             r#"GoldCapDB = { client = { interface = -1, build = "1.0" }, ledger = {} }"#,
             r#"GoldCapDB = { client = { interface = 16001, build = "" }, ledger = {} }"#,
             r#"GoldCapDB = { client = "16001", ledger = {} }"#,
+            // A stamp the API would reject as malformed must not become a passport
+            // either: it would 400 forever and stall every upload from this file.
+            r#"GoldCapDB = { client = { interface = 16001, build = "12.1.0-ptr" }, ledger = {} }"#,
+            r#"GoldCapDB = { client = { interface = 16001, build = "1..2" }, ledger = {} }"#,
+            r#"GoldCapDB = { client = { interface = 10000000, build = "1.0" }, ledger = {} }"#,
         ] {
             let data = parse_saved_variables(src).unwrap();
             assert_eq!(data.client, None, "{src}");

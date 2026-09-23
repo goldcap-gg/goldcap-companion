@@ -35,7 +35,9 @@ pub const MAX_OWNED_LOT_BATCH: usize = 500;
 pub const CLIENT_HEADER: &str = "X-GoldCap-Client";
 
 /// A file stamped by a non-retail client (WoW: Forever, Classic) must never reach the
-/// retail upload routes. Unstamped files predate the passport and are retail.
+/// retail upload routes. Unstamped files predate the passport and are retail — but that
+/// holds only because this companion reads only `_retail_`. An unstamped file read from
+/// any other folder is unknown, not retail, and must not be treated as uploadable here.
 pub fn uploadable(data: &LedgerData) -> bool {
     data.client.as_ref().map_or(true, |p| p.is_retail())
 }
