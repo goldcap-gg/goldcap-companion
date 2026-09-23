@@ -1,6 +1,7 @@
 //! Writes the `GoldCap_AppData` addon folder the sync loop hands to the
 //! game: a static `.toc` plus a regenerated `AppData.lua` carrying the
-//! latest GCS1 import string. See
+//! latest GCS1 import string and, when the companion holds a fresh one, the
+//! whole-market region payload (GCM1, `region.rs`) as `regionString`. See
 //! `docs/superpowers/plans/2026-07-12-goldcap-companion-v1.md`.
 
 use std::fs;
@@ -74,7 +75,11 @@ pub fn escape_lua_string(s: &str) -> String {
 /// `GoldCap_AppData = { importString = '...', writtenAt = 1752345678 }`, plus
 /// `regionString = '...'` between the two when the companion holds a region payload
 /// (`region.rs`). Without one the file is byte-identical to a build that never had it.
-pub fn render_app_data_lua(import_string: &str, region_string: Option<&str>, written_at: i64) -> String {
+pub fn render_app_data_lua(
+    import_string: &str,
+    region_string: Option<&str>,
+    written_at: i64,
+) -> String {
     match region_string {
         Some(region) => format!(
             "GoldCap_AppData = {{ importString = '{}', regionString = '{}', writtenAt = {} }}\n",
@@ -241,8 +246,12 @@ mod tests {
 
     #[test]
     fn render_app_data_lua_escapes_the_region_string_too() {
-        let rendered = render_app_data_lua("GCS1;a", Some("GCM1;it's\\\nfine"), 1);
-        assert!(rendered.contains(r"regionString = 'GCM1;it\'s\\\nfine'"), "{rendered}");
+        // Quote, backslash, both line breaks and a NUL: the NUL is dropped, the rest escaped.
+        let rendered = render_app_data_lua("GCS1;a", Some("GCM1;it's\\\n\r\0fine"), 1);
+        assert!(
+            rendered.contains(r"regionString = 'GCM1;it\'s\\\n\rfine'"),
+            "{rendered}"
+        );
     }
 
     #[test]
