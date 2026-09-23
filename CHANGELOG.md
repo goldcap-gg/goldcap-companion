@@ -4,6 +4,20 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
+## 1.13.0 (2026-09-24)
+
+- The Companion now hands the addon the prices of your alert groups — every
+  item with a price you set, or a target the site computed — so the in-game
+  sniper can watch them live at the auction house. When an alert fires on
+  gear you gave a minimum item level, its line in the BUY tab shows that item
+  level too. Needs the matching addon release; older addons ignore the extra
+  data.
+- The Companion now also brings the prices of every commodity in your region,
+  and how well each one sells, not just the few hundred busiest, so the addon's
+  tooltips and sniper cover the whole market. The Status screen says how many
+  items that was and how fresh they are. Needs the matching addon release;
+  older addons ignore it.
+
 ## 1.12.0 (2026-09-20)
 
 - **You decide when the Companion looks for updates.** Settings has a new

@@ -8,6 +8,7 @@ mod health;
 mod ledger_summary;
 mod logging;
 mod luafile;
+mod region;
 mod runs;
 mod savedvars;
 mod state;

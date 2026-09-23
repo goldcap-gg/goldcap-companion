@@ -43,6 +43,10 @@ pub struct StatusSnapshot {
     pub prices: StageState,
     pub addon: StageState,
     pub ledger: StageState,
+    /// The whole-market payload the last good tick wrote: item count and snapshot
+    /// time (unix seconds). The UI dates it itself, like the stage times.
+    pub market_items: Option<u32>,
+    pub market_ts: Option<i64>,
     pub version: String,
 }
 
@@ -162,6 +166,8 @@ pub fn build(
         prices,
         addon,
         ledger,
+        market_items: status.region.map(|r| r.items),
+        market_ts: status.region.map(|r| r.ts),
         version: env!("CARGO_PKG_VERSION").to_string(),
     }
 }
@@ -374,5 +380,30 @@ mod tests {
         assert!(json.contains("\"realmSlug\":\"dentarg\""));
         assert!(json.contains("\"nextTickAt\""));
         assert!(json.contains("\"notConnected\"") || json.contains("\"ok\""));
+    }
+
+    #[test]
+    fn the_region_payload_count_and_age_reach_the_snapshot() {
+        let status = SyncStatus {
+            last_success_at: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(NOW as u64 - 60)),
+            region: Some(crate::region::RegionSummary {
+                items: 9439,
+                ts: NOW - 2400,
+            }),
+            ..SyncStatus::default()
+        };
+        let snap = build(&configured(), &status, &healthy(), NOW);
+        assert_eq!(snap.market_items, Some(9439));
+        assert_eq!(snap.market_ts, Some(NOW - 2400));
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(json.contains("\"marketItems\":9439"), "{json}");
+        assert!(json.contains("\"marketTs\""), "{json}");
+    }
+
+    #[test]
+    fn no_region_payload_leaves_the_market_fields_empty() {
+        let snap = build(&configured(), &SyncStatus::default(), &healthy(), NOW);
+        assert_eq!(snap.market_items, None);
+        assert_eq!(snap.market_ts, None);
     }
 }

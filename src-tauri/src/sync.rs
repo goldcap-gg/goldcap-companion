@@ -75,6 +75,9 @@ pub struct SyncStatus {
     /// interval changes so the countdown never reflects a stale setting.
     pub next_tick_at: Option<SystemTime>,
     pub upload: crate::upload::UploadStats,
+    /// The whole-market payload written with the last successful tick: how many items
+    /// it carried and its snapshot time. `None` when none was written.
+    pub region: Option<crate::region::RegionSummary>,
 }
 
 impl SyncStatus {
@@ -170,12 +173,31 @@ pub async fn fetch_import_string(
     Ok(body)
 }
 
-/// Writes a freshly fetched import string into `{wow_retail_path}/Interface/AddOns/GoldCap_AppData/`.
-pub fn apply_import_string(wow_retail_path: &Path, import_string: &str) -> Result<(), SyncError> {
+/// Writes a freshly fetched import string -- and the region payload, when there is
+/// one to write -- into `{wow_retail_path}/Interface/AddOns/GoldCap_AppData/`.
+pub fn apply_import_string(
+    wow_retail_path: &Path,
+    import_string: &str,
+    region_string: Option<&str>,
+) -> Result<(), SyncError> {
     let dir = luafile::addon_dir(wow_retail_path);
     luafile::ensure_toc(&dir).map_err(|e| SyncError::Write(e.to_string()))?;
-    luafile::write_app_data_lua(&dir, import_string, luafile::now_unix())
+    luafile::write_app_data_lua(&dir, import_string, region_string, luafile::now_unix())
         .map_err(|e| SyncError::Write(e.to_string()))
+}
+
+/// Writes a good import string with the region leg's result (`region::refresh`) beside
+/// it: a body and its summary as one pair, or neither. The summary comes back only when
+/// the file was written: the Status screen must not claim market items that never
+/// reached the addon.
+pub fn write_prices(
+    wow_retail_path: &Path,
+    import_string: &str,
+    region: Option<(String, crate::region::RegionSummary)>,
+) -> Result<Option<crate::region::RegionSummary>, SyncError> {
+    let region_body = region.as_ref().map(|(body, _)| body.as_str());
+    apply_import_string(wow_retail_path, import_string, region_body)?;
+    Ok(region.map(|(_, summary)| summary))
 }
 
 /// Realm display name -> connected-realm slug, remembered for the process's
@@ -288,11 +310,22 @@ pub async fn sync_once(
     // failure after a successful fetch must not make the prices stage look
     // broken (the site was reached fine), and must not erase the fact that
     // this tick's fetch really did just succeed.
+    // The whole-market payload rides the same write as a passenger: asked only after a
+    // good import string, and whatever it does -- 304, failure, too old -- the import
+    // string below is written.
+    let mut region_summary = None;
     let (fetched_ok, sync_error) = match fetch_result {
-        Ok(body) => match apply_import_string(Path::new(&config.wow_retail_path), &body) {
-            Ok(()) => (true, None),
-            Err(e) => (true, Some(e)),
-        },
+        Ok(body) => {
+            let region_leg =
+                crate::region::refresh(client, &region, logger, luafile::now_unix()).await;
+            match write_prices(Path::new(&config.wow_retail_path), &body, region_leg) {
+                Ok(written) => {
+                    region_summary = written;
+                    (true, None)
+                }
+                Err(e) => (true, Some(e)),
+            }
+        }
         Err(e) => (false, Some(e)),
     };
 
@@ -319,6 +352,7 @@ pub async fn sync_once(
         if fetched_ok {
             s.last_success_at = Some(SystemTime::now());
             s.last_success_realm = Some(realm_slug.clone());
+            s.region = region_summary;
         }
         match &sync_error {
             None => {
@@ -613,12 +647,58 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        apply_import_string(&dir, "GCS1;eu;dentarg;1;abc").unwrap();
+        apply_import_string(&dir, "GCS1;eu;dentarg;1;abc", None).unwrap();
 
         let addon_dir = dir.join("Interface").join("AddOns").join("GoldCap_AppData");
         assert!(addon_dir.join("GoldCap_AppData.toc").exists());
         assert!(addon_dir.join("AppData.lua").exists());
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_written_tick_hands_back_the_region_summary() {
+        let dir = std::env::temp_dir().join(format!(
+            "goldcap-companion-write-prices-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let summary = crate::region::RegionSummary { items: 2, ts: 42 };
+
+        let written = write_prices(
+            &dir,
+            "GCS1;eu;dentarg;1;abc",
+            Some(("GCM1;eu;42;I:1=2,3=4".to_string(), summary)),
+        );
+
+        assert_eq!(written.unwrap(), Some(summary));
+        let lua = luafile::addon_dir(&dir).join(luafile::LUA_FILE_NAME);
+        let contents = std::fs::read_to_string(lua).unwrap();
+        assert!(
+            contents.contains("regionString = 'GCM1;eu;42;I:1=2,3=4'"),
+            "{contents}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_failed_write_claims_no_market_items() {
+        // A file where the WoW folder should be: the addon folder cannot be made under it.
+        let file = std::env::temp_dir().join(format!(
+            "goldcap-companion-write-prices-blocked-{}",
+            std::process::id()
+        ));
+        std::fs::write(&file, "not a folder").unwrap();
+        let summary = crate::region::RegionSummary { items: 2, ts: 42 };
+
+        let written = write_prices(
+            &file,
+            "GCS1;eu;dentarg;1;abc",
+            Some(("GCM1;eu;42;I:1=2,3=4".to_string(), summary)),
+        );
+
+        assert!(matches!(written, Err(SyncError::Write(_))), "{written:?}");
+        std::fs::remove_file(&file).ok();
     }
 }

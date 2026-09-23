@@ -9,7 +9,8 @@
 //! realm an alert hit was seen on (`rl`) and the recipe that crafts it
 //! (`cr`) — every one of them optional, and every one of them read through
 //! `lenient_opt`, so a field this build cannot make sense of costs its own
-//! fact and never the whole sync.
+//! fact and never the whole sync. Since 2026-09 a gear line may also carry
+//! its member's lowest item level (`minIlvl`), read and written the same way.
 
 use crate::ledger_summary::parse_iso_utc;
 use crate::luafile::escape_lua_string;
@@ -77,6 +78,58 @@ where
 {
     let raw: Option<LenientNumber> = lenient_opt(d)?;
     Ok(raw.and_then(|n| n.to_i64()))
+}
+
+/// `lenient_opt` for a yes/no flag whose absence means no: anything that is
+/// not a JSON boolean reads as false.
+fn lenient_flag<'de, D>(d: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: Option<bool> = lenient_opt(d)?;
+    Ok(raw.unwrap_or(false))
+}
+
+/// `lenient_opt` for a list: each entry is shaped on its own, and one that
+/// does not fit is dropped by itself — a thousand caps must not vanish
+/// because the site once sent a `"i":"nope"`. A missing or non-list value
+/// reads as empty.
+fn lenient_vec<'de, D, T>(d: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let raw = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(match raw {
+        Some(serde_json::Value::Array(items)) => items
+            .into_iter()
+            .filter_map(|v| serde_json::from_value::<T>(v).ok())
+            .collect(),
+        _ => Vec::new(),
+    })
+}
+
+/// `lenient_vec` for names a cap addresses by position (`caps[].g`). A name
+/// that is not a string keeps its slot as an empty one instead of being
+/// dropped: dropping it would shift every later name down one and file each
+/// cap after it under its neighbour's group. The render then gives no cap a
+/// label that points at the empty slot. A missing or non-list value reads as
+/// empty.
+fn lenient_names<'de, D>(d: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(match raw {
+        Some(serde_json::Value::Array(items)) => items
+            .into_iter()
+            .map(|v| match v {
+                serde_json::Value::String(s) => s,
+                _ => String::new(),
+            })
+            .collect(),
+        _ => Vec::new(),
+    })
 }
 
 /// When the region's last 14 days say this item is usually cheapest. `hour`
@@ -168,6 +221,13 @@ pub struct WireRunLine {
     /// Set when a recipe makes this item and the site could price it whole.
     #[serde(default, deserialize_with = "lenient_opt")]
     pub craft: Option<WireCraft>,
+    /// The lowest item level that counts, on a gear line whose alert-group
+    /// member has one. Added 2026-09; absent means any level does. Anything
+    /// that is not a whole number from 0 to `u32::MAX` reads as absent — the
+    /// line loses its floor, never itself. 0 means no floor and is not
+    /// written.
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub min_ilvl: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -190,6 +250,35 @@ pub struct WireRun {
     pub lines: Vec<WireRunLine>,
 }
 
+/// One alert-group member the addon polls live at the auction house: the
+/// site ships the rules, not the hits (those are the `k = 'alert'` runs).
+/// Keys are one letter on the wire because a Pro account can hold thousands.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct WireCap {
+    /// Item id.
+    #[serde(rename = "i")]
+    pub item_id: u32,
+    /// Ceiling per unit, copper — the member's own price or the group's computed target.
+    #[serde(rename = "c", deserialize_with = "lenient_i64")]
+    pub cap: i64,
+    /// Lowest item level that counts; 0 = any variant, and so is a missing
+    /// `l`. Read strictly on purpose: an `l` this build cannot read (null, a
+    /// negative, a fraction, a string) drops the whole cap. Reading it as 0
+    /// would turn "1500g for 610+" into "1500g for any variant", and the
+    /// sniper would pay the 610 price for a lower copy. No cap beats that.
+    #[serde(rename = "l", default)]
+    pub min_ilvl: u32,
+    /// 0-based index into `groups`. Absent or unreadable means the cap
+    /// belongs to no group — never "the first one".
+    #[serde(rename = "g", default, deserialize_with = "lenient_opt")]
+    pub group: Option<u32>,
+    /// True when `cap` was typed by the player rather than derived from the
+    /// market. Only a label in game, so an unreadable `m` costs the flag
+    /// (read as false), never the cap.
+    #[serde(rename = "m", default, deserialize_with = "lenient_flag")]
+    pub manual: bool,
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct WireRuns {
@@ -198,6 +287,11 @@ pub struct WireRuns {
     pub plan: String,
     pub free_lines: u32,
     pub runs: Vec<WireRun>,
+    /// Alert-group names, indexed by `caps[].group`. Absent before 2026-09.
+    #[serde(default, deserialize_with = "lenient_names")]
+    pub groups: Vec<String>,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub caps: Vec<WireCap>,
 }
 
 /// A string the addon can put in front of a player, or nothing at all: an
@@ -252,9 +346,14 @@ fn render_craft(craft: &WireCraft) -> Option<String> {
 }
 
 /// Renders `Runs.lua`'s contents: the addon-side buy list, keyed off the
-/// same short field names as the rest of `GoldCap_AppData` (`i`/`q`/`v`/`n`
-/// on a line, plus `u`/`vu`/`ch`/`cp` when the site priced the line) to keep
-/// the in-game table small. `updatedAt` on each run is re-derived from its
+/// same short field names as the rest of `GoldCap_AppData` to keep the
+/// in-game table small. A line is `i`/`q`/`v`/`n`, plus `u`/`vu`/`ch`/`cp`
+/// when the site priced it (v2), `cc`/`rl`/`cr` for its cap, realm and
+/// craft (v3) and `minIlvl` for a gear member's floor (2026-09); a run adds
+/// `k`/`by`/`src` (v3). After `runs` come the alert groups' names
+/// (`groups`) and their caps (`caps`, each `i`/`c`/`l`/`g`/`m`). An
+/// optional key is left out when the site sent nothing usable for it,
+/// rather than written empty. `updatedAt` on each run is re-derived from its
 /// ISO timestamp the same way `LedgerSummary.lua`'s `sale_rows` does; an
 /// unparseable timestamp fails the whole render rather than silently
 /// rendering as the Unix epoch — `apply_fetch_result` must not write a file
@@ -334,6 +433,12 @@ pub fn render_runs_lua(runs: &WireRuns, generated_at: i64) -> Result<String, Str
             if let Some(cap) = line.cap.filter(|v| *v > 0) {
                 out.push_str(&format!(", cc = {cap}"));
             }
+            // A gear member's item-level floor, under the wire's own name.
+            // Zero is no floor, so it is not written: a line without one
+            // renders the bytes it always did.
+            if let Some(min_ilvl) = line.min_ilvl.filter(|v| *v > 0) {
+                out.push_str(&format!(", minIlvl = {min_ilvl}"));
+            }
             if let Some(realm) = line
                 .realm
                 .as_ref()
@@ -352,7 +457,58 @@ pub fn render_runs_lua(runs: &WireRuns, generated_at: i64) -> Result<String, Str
         }
         out.push_str(" } }");
     }
-    out.push_str(" } }\n");
+    out.push_str(" }");
+    // Alert-group caps, 2026-09: written after `runs` under the same rule as
+    // every v2/v3 fact — absent when there is nothing usable, never an empty
+    // table, so a server without them yields the file this build always
+    // wrote. `groups` rides with the caps whenever the site sent any entry,
+    // blank ones included so every later name keeps its index (the addon
+    // reads a missing table as none), each name trimmed like every other name
+    // in the file. `g` goes out 1-based for Lua and only when it indexes a name the
+    // addon can show: a cap with no group, one off the end, or one on a name
+    // that did not survive the wire goes out without a label rather than
+    // under a blank one.
+    let usable: Vec<&WireCap> = runs
+        .caps
+        .iter()
+        .filter(|c| c.item_id > 0 && c.cap > 0)
+        .collect();
+    if !usable.is_empty() {
+        if !runs.groups.is_empty() {
+            out.push_str(", groups = { ");
+            for (gi, name) in runs.groups.iter().enumerate() {
+                if gi > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&format!("'{}'", escape_lua_string(name.trim())));
+            }
+            out.push_str(" }");
+        }
+        out.push_str(", caps = { ");
+        let labelled = |g: &u32| {
+            runs.groups
+                .get(*g as usize)
+                .is_some_and(|name| shown_text(name).is_some())
+        };
+        for (ci, cap) in usable.iter().enumerate() {
+            if ci > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&format!("{{ i = {}, c = {}", cap.item_id, cap.cap));
+            if cap.min_ilvl > 0 {
+                out.push_str(&format!(", l = {}", cap.min_ilvl));
+            }
+            if let Some(g) = cap.group.filter(labelled) {
+                out.push_str(&format!(", g = {}", g + 1));
+            }
+            if cap.manual {
+                out.push_str(", m = true");
+            }
+            out.push_str(" }");
+        }
+        out.push_str(" }");
+    }
+    out.push_str(" }\n");
     Ok(out)
 }
 
@@ -422,6 +578,7 @@ mod tests {
             cap: None,
             realm: None,
             craft: None,
+            min_ilvl: None,
         }
     }
 
@@ -440,6 +597,20 @@ mod tests {
         }
     }
 
+    /// A v3 payload with no runs and no caps, for the caps tests below: the
+    /// fields every test already spells out are overridden by the literal.
+    fn v3_empty() -> WireRuns {
+        WireRuns {
+            v: 3,
+            generated_at: "2026-09-22T10:00:00.000Z".into(),
+            plan: "pro".into(),
+            free_lines: 5,
+            runs: vec![],
+            groups: vec![],
+            caps: vec![],
+        }
+    }
+
     #[test]
     fn renders_the_addon_table_shape() {
         let runs = WireRuns {
@@ -447,6 +618,8 @@ mod tests {
             generated_at: "2026-09-15T10:00:00.000Z".into(),
             plan: "pro".into(),
             free_lines: 5,
+            groups: vec![],
+            caps: vec![],
             runs: vec![WireRun {
                 code: "abcd2345".into(),
                 name: Some("Cooking 1-100".into()),
@@ -471,6 +644,8 @@ mod tests {
             generated_at: "2026-09-15T10:00:00.000Z".into(),
             plan: "free".into(),
             free_lines: 5,
+            groups: vec![],
+            caps: vec![],
             runs: vec![WireRun {
                 code: "abcd2345".into(),
                 name: None,
@@ -492,6 +667,8 @@ mod tests {
             generated_at: "2026-09-15T10:00:00.000Z".into(),
             plan: "free".into(),
             free_lines: 5,
+            groups: vec![],
+            caps: vec![],
             runs: vec![WireRun {
                 code: "abcd2345".into(),
                 name: None,
@@ -527,6 +704,8 @@ mod tests {
             generated_at: "2026-09-15T10:00:00.000Z".into(),
             plan: "pro".into(),
             free_lines: 5,
+            groups: vec![],
+            caps: vec![],
             runs: vec![WireRun {
                 code: "abcd2345".into(),
                 name: Some("O'Brien's \\ Emporium".into()),
@@ -561,6 +740,8 @@ mod tests {
             generated_at: "2026-09-15T10:00:00.000Z".into(),
             plan: "free".into(),
             free_lines: 5,
+            groups: vec![],
+            caps: vec![],
             runs: vec![],
         };
         let empty_source = render_runs_lua(&empty, 1).unwrap();
@@ -590,6 +771,8 @@ mod tests {
             generated_at: "2026-09-15T10:00:00.000Z".into(),
             plan: "free".into(),
             free_lines: 5,
+            groups: vec![],
+            caps: vec![],
             runs: vec![],
         };
         assert!(apply_fetch_result(dir.path(), Ok(runs), 7).unwrap());
@@ -606,6 +789,8 @@ mod tests {
             generated_at: String::new(),
             plan: "free".into(),
             free_lines: 5,
+            groups: vec![],
+            caps: vec![],
             runs: vec![],
         };
         assert!(apply_fetch_result(dir.path(), Ok(runs), 7).is_err());
@@ -620,6 +805,8 @@ mod tests {
             generated_at: "2026-09-15T10:00:00.000Z".into(),
             plan: "pro".into(),
             free_lines: 5,
+            groups: vec![],
+            caps: vec![],
             runs: vec![WireRun {
                 code: "abcd2345".into(),
                 name: Some("Cooking 1-100".into()),
@@ -648,6 +835,8 @@ mod tests {
             generated_at: "2026-09-15T10:00:00.000Z".into(),
             plan: "free".into(),
             free_lines: 5,
+            groups: vec![],
+            caps: vec![],
             runs: vec![WireRun {
                 code: "abcd2345".into(),
                 name: None,
@@ -672,6 +861,8 @@ mod tests {
             generated_at: String::new(),
             plan: "free".into(),
             free_lines: 5,
+            groups: vec![],
+            caps: vec![],
             runs: vec![],
         };
         assert!(apply_fetch_result(dir.path(), Ok(runs), 7).is_err());
@@ -692,6 +883,8 @@ mod tests {
             generated_at: "2026-09-15T10:00:00.000Z".into(),
             plan: "pro".into(),
             free_lines: 5,
+            groups: vec![],
+            caps: vec![],
             runs: vec![WireRun {
                 code: "abcd2345".into(),
                 name: Some("Cooking 1-100".into()),
@@ -703,7 +896,14 @@ mod tests {
         let lua = render_runs_lua(&runs, 1_789_000_000).unwrap();
         assert!(lua.contains("n = 'Plant Protein' }"));
         for key in [
-            ", u = ", ", vu = ", ", ch = ", ", cp = ", ", cc = ", ", rl = ", ", cr = ",
+            ", u = ",
+            ", vu = ",
+            ", ch = ",
+            ", cp = ",
+            ", cc = ",
+            ", rl = ",
+            ", cr = ",
+            ", minIlvl = ",
         ] {
             assert!(!lua.contains(key), "a v1 render leaked {key}");
         }
@@ -719,6 +919,8 @@ mod tests {
             generated_at: "2026-09-15T10:00:00.000Z".into(),
             plan: "pro".into(),
             free_lines: 5,
+            groups: vec![],
+            caps: vec![],
             runs: vec![WireRun {
                 code: "abcd2345".into(),
                 name: Some("Cooking 1-100".into()),
@@ -748,6 +950,8 @@ mod tests {
                 generated_at: "2026-09-15T10:00:00.000Z".into(),
                 plan: "pro".into(),
                 free_lines: 5,
+                groups: vec![],
+                caps: vec![],
                 runs: vec![WireRun {
                     code: "abcd2345".into(),
                     name: None,
@@ -796,6 +1000,8 @@ mod tests {
             generated_at: "2026-09-15T10:00:00.000Z".into(),
             plan: "pro".into(),
             free_lines: 5,
+            groups: vec![],
+            caps: vec![],
             runs: vec![WireRun {
                 code: "abcd2345".into(),
                 name: None,
@@ -823,6 +1029,8 @@ mod tests {
             generated_at: "2026-09-15T10:00:00.000Z".into(),
             plan: "pro".into(),
             free_lines: 5,
+            groups: vec![],
+            caps: vec![],
             runs: vec![WireRun {
                 code: "abcd2345".into(),
                 name: None,
@@ -889,6 +1097,8 @@ mod tests {
             generated_at: "2026-09-15T10:00:00.000Z".into(),
             plan: "pro".into(),
             free_lines: 5,
+            groups: vec![],
+            caps: vec![],
             runs: vec![WireRun {
                 code: "abcd2345".into(),
                 name: Some("Cooking 1-100".into()),
@@ -1088,6 +1298,8 @@ mod tests {
             generated_at: "2026-09-15T10:00:00.000Z".into(),
             plan: "pro".into(),
             free_lines: 5,
+            groups: vec![],
+            caps: vec![],
             runs: vec![WireRun {
                 code: "a0000016".into(),
                 name: Some("Flask watch".into()),
@@ -1120,6 +1332,8 @@ mod tests {
             generated_at: "2026-09-15T10:00:00.000Z".into(),
             plan: "pro".into(),
             free_lines: 5,
+            groups: vec![],
+            caps: vec![],
             runs: vec![WireRun {
                 code: "abcd2345".into(),
                 name: Some("Cooking 1-100".into()),
@@ -1175,6 +1389,8 @@ mod tests {
                 generated_at: "2026-09-15T10:00:00.000Z".into(),
                 plan: "pro".into(),
                 free_lines: 5,
+                groups: vec![],
+                caps: vec![],
                 runs: vec![WireRun {
                     kind: kind.map(Into::into),
                     lines: vec![line(5, 210, false, "Plant Protein")],
@@ -1194,6 +1410,8 @@ mod tests {
             generated_at: "2026-09-15T10:00:00.000Z".into(),
             plan: "pro".into(),
             free_lines: 5,
+            groups: vec![],
+            caps: vec![],
             runs: vec![WireRun {
                 shared_by: Some("   ".into()),
                 source: Some(WireRunSource { label: "".into() }),
@@ -1216,6 +1434,8 @@ mod tests {
                 generated_at: "2026-09-15T10:00:00.000Z".into(),
                 plan: "pro".into(),
                 free_lines: 5,
+                groups: vec![],
+                caps: vec![],
                 runs: vec![WireRun {
                     lines: vec![WireRunLine {
                         cap,
@@ -1246,6 +1466,8 @@ mod tests {
                 generated_at: "2026-09-15T10:00:00.000Z".into(),
                 plan: "pro".into(),
                 free_lines: 5,
+                groups: vec![],
+                caps: vec![],
                 runs: vec![WireRun {
                     lines: vec![WireRunLine {
                         realm: Some(realm.clone()),
@@ -1315,6 +1537,8 @@ mod tests {
                 generated_at: "2026-09-15T10:00:00.000Z".into(),
                 plan: "pro".into(),
                 free_lines: 5,
+                groups: vec![],
+                caps: vec![],
                 runs: vec![WireRun {
                     lines: vec![WireRunLine {
                         craft: Some(craft.clone()),
@@ -1333,6 +1557,8 @@ mod tests {
             generated_at: "2026-09-15T10:00:00.000Z".into(),
             plan: "pro".into(),
             free_lines: 5,
+            groups: vec![],
+            caps: vec![],
             runs: vec![WireRun {
                 lines: vec![WireRunLine {
                     craft: Some(good),
@@ -1352,6 +1578,8 @@ mod tests {
             generated_at: "2026-09-15T10:00:00.000Z".into(),
             plan: "pro".into(),
             free_lines: 5,
+            groups: vec![],
+            caps: vec![],
             runs: vec![WireRun {
                 lines: vec![WireRunLine {
                     craft: Some(WireCraft {
@@ -1383,6 +1611,8 @@ mod tests {
             generated_at: "2026-09-15T10:00:00.000Z".into(),
             plan: "pro".into(),
             free_lines: 5,
+            groups: vec![],
+            caps: vec![],
             runs: vec![WireRun {
                 shared_by: Some("O'Brien".into()),
                 source: Some(WireRunSource {
@@ -1426,6 +1656,8 @@ mod tests {
             generated_at: "2026-09-15T10:00:00.000Z".into(),
             plan: "pro".into(),
             free_lines: 5,
+            groups: vec![],
+            caps: vec![],
             runs: vec![WireRun {
                 code: "a0000016".into(),
                 name: Some("Flask watch".into()),
@@ -1453,6 +1685,8 @@ mod tests {
             generated_at: "2026-09-15T10:00:00.000Z".into(),
             plan: "pro".into(),
             free_lines: 5,
+            groups: vec![],
+            caps: vec![],
             runs: vec![
                 WireRun {
                     code: "a0000016".into(),
@@ -1568,5 +1802,298 @@ mod tests {
             .eval()
             .unwrap();
         assert_eq!(missing, None);
+    }
+
+    #[test]
+    fn a_v3_payload_carries_groups_and_caps() {
+        let json = r#"{"v":3,"generatedAt":"2026-09-22T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[],"groups":["Transmog","Ore"],"caps":[{"i":212345,"c":1500000,"l":610,"g":0,"m":true},{"i":190311,"c":4200,"l":0,"g":1,"m":false}],"capsDropped":0}"#;
+        let parsed: WireRuns = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.groups, vec!["Transmog".to_string(), "Ore".to_string()]);
+        assert_eq!(parsed.caps.len(), 2);
+        assert_eq!(parsed.caps[0], WireCap { item_id: 212345, cap: 1_500_000, min_ilvl: 610, group: Some(0), manual: true });
+        assert!(!parsed.caps[1].manual);
+    }
+
+    #[test]
+    fn a_payload_without_caps_reads_as_empty_and_renders_nothing_new() {
+        let json = r#"{"v":3,"generatedAt":"2026-09-22T10:00:00.000Z","plan":"free","freeLines":5,"runs":[]}"#;
+        let parsed: WireRuns = serde_json::from_str(json).unwrap();
+        assert!(parsed.groups.is_empty() && parsed.caps.is_empty());
+        let lua = render_runs_lua(&parsed, 1_700_000_000).unwrap();
+        assert!(!lua.contains("caps") && !lua.contains("groups"));
+        assert_eq!(lua, "GoldCap_AppRuns = { v = 3, generatedAt = 1700000000, plan = 'free', freeLines = 5, runs = {  } }\n");
+    }
+
+    #[test]
+    fn a_malformed_cap_entry_is_dropped_alone_and_a_fractional_cap_rounds() {
+        let json = r#"{"v":3,"generatedAt":"2026-09-22T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[],"groups":["G"],"caps":[{"i":"nope"},{"i":7,"c":99.6,"l":0,"g":0,"m":false},7]}"#;
+        let parsed: WireRuns = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.caps.len(), 1);
+        assert_eq!(parsed.caps[0].cap, 100);
+    }
+
+    #[test]
+    fn a_malformed_group_name_keeps_its_slot_so_later_indexes_do_not_shift() {
+        use mlua::{Lua, LuaOptions, StdLib};
+
+        let json = r#"{"v":3,"generatedAt":"2026-09-22T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[],"groups":["Transmog",7,"Ore","  "],"caps":[{"i":1,"c":100,"g":2},{"i":2,"c":100,"g":1},{"i":3,"c":100,"g":3}]}"#;
+        let parsed: WireRuns = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.groups.len(), 4, "{:?}", parsed.groups);
+        let lua_source = render_runs_lua(&parsed, 1_700_000_000).unwrap();
+        // The cap in "Ore" still says "Ore"; the caps in the unreadable group
+        // and in the blank-named one say nothing.
+        assert!(lua_source.contains("groups = { 'Transmog', '', 'Ore', '' }, caps = { { i = 1, c = 100, g = 3 }, { i = 2, c = 100 }, { i = 3, c = 100 } }"), "{lua_source}");
+
+        let lua = Lua::new_with(StdLib::NONE, LuaOptions::default()).unwrap();
+        lua.load(&lua_source).exec().unwrap();
+        let label: String = lua
+            .load("local r = GoldCap_AppRuns; return r.groups[r.caps[1].g]")
+            .eval()
+            .unwrap();
+        assert_eq!(label, "Ore");
+    }
+
+    #[test]
+    fn a_cap_without_a_group_on_the_wire_names_no_group() {
+        let json = r#"{"v":3,"generatedAt":"2026-09-22T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[],"groups":["Transmog"],"caps":[{"i":5,"c":100},{"i":6,"c":100,"g":null},{"i":7,"c":100,"g":"x"},{"i":8,"c":100,"g":0},{"i":9,"c":100,"g":-1}]}"#;
+        let parsed: WireRuns = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.caps[4].group, None, "a negative index is no group");
+        let lua = render_runs_lua(&parsed, 1_700_000_000).unwrap();
+        assert!(lua.contains("caps = { { i = 5, c = 100 }, { i = 6, c = 100 }, { i = 7, c = 100 }, { i = 8, c = 100, g = 1 }, { i = 9, c = 100 } }"), "{lua}");
+    }
+
+    #[test]
+    fn a_cap_whose_min_ilvl_cannot_be_read_is_dropped_whole() {
+        // Reading a bad `l` as 0 would turn "1500g for 610+" into "1500g for
+        // any variant", and the sniper would pay a 610 price for a lower copy.
+        let json = r#"{"v":3,"generatedAt":"2026-09-22T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[],"groups":["Transmog"],"caps":[{"i":1,"c":1500000,"l":null,"g":0},{"i":2,"c":1500000,"l":-1,"g":0},{"i":3,"c":1500000,"l":610.0,"g":0},{"i":4,"c":1500000,"l":"610","g":0},{"i":5,"c":1500000,"l":610,"g":0}]}"#;
+        let parsed: WireRuns = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.caps.len(), 1, "{:?}", parsed.caps);
+        assert_eq!((parsed.caps[0].item_id, parsed.caps[0].min_ilvl), (5, 610));
+        let lua = render_runs_lua(&parsed, 1_700_000_000).unwrap();
+        assert!(
+            lua.contains("caps = { { i = 5, c = 1500000, l = 610, g = 1 } }"),
+            "{lua}"
+        );
+    }
+
+    #[test]
+    fn a_malformed_manual_flag_costs_only_the_flag() {
+        // The addon never acts on `m`, so a bad one must not take the cap with it.
+        let json = r#"{"v":3,"generatedAt":"2026-09-22T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[],"groups":["Transmog"],"caps":[{"i":1,"c":100,"g":0,"m":null},{"i":2,"c":100,"g":0,"m":1},{"i":3,"c":100,"g":0,"m":"yes"},{"i":4,"c":100,"g":0,"m":true}]}"#;
+        let parsed: WireRuns = serde_json::from_str(json).unwrap();
+        let manual: Vec<bool> = parsed.caps.iter().map(|c| c.manual).collect();
+        assert_eq!(manual, vec![false, false, false, true]);
+        let lua = render_runs_lua(&parsed, 1_700_000_000).unwrap();
+        assert!(lua.contains("caps = { { i = 1, c = 100, g = 1 }, { i = 2, c = 100, g = 1 }, { i = 3, c = 100, g = 1 }, { i = 4, c = 100, g = 1, m = true } }"), "{lua}");
+    }
+
+    #[test]
+    fn a_group_name_is_written_trimmed_like_every_other_name() {
+        let json = r#"{"v":3,"generatedAt":"2026-09-22T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[],"groups":[" Transmog ","  Ore"],"caps":[{"i":1,"c":100,"g":0},{"i":2,"c":100,"g":1}]}"#;
+        let parsed: WireRuns = serde_json::from_str(json).unwrap();
+        let lua = render_runs_lua(&parsed, 1_700_000_000).unwrap();
+        assert!(lua.contains("groups = { 'Transmog', 'Ore' }, caps = { { i = 1, c = 100, g = 1 }, { i = 2, c = 100, g = 2 } }"), "{lua}");
+    }
+
+    #[test]
+    fn caps_without_group_names_write_no_groups_table() {
+        // The addon reads an absent `groups` as none; an empty table says the same thing longer.
+        for groups in [
+            "",
+            r#","groups":[]"#,
+            r#","groups":null"#,
+            r#","groups":"x""#,
+        ] {
+            let json = format!(
+                r#"{{"v":3,"generatedAt":"2026-09-22T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[]{groups},"caps":[{{"i":5,"c":100,"g":0}}]}}"#
+            );
+            let parsed: WireRuns = serde_json::from_str(&json).unwrap();
+            let lua = render_runs_lua(&parsed, 1_700_000_000).unwrap();
+            assert_eq!(
+                lua,
+                "GoldCap_AppRuns = { v = 3, generatedAt = 1700000000, plan = 'pro', freeLines = 5, runs = {  }, caps = { { i = 5, c = 100 } } }\n",
+                "groups {groups:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn caps_render_after_runs_with_one_based_group_indexes_and_defaults_omitted() {
+        let mut runs = v3_empty();
+        runs.groups = vec!["Transmog".into(), "O'Ore".into()];
+        runs.caps = vec![
+            WireCap { item_id: 212345, cap: 1_500_000, min_ilvl: 610, group: Some(0), manual: true },
+            WireCap { item_id: 190311, cap: 4200, min_ilvl: 0, group: Some(1), manual: false },
+        ];
+        let lua = render_runs_lua(&runs, 1_700_000_000).unwrap();
+        assert!(lua.ends_with(", groups = { 'Transmog', 'O\\'Ore' }, caps = { { i = 212345, c = 1500000, l = 610, g = 1, m = true }, { i = 190311, c = 4200, g = 2 } } }\n"), "{lua}");
+    }
+
+    #[test]
+    fn a_cap_the_addon_could_not_use_is_dropped_whole() {
+        let mut runs = v3_empty();
+        runs.groups = vec!["G".into()];
+        runs.caps = vec![
+            WireCap { item_id: 0, cap: 100, min_ilvl: 0, group: Some(0), manual: false },     // no item
+            WireCap { item_id: 5, cap: 0, min_ilvl: 0, group: Some(0), manual: false },       // no price
+            WireCap { item_id: 6, cap: 100, min_ilvl: 0, group: Some(9), manual: false },     // group index off the end → kept, without g
+            WireCap { item_id: 7, cap: 100, min_ilvl: 0, group: Some(0), manual: false },
+        ];
+        let lua = render_runs_lua(&runs, 1_700_000_000).unwrap();
+        assert!(lua.contains("caps = { { i = 6, c = 100 }, { i = 7, c = 100, g = 1 } }"), "{lua}");
+    }
+
+    #[test]
+    fn only_unusable_caps_means_no_caps_key_at_all() {
+        let mut runs = v3_empty();
+        runs.groups = vec!["G".into()];
+        runs.caps = vec![WireCap { item_id: 0, cap: 0, min_ilvl: 0, group: Some(0), manual: false }];
+        let lua = render_runs_lua(&runs, 1_700_000_000).unwrap();
+        assert!(!lua.contains("caps") && !lua.contains("groups"), "{lua}");
+    }
+
+    #[test]
+    fn a_v3_render_with_caps_loads_in_a_sandboxed_lua_vm() {
+        use mlua::{Lua, LuaOptions, StdLib};
+
+        let mut runs = v3_empty();
+        runs.groups = vec!["Transmog".into()];
+        runs.caps = vec![
+            WireCap { item_id: 212345, cap: 1_500_000, min_ilvl: 610, group: Some(0), manual: true },
+            WireCap { item_id: 190311, cap: 4200, min_ilvl: 0, group: Some(0), manual: false },
+        ];
+        let lua_source = render_runs_lua(&runs, 1_700_000_000).unwrap();
+
+        let lua = Lua::new_with(StdLib::NONE, LuaOptions::default()).unwrap();
+        lua.load(&lua_source).exec().unwrap();
+
+        let i: i64 = lua
+            .load("return GoldCap_AppRuns.caps[1].i")
+            .eval()
+            .unwrap();
+        assert_eq!(i, 212345);
+        let c: i64 = lua
+            .load("return GoldCap_AppRuns.caps[1].c")
+            .eval()
+            .unwrap();
+        assert_eq!(c, 1_500_000);
+        let l: i64 = lua
+            .load("return GoldCap_AppRuns.caps[1].l")
+            .eval()
+            .unwrap();
+        assert_eq!(l, 610);
+        let g: i64 = lua
+            .load("return GoldCap_AppRuns.caps[1].g")
+            .eval()
+            .unwrap();
+        assert_eq!(g, 1);
+        let m: bool = lua
+            .load("return GoldCap_AppRuns.caps[1].m")
+            .eval()
+            .unwrap();
+        assert!(m);
+        let group_name: String = lua
+            .load("return GoldCap_AppRuns.groups[1]")
+            .eval()
+            .unwrap();
+        assert_eq!(group_name, "Transmog");
+        let l2: Option<i64> = lua
+            .load("return GoldCap_AppRuns.caps[2].l")
+            .eval()
+            .unwrap();
+        assert_eq!(l2, None);
+        let m2: Option<bool> = lua
+            .load("return GoldCap_AppRuns.caps[2].m")
+            .eval()
+            .unwrap();
+        assert_eq!(m2, None);
+    }
+
+    /// A v3 alert run with one gear line on it, for the item-level floor
+    /// tests below. `floor` is spliced into the line as it stands: `""` for
+    /// no key at all, `,"minIlvl":625` for a floor.
+    fn gear_alert_json(floor: &str) -> String {
+        format!(
+            r#"{{"v":3,"generatedAt":"2026-09-23T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[{{"code":"a0000016","name":"Gear watch","updatedAt":"2026-09-15T09:00:00.000Z","kind":"alert","sharedBy":null,"source":null,"lines":[{{"itemId":222440,"qty":1,"vendor":false,"nameEn":"Everforged Longsword","usual":null,"vendorUnit":null,"cheapHour":null,"cap":1500000,"realm":{{"id":1305,"name":"Kazzak"}},"craft":null{floor}}}]}}]}}"#
+        )
+    }
+
+    /// What this build wrote for `gear_alert_json("")` before a line could
+    /// carry a floor — the file a line without one must still produce.
+    fn gear_alert_lua_without_a_floor() -> String {
+        let updated_at = crate::ledger_summary::parse_iso_utc("2026-09-15T09:00:00.000Z").unwrap();
+        format!(
+            "GoldCap_AppRuns = {{ v = 3, generatedAt = 1789000000, plan = 'pro', freeLines = 5, runs = {{ {{ code = 'a0000016', name = 'Gear watch', k = 'alert', updatedAt = {updated_at}, lines = {{ {{ i = 222440, q = 1, v = false, n = 'Everforged Longsword', cc = 1500000, rl = {{ id = 1305, n = 'Kazzak' }} }} }} }} }} }}\n"
+        )
+    }
+
+    #[test]
+    fn a_gear_line_renders_its_min_ilvl_after_its_cap() {
+        let parsed: WireRuns = serde_json::from_str(&gear_alert_json(r#","minIlvl":625"#)).unwrap();
+        assert_eq!(parsed.runs[0].lines[0].min_ilvl, Some(625));
+        let lua = render_runs_lua(&parsed, 1_789_000_000).unwrap();
+        let updated_at = crate::ledger_summary::parse_iso_utc("2026-09-15T09:00:00.000Z").unwrap();
+        let expected = format!(
+            "GoldCap_AppRuns = {{ v = 3, generatedAt = 1789000000, plan = 'pro', freeLines = 5, runs = {{ {{ code = 'a0000016', name = 'Gear watch', k = 'alert', updatedAt = {updated_at}, lines = {{ {{ i = 222440, q = 1, v = false, n = 'Everforged Longsword', cc = 1500000, minIlvl = 625, rl = {{ id = 1305, n = 'Kazzak' }} }} }} }} }} }}\n"
+        );
+        assert_eq!(lua, expected);
+    }
+
+    #[test]
+    fn a_line_without_a_floor_renders_byte_for_byte_what_this_build_always_wrote() {
+        // Nearly every file has no gated gear on it, and none of those may
+        // change by a byte: no key, a null and a zero all mean "any level".
+        for floor in ["", r#","minIlvl":null"#, r#","minIlvl":0"#] {
+            let parsed: WireRuns = serde_json::from_str(&gear_alert_json(floor)).unwrap();
+            let lua = render_runs_lua(&parsed, 1_789_000_000).unwrap();
+            assert_eq!(lua, gear_alert_lua_without_a_floor(), "floor {floor:?}");
+        }
+    }
+
+    #[test]
+    fn a_malformed_min_ilvl_drops_the_floor_and_keeps_the_line() {
+        // A floor this build cannot read costs the floor and nothing else:
+        // failing the payload would strand Runs.lua at yesterday's file, and
+        // dropping the line would take a firing alert off the BUY tab.
+        for floor in [
+            r#""625""#,
+            "-625",
+            "625.5",
+            "4294967296",
+            "true",
+            "[625]",
+            r#"{"l":625}"#,
+        ] {
+            let json = gear_alert_json(&format!(r#","minIlvl":{floor}"#));
+            let parsed: WireRuns = serde_json::from_str(&json)
+                .unwrap_or_else(|e| panic!("minIlvl {floor} failed the payload: {e}"));
+            assert_eq!(parsed.runs[0].lines[0].min_ilvl, None, "minIlvl {floor}");
+            let lua = render_runs_lua(&parsed, 1_789_000_000).unwrap();
+            assert_eq!(lua, gear_alert_lua_without_a_floor(), "minIlvl {floor}");
+        }
+    }
+
+    #[test]
+    fn a_min_ilvl_loads_in_a_sandboxed_lua_vm_and_a_line_without_one_reads_nil() {
+        use mlua::{Lua, LuaOptions, StdLib};
+
+        let json = r#"{"v":3,"generatedAt":"2026-09-23T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[{"code":"a0000016","name":"Gear watch","updatedAt":"2026-09-15T09:00:00.000Z","kind":"alert","lines":[{"itemId":222440,"qty":1,"vendor":false,"nameEn":"Everforged Longsword","cap":1500000,"minIlvl":625},{"itemId":212264,"qty":3,"vendor":false,"nameEn":"Flask of Alchemical Chaos","cap":99900}]}]}"#;
+        let parsed: WireRuns = serde_json::from_str(json).unwrap();
+        let lua_source = render_runs_lua(&parsed, 1_789_000_000).unwrap();
+
+        let lua = Lua::new_with(StdLib::NONE, LuaOptions::default()).unwrap();
+        lua.load(&lua_source).exec().unwrap();
+
+        let floor: Option<i64> = lua
+            .load("return GoldCap_AppRuns.runs[1].lines[1].minIlvl")
+            .eval()
+            .unwrap();
+        assert_eq!(floor, Some(625));
+        let none: Option<i64> = lua
+            .load("return GoldCap_AppRuns.runs[1].lines[2].minIlvl")
+            .eval()
+            .unwrap();
+        assert_eq!(none, None);
     }
 }
