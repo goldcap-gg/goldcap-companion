@@ -461,9 +461,10 @@ pub fn render_runs_lua(runs: &WireRuns, generated_at: i64) -> Result<String, Str
     // Alert-group caps, 2026-09: written after `runs` under the same rule as
     // every v2/v3 fact — absent when there is nothing usable, never an empty
     // table, so a server without them yields the file this build always
-    // wrote. `groups` goes out only when the site named any (the addon reads
-    // a missing one as none), each name trimmed like every other name in the
-    // file. `g` goes out 1-based for Lua and only when it indexes a name the
+    // wrote. `groups` rides with the caps whenever the site sent any entry,
+    // blank ones included so every later name keeps its index (the addon
+    // reads a missing table as none), each name trimmed like every other name
+    // in the file. `g` goes out 1-based for Lua and only when it indexes a name the
     // addon can show: a cap with no group, one off the end, or one on a name
     // that did not survive the wire goes out without a label rather than
     // under a blank one.
