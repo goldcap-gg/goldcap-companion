@@ -175,15 +175,15 @@ fn kept_store() -> &'static Mutex<Option<KeptPayload>> {
     KEPT.get_or_init(|| Mutex::new(None))
 }
 
-/// One tick's region leg: revalidate or fetch, settle, log, and hand back what to write
-/// plus the summary for the Status screen. Never an error: a failure is a log line and
-/// the import string is written whatever this returns.
+/// One tick's region leg: revalidate or fetch, settle, log, and hand back the body to write
+/// with its summary for the Status screen -- one pair, so the two cannot disagree. Never an
+/// error: a failure is a log line and the import string is written whatever this returns.
 pub async fn refresh(
     client: &reqwest::Client,
     region: &str,
     logger: &Logger,
     now: i64,
-) -> (Option<String>, Option<RegionSummary>) {
+) -> Option<(String, RegionSummary)> {
     refresh_at(client, REGION_DATA_URL, kept_store(), region, logger, now).await
 }
 
@@ -197,7 +197,7 @@ async fn refresh_at(
     region: &str,
     logger: &Logger,
     now: i64,
-) -> (Option<String>, Option<RegionSummary>) {
+) -> Option<(String, RegionSummary)> {
     let previous = store.lock().unwrap_or_else(|p| p.into_inner()).take();
     let etag = if_none_match(previous.as_ref(), region).map(str::to_string);
     let fetched = fetch_from(client, url, region, etag.as_deref()).await;
@@ -213,19 +213,16 @@ async fn refresh_at(
         )),
         Err(e) => logger.error(&format!("region data {region} failed: {e}")),
     }
-    let body = to_write(kept.as_ref(), region, now).map(str::to_string);
-    let summary = if body.is_some() {
-        kept.as_ref().map(|k| k.summary)
-    } else {
-        None
-    };
-    if body.is_none() && kept.is_some() {
+    let written = kept
+        .as_ref()
+        .and_then(|k| to_write(Some(k), region, now).map(|body| (body.to_string(), k.summary)));
+    if written.is_none() && kept.is_some() {
         logger.info(&format!(
             "region data {region}: older than 3 h, not written"
         ));
     }
     *store.lock().unwrap_or_else(|p| p.into_inner()) = kept;
-    (body, summary)
+    written
 }
 
 #[cfg(test)]
@@ -370,6 +367,15 @@ mod tests {
 
     /// One canned HTTP answer on a local port; hands back the URL and the raw request it saw.
     fn serve_once(response: String) -> (String, std::sync::mpsc::Receiver<String>) {
+        serve_and_hold(response, Duration::ZERO)
+    }
+
+    /// `serve_once`, but the connection stays open for `hold` after the answer is sent, so
+    /// an answer without its end keeps a reader that wants the end waiting.
+    fn serve_and_hold(
+        response: String,
+        hold: Duration,
+    ) -> (String, std::sync::mpsc::Receiver<String>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!(
@@ -392,6 +398,7 @@ mod tests {
                 .unwrap();
             // The client may hang up mid-answer (that is what a refused body looks like).
             let _ = stream.write_all(response.as_bytes());
+            std::thread::sleep(hold);
         });
         (url, rx)
     }
@@ -399,13 +406,18 @@ mod tests {
     /// A 200 with no Content-Length whose body comes in HTTP/1.1 chunks, the way a hop
     /// that re-encodes answers.
     fn chunked_answer(parts: &[&str]) -> String {
+        chunked_unfinished(parts) + "0\r\n\r\n"
+    }
+
+    /// `chunked_answer` without the final zero-length chunk: as far as the reader can tell,
+    /// more body is on its way.
+    fn chunked_unfinished(parts: &[&str]) -> String {
         let mut out = String::from(
             "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
         );
         for part in parts {
             out.push_str(&format!("{:x}\r\n{part}\r\n", part.len()));
         }
-        out.push_str("0\r\n\r\n");
         out
     }
 
@@ -488,10 +500,7 @@ mod tests {
             one.len()
         ));
         let first = refresh_at(&client, &url, &store, "eu", &logger, now).await;
-        assert_eq!(
-            first,
-            (Some(one.clone()), Some(RegionSummary { items: 1, ts }))
-        );
+        assert_eq!(first, Some((one.clone(), RegionSummary { items: 1, ts })));
 
         // Tick 2, eu: revalidated with the kept ETag, and the 304 hands back the same body.
         let (url, seen) = serve_once(NOT_MODIFIED.to_string());
@@ -507,7 +516,7 @@ mod tests {
         // writes nothing -- neither the eu payload nor anything else.
         let (url, seen) = serve_once(NOT_MODIFIED.to_string());
         let third = refresh_at(&client, &url, &store, "us", &logger, now).await;
-        assert_eq!(third, (None, None));
+        assert_eq!(third, None);
         let request = seen.recv().unwrap().to_ascii_lowercase();
         assert!(!request.contains("if-none-match"), "{request}");
         assert!(request.contains("region=us"), "{request}");
@@ -537,7 +546,7 @@ mod tests {
         );
 
         let leg = refresh_at(&client, &url, &store, "eu", &logger, 1_789_819_200).await;
-        assert_eq!(leg, (None, None));
+        assert_eq!(leg, None);
 
         let wow = dir.join("wow");
         std::fs::create_dir_all(&wow).unwrap();
@@ -576,10 +585,18 @@ mod tests {
 
     #[tokio::test]
     async fn a_chunked_answer_over_eight_megabytes_is_refused() {
+        // The cap plus one chunk, then the connection stays open with no final chunk. A
+        // reader that stops at the cap answers at once; one that takes the whole body
+        // before checking it is still waiting for the rest when the 5 s run out.
         let part = "9".repeat(64 * 1024);
         let parts = vec![part.as_str(); MAX_BODY_BYTES / part.len() + 1];
-        let (url, _seen) = serve_once(chunked_answer(&parts));
-        let fetched = fetch_from(&crate::sync::build_client(), &url, "eu", None).await;
+        let (url, _seen) = serve_and_hold(chunked_unfinished(&parts), Duration::from_secs(10));
+        let fetched = tokio::time::timeout(
+            Duration::from_secs(5),
+            fetch_from(&crate::sync::build_client(), &url, "eu", None),
+        )
+        .await
+        .expect("the body must be refused as it passes the cap, not once the peer is done");
         let error = fetched.expect_err("a body past the cap must not come back as Fresh");
         assert!(error.contains("too large"), "{error}");
     }

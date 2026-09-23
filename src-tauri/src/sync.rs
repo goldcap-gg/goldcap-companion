@@ -187,15 +187,17 @@ pub fn apply_import_string(
 }
 
 /// Writes a good import string with the region leg's result (`region::refresh`) beside
-/// it. The region summary comes back only when the file was written: the Status screen
-/// must not claim market items that never reached the addon.
+/// it: a body and its summary as one pair, or neither. The summary comes back only when
+/// the file was written: the Status screen must not claim market items that never
+/// reached the addon.
 pub fn write_prices(
     wow_retail_path: &Path,
     import_string: &str,
-    region: (Option<String>, Option<crate::region::RegionSummary>),
+    region: Option<(String, crate::region::RegionSummary)>,
 ) -> Result<Option<crate::region::RegionSummary>, SyncError> {
-    let (region_body, summary) = region;
-    apply_import_string(wow_retail_path, import_string, region_body.as_deref()).map(|()| summary)
+    let region_body = region.as_ref().map(|(body, _)| body.as_str());
+    apply_import_string(wow_retail_path, import_string, region_body)?;
+    Ok(region.map(|(_, summary)| summary))
 }
 
 /// Realm display name -> connected-realm slug, remembered for the process's
@@ -667,7 +669,7 @@ mod tests {
         let written = write_prices(
             &dir,
             "GCS1;eu;dentarg;1;abc",
-            (Some("GCM1;eu;42;I:1=2,3=4".to_string()), Some(summary)),
+            Some(("GCM1;eu;42;I:1=2,3=4".to_string(), summary)),
         );
 
         assert_eq!(written.unwrap(), Some(summary));
@@ -693,7 +695,7 @@ mod tests {
         let written = write_prices(
             &file,
             "GCS1;eu;dentarg;1;abc",
-            (Some("GCM1;eu;42;I:1=2,3=4".to_string()), Some(summary)),
+            Some(("GCM1;eu;42;I:1=2,3=4".to_string(), summary)),
         );
 
         assert!(matches!(written, Err(SyncError::Write(_))), "{written:?}");
