@@ -37,3 +37,16 @@ export function formatPairCode(raw) {
   const clean = raw.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8);
   return clean.length > 4 ? `${clean.slice(0, 4)}-${clean.slice(4)}` : clean;
 }
+
+// One line per game folder the Companion found. Retail is only named: its own rows above say
+// everything about it. WoW: Forever says what went up, what came back, and anything the player
+// has to do; another game is named and left alone.
+export function gameLine(g, now) {
+  if (g.game === "retail") return `Retail · ${g.folder}`;
+  if (g.game !== "forever") return `${g.folder} · not used`;
+  const parts = [`WoW: Forever · ${g.folder}`];
+  parts.push(g.lastSentAt ? `scan sent ${relativeTime(g.lastSentAt, now)}` : "no scan sent yet");
+  if (g.crowdItems) parts.push(`${groupDigits(g.crowdItems)} prices from players, ${relativeTime(g.crowdTs, now)}`);
+  if (g.note) parts.push(g.note);
+  return parts.join(" · ");
+}

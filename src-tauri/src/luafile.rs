@@ -175,13 +175,9 @@ pub fn remove_runs(dir: &Path) -> io::Result<()> {
 
 /// A WoW: Forever install's own toc for the mini-addon: the Forever client loads
 /// `<Addon>_Camelot.toc` (spec, "The client"). Never written into `_retail_`.
-// used from Task C5 on
-#[allow(dead_code)]
 pub const FOREVER_TOC_FILE_NAME: &str = "GoldCap_AppData_Camelot.toc";
 
 /// The toc, with the interface the addon's passport reported, so it follows Forever patches.
-// used from Task C5 on
-#[allow(dead_code)]
 pub fn forever_toc_contents(interface: i64) -> String {
     format!(
         "## Interface: {interface}\n## Title: GoldCap AppData\n## Notes: Auto-synced market data for GoldCap. File is rewritten by the GoldCap companion app.\n## LoadOnDemand: 0\nAppData.lua\n"
@@ -192,8 +188,6 @@ pub fn forever_toc_contents(interface: i64) -> String {
 /// `foreverString` — every player's prices for this install's market (GCF1), when kept;
 /// `foreverUpload` — this companion is paired and sends this install's scans (the addon says
 /// "shared on your next /reload" only then). No retail key is ever written here.
-// used from Task C5 on
-#[allow(dead_code)]
 pub fn render_forever_app_data_lua(forever_string: Option<&str>, uploads: bool, written_at: i64) -> String {
     let mut fields = Vec::new();
     if let Some(s) = forever_string {
@@ -208,8 +202,6 @@ pub fn render_forever_app_data_lua(forever_string: Option<&str>, uploads: bool, 
 
 /// The Forever install's `GoldCap_AppData`: its `_Camelot.toc` (written only when it differs)
 /// and `AppData.lua` (atomic). Nothing else: no retail toc, no LedgerSummary.lua, no Runs.lua.
-// used from Task C5 on
-#[allow(dead_code)]
 pub fn write_forever_app_data(dir: &Path, interface: i64, forever_string: Option<&str>, uploads: bool, written_at: i64) -> io::Result<()> {
     fs::create_dir_all(dir)?;
     let toc = dir.join(FOREVER_TOC_FILE_NAME);

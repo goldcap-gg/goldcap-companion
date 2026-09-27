@@ -10,22 +10,14 @@ use std::path::Path;
 
 /// WoW: Forever's interface numbers: 16001 in the beta. The same range as the addon's
 /// `GC.Game.FOREVER_MIN_INTERFACE`/`FOREVER_MAX_INTERFACE` and the API's `isForeverInterface`.
-// used from Task C5 on
-#[allow(dead_code)]
 pub const FOREVER_MIN_INTERFACE: i64 = 16_000;
-// used from Task C5 on
-#[allow(dead_code)]
 pub const FOREVER_MAX_INTERFACE: i64 = 16_999;
 
-// used from Task C5 on
-#[allow(dead_code)]
 pub fn is_forever_interface(interface: i64) -> bool {
     (FOREVER_MIN_INTERFACE..=FOREVER_MAX_INTERFACE).contains(&interface)
 }
 
 /// `GoldCapDB.client`, as far as discovery needs it.
-// used from Task C5 on
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Passport {
     pub interface: i64,
@@ -33,8 +25,6 @@ pub struct Passport {
     pub region_id: Option<i64>,
 }
 
-// used from Task C5 on
-#[allow(dead_code)]
 fn globals_db(lua: &Lua, source: &str) -> Option<mlua::Table> {
     lua.load(source).exec().ok()?;
     match lua.globals().get::<Value>("GoldCapDB") {
@@ -44,8 +34,6 @@ fn globals_db(lua: &Lua, source: &str) -> Option<mlua::Table> {
 }
 
 /// The passport a SavedVariables file carries, or None. Anything unreadable is "no passport".
-// used from Task C5 on
-#[allow(dead_code)]
 pub fn read_passport(source: &str) -> Option<Passport> {
     let lua = Lua::new_with(StdLib::NONE, LuaOptions::default()).ok()?;
     let db = globals_db(&lua, source)?;
@@ -60,21 +48,11 @@ pub fn read_passport(source: &str) -> Option<Passport> {
 
 /// The site's own bounds (plan 2a Task 3): a fold past them is refused whole, an item past
 /// them alone.
-// used from Task C5 on
-#[allow(dead_code)]
 pub const MAX_ITEMS: usize = 20_000;
-// used from Task C5 on
-#[allow(dead_code)]
 pub const MAX_ITEM_CHARS: usize = 256;
-// used from Task C5 on
-#[allow(dead_code)]
 const SOURCES: [&str; 3] = ["replicate", "replicate+browse", "browse"];
-// used from Task C5 on
-#[allow(dead_code)]
 const FACTIONS: [&str; 3] = ["Horde", "Alliance", "Neutral"];
 
-// used from Task C5 on
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ForeverClient {
@@ -83,8 +61,6 @@ pub struct ForeverClient {
     pub region_id: i64,
 }
 
-// used from Task C5 on
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ForeverFold {
@@ -109,16 +85,12 @@ pub struct ForeverFold {
 }
 
 /// `POST /v1/forever/scans`'s body, exactly: `{ client, fold }`.
-// used from Task C5 on
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ForeverUpload {
     pub client: ForeverClient,
     pub fold: ForeverFold,
 }
 
-// used from Task C5 on
-#[allow(dead_code)]
 fn item_id(key: &Value) -> Option<i64> {
     match key {
         Value::Integer(i) if (1..=9_999_999_999).contains(i) => Some(*i),
@@ -127,8 +99,6 @@ fn item_id(key: &Value) -> Option<i64> {
     }
 }
 
-// used from Task C5 on
-#[allow(dead_code)]
 fn read_items(fold: &Table) -> BTreeMap<String, String> {
     let mut items = BTreeMap::new();
     let Ok(Value::Table(t)) = fold.get::<Value>("items") else { return items };
@@ -145,8 +115,6 @@ fn read_items(fold: &Table) -> BTreeMap<String, String> {
 /// The Forever upload one SavedVariables file holds, or None: no Forever passport, no fold,
 /// or a fold the site would refuse whole (no items, an unknown source, no realm). A courier:
 /// the items go as the addon wrote them, and the site checks their grammar.
-// used from Task C5 on
-#[allow(dead_code)]
 pub fn parse_forever_upload(source: &str) -> Result<Option<ForeverUpload>, String> {
     let lua = Lua::new_with(StdLib::NONE, LuaOptions::default()).map_err(|e| e.to_string())?;
     lua.load(source).exec().map_err(|e| e.to_string())?;
@@ -202,15 +170,9 @@ pub fn parse_forever_upload(source: &str) -> Result<Option<ForeverUpload>, Strin
     }))
 }
 
-// used from Task C5 on
-#[allow(dead_code)]
 pub const API_BASE: &str = "https://api.goldcap.gg";
-// used from Task C5 on
-#[allow(dead_code)]
 pub const STATE_FILE_NAME: &str = "forever.json";
 
-// used from Task C5 on
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum UploadOutcome {
     /// The site has had its say about this fold; it is never sent again (Decision E5).
@@ -221,8 +183,6 @@ pub enum UploadOutcome {
     Retry(String),
 }
 
-// used from Task C5 on
-#[allow(dead_code)]
 fn note_for(status: &str, reason: Option<&str>) -> Option<String> {
     match (status, reason) {
         ("quarantined", Some("unlinked")) => Some("Link Battle.net on goldcap.gg for your scans to count in public prices".into()),
@@ -235,8 +195,6 @@ fn note_for(status: &str, reason: Option<&str>) -> Option<String> {
 
 /// Sends one fold to `POST {base}/v1/forever/scans` under the pairing token, with the Forever
 /// passport as `X-GoldCap-Client` (plan 2a Task 3).
-// used from Task C5 on
-#[allow(dead_code)]
 pub async fn upload_fold(client: &reqwest::Client, base: &str, token: &str, up: &ForeverUpload) -> UploadOutcome {
     let sent = client
         .post(format!("{base}/v1/forever/scans"))
@@ -263,8 +221,6 @@ pub async fn upload_fold(client: &reqwest::Client, base: &str, token: &str, up: 
     }
 }
 
-// used from Task C5 on
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct InstallState {
@@ -277,8 +233,6 @@ pub struct InstallState {
 }
 
 /// One row of the Status screen's game list.
-// used from Task C5 on
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GameStatus {
@@ -288,8 +242,6 @@ pub struct GameStatus {
     pub state: InstallState,
 }
 
-// used from Task C5 on
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ForeverState {
@@ -301,8 +253,6 @@ pub struct ForeverState {
     pub games: Vec<GameStatus>,
 }
 
-// used from Task C5 on
-#[allow(dead_code)]
 impl ForeverState {
     pub fn load_from(path: &Path) -> Self {
         std::fs::read_to_string(path)
@@ -321,24 +271,16 @@ impl ForeverState {
 
 /// Older than this by its own scan time, and the addon's tooltip would print a days-old price as
 /// "AH value": the site sends nothing older (plan 2a D15), and the companion writes nothing older.
-// used from Task C5 on
-#[allow(dead_code)]
 pub const CROWD_MAX_AGE_SECS: i64 = 72 * 3600;
 /// The site builds at most 2,000,000 characters (plan 2a Task 9).
-// used from Task C5 on
-#[allow(dead_code)]
 pub const CROWD_MAX_BYTES: usize = 4 * 1024 * 1024;
 
-// used from Task C5 on
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CrowdSummary {
     pub items: u32,
     pub ts: i64,
 }
 
-// used from Task C5 on
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct KeptCrowd {
     pub slug: String,
@@ -348,8 +290,6 @@ pub struct KeptCrowd {
 }
 
 /// `GCF1;<slug>;<regionId>;<realm>;<faction>;<ts>;I:…` for exactly this market, with items.
-// used from Task C5 on
-#[allow(dead_code)]
 pub fn summarize_gcf1(body: &str, slug: &str) -> Result<CrowdSummary, String> {
     if body.len() > CROWD_MAX_BYTES {
         return Err("Forever prices too large".into());
@@ -372,8 +312,6 @@ pub fn summarize_gcf1(body: &str, slug: &str) -> Result<CrowdSummary, String> {
 }
 
 /// Kept Forever payloads, by install dir, for the life of the process.
-// used from Task C5 on
-#[allow(dead_code)]
 pub fn kept_crowd_store() -> &'static std::sync::Mutex<std::collections::HashMap<String, KeptCrowd>> {
     static KEPT: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, KeptCrowd>>> = std::sync::OnceLock::new();
     KEPT.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
@@ -383,8 +321,6 @@ pub fn kept_crowd_store() -> &'static std::sync::Mutex<std::collections::HashMap
 /// keep the last good body, and hand back the body to write with its summary — or None when
 /// nothing is kept, or what is kept is older than CROWD_MAX_AGE_SECS. Never an error: a failure
 /// is a log line.
-// used from Task C5 on
-#[allow(dead_code)]
 pub async fn refresh_crowd_at(
     client: &reqwest::Client,
     base: &str,
@@ -423,6 +359,113 @@ pub async fn refresh_crowd_at(
         store.lock().unwrap_or_else(|p| p.into_inner()).insert(install_key.to_string(), k);
     }
     write
+}
+
+/// One tick's Forever leg, against goldcap.gg, remembering in `{state_dir}/forever.json`.
+/// Runs after the retail `sync_once` in `sync::run_loop`, as its own passenger: it never touches
+/// SyncStatus or the tray, and a failure is a log line (Decision E8).
+pub async fn sync_forever(client: &reqwest::Client, config: &crate::config::Config, logger: &crate::logging::Logger, state_dir: &Path) {
+    let _ = sync_forever_at(client, API_BASE, config, logger, &state_dir.join(STATE_FILE_NAME), kept_crowd_store(), crate::luafile::now_unix()).await;
+}
+
+pub async fn sync_forever_at(
+    client: &reqwest::Client,
+    base: &str,
+    config: &crate::config::Config,
+    logger: &crate::logging::Logger,
+    state_path: &Path,
+    store: &std::sync::Mutex<std::collections::HashMap<String, KeptCrowd>>,
+    now: i64,
+) -> ForeverState {
+    match crate::games::wow_root(config) {
+        Some(root) => sync_forever_at_root(client, base, &root, config, logger, state_path, store, now).await,
+        None => ForeverState::load_from(state_path),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn sync_forever_at_root(
+    client: &reqwest::Client,
+    base: &str,
+    root: &Path,
+    config: &crate::config::Config,
+    logger: &crate::logging::Logger,
+    state_path: &Path,
+    store: &std::sync::Mutex<std::collections::HashMap<String, KeptCrowd>>,
+    now: i64,
+) -> ForeverState {
+    use crate::games::GameKind;
+    let mut state = ForeverState::load_from(state_path);
+    let retail = config.wow_retail_path.trim();
+    let retail_dir = (!retail.is_empty()).then(|| std::path::PathBuf::from(retail));
+    let games = crate::games::discover(root, retail_dir.as_deref());
+    let token = config.companion_token.trim().to_string();
+
+    for game in games.iter().filter(|g| g.kind == GameKind::Forever) {
+        let key = game.dir.to_string_lossy().into_owned();
+        let mut interface = game.interface.unwrap_or(FOREVER_MIN_INTERFACE + 1);
+        for file in &game.saved_vars {
+            let Ok(src) = std::fs::read_to_string(file) else { continue };
+            let up = match parse_forever_upload(&src) {
+                Ok(Some(up)) => up,
+                Ok(None) => continue,
+                Err(e) => {
+                    logger.error(&format!("{}: not readable yet ({e})", file.display()));
+                    continue;
+                }
+            };
+            interface = up.client.interface;
+            let entry = state.installs.entry(key.clone()).or_default();
+            entry.last_scan_at = entry.last_scan_at.max(Some(up.fold.at));
+            let file_key = file.to_string_lossy().into_owned();
+            if token.is_empty() || state.sent.get(&file_key) == Some(&up.fold.at) {
+                continue;
+            }
+            match upload_fold(client, base, &token, &up).await {
+                UploadOutcome::Done { market, note } => {
+                    logger.info(&format!("forever scan from {}: sent ({} items)", game.folder, up.fold.items.len()));
+                    state.sent.insert(file_key, up.fold.at);
+                    let entry = state.installs.entry(key.clone()).or_default();
+                    entry.last_sent_at = Some(now);
+                    entry.note = note;
+                    if market.is_some() {
+                        entry.market = market;
+                    }
+                }
+                UploadOutcome::Retry(why) => logger.error(&format!("forever scan from {}: will retry ({why})", game.folder)),
+            }
+        }
+        let market = state.installs.get(&key).and_then(|e| e.market.clone());
+        let crowd = match &market {
+            Some(slug) => refresh_crowd_at(client, base, store, &key, slug, logger, now).await,
+            None => None,
+        };
+        let entry = state.installs.entry(key.clone()).or_default();
+        entry.crowd_items = crowd.as_ref().map(|(_, s)| s.items);
+        entry.crowd_ts = crowd.as_ref().map(|(_, s)| s.ts);
+        if let Err(e) = crate::luafile::write_forever_app_data(
+            &crate::luafile::addon_dir(&game.dir),
+            interface,
+            crowd.as_ref().map(|(body, _)| body.as_str()),
+            !token.is_empty(),
+            now,
+        ) {
+            logger.error(&format!("forever prices for {}: could not write ({e})", game.folder));
+        }
+    }
+
+    state.games = games
+        .iter()
+        .map(|g| GameStatus {
+            folder: g.folder.clone(),
+            game: g.kind,
+            state: state.installs.get(&g.dir.to_string_lossy().into_owned()).cloned().unwrap_or_default(),
+        })
+        .collect();
+    if let Err(e) = state.save_to(state_path) {
+        logger.error(&format!("forever state not saved: {e}"));
+    }
+    state
 }
 
 #[cfg(test)]
@@ -628,5 +671,92 @@ mod tests {
         // Three days on and the site unreachable: the kept body is no longer written.
         let late = refresh_crowd_at(&crate::sync::build_client(), "http://127.0.0.1:9", &store, "/wow/_classic_beta_", "m", &logger, 1_790_000_000 + CROWD_MAX_AGE_SECS + 1).await;
         assert_eq!(late, None);
+    }
+
+    fn machine(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("goldcap-forever-machine-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+    fn put(root: &std::path::Path, folder: &str, lua: &str) -> std::path::PathBuf {
+        let sv = root.join(folder).join("WTF").join("Account").join("A").join("SavedVariables");
+        std::fs::create_dir_all(&sv).unwrap();
+        std::fs::write(sv.join("GoldCap.lua"), lua).unwrap();
+        sv.join("GoldCap.lua")
+    }
+    fn files_under(dir: &std::path::Path) -> Vec<String> {
+        let mut out = Vec::new();
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            if e.path().is_dir() { out.extend(files_under(&e.path())); } else { out.push(e.path().to_string_lossy().into_owned()); }
+        }
+        out.sort();
+        out
+    }
+
+    #[tokio::test]
+    async fn a_retail_only_machine_gets_no_request_and_no_new_file() {
+        let root = machine("retail-only");
+        put(&root, "_retail_", r#"GoldCapDB = { client = { interface = 120100, build = "12.1.0.69933" }, ledger = {} }"#);
+        let before = files_under(&root);
+        let config = crate::config::Config {
+            wow_retail_path: root.join("_retail_").to_string_lossy().into_owned(),
+            companion_token: "tok".into(),
+            ..crate::config::Config::default()
+        };
+        let logger = crate::logging::Logger::new(&root.join("logs")).unwrap();
+        let store = std::sync::Mutex::new(std::collections::HashMap::new());
+        // Port 9 answers nothing: any request would be a Retry logged; none must be made at all.
+        let state = sync_forever_at(&crate::sync::build_client(), "http://127.0.0.1:9", &config, &logger, &root.join("state").join(STATE_FILE_NAME), &store, 1_790_000_000).await;
+        assert_eq!(state.sent.len(), 0);
+        assert_eq!(state.games.iter().map(|g| (g.folder.as_str(), g.game)).collect::<Vec<_>>(), vec![("_retail_", crate::games::GameKind::Retail)]);
+        let after: Vec<String> = files_under(&root).into_iter().filter(|p| !p.contains("/logs/") && !p.contains("/state/")).collect();
+        assert_eq!(after, before, "nothing new under the WoW root");
+        assert!(!root.join("_retail_/Interface/AddOns/GoldCap_AppData").exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn retail_and_forever_side_by_side_only_forever_is_touched() {
+        let root = machine("both");
+        put(&root, "_retail_", r#"GoldCapDB = { client = { interface = 120100, build = "12.1.0.69933" }, ledger = {} }"#);
+        let sv = put(&root, "_classic_beta_", REAL);
+        let config = crate::config::Config {
+            wow_retail_path: root.join("_retail_").to_string_lossy().into_owned(),
+            companion_token: "tok".into(),
+            ..crate::config::Config::default()
+        };
+        let logger = crate::logging::Logger::new(&root.join("logs")).unwrap();
+        let store = std::sync::Mutex::new(std::collections::HashMap::new());
+        let (base, seen) = serve_once(answer("200 OK", r#"{"status":"accepted","market":"m","items":1974,"dropped":0}"#));
+        let state_path = root.join("state").join(STATE_FILE_NAME);
+        let state = sync_forever_at(&crate::sync::build_client(), &base, &config, &logger, &state_path, &store, 1_790_464_500).await;
+        assert!(seen.recv().unwrap().to_ascii_lowercase().starts_with("post /v1/forever/scans"));
+        assert_eq!(state.sent.get(&sv.to_string_lossy().into_owned()), Some(&1_790_464_249));
+        // The Forever install got its own AppData; retail's folder got nothing.
+        let forever_dir = root.join("_classic_beta_/Interface/AddOns/GoldCap_AppData");
+        assert!(forever_dir.join(crate::luafile::FOREVER_TOC_FILE_NAME).is_file());
+        assert!(std::fs::read_to_string(forever_dir.join(crate::luafile::LUA_FILE_NAME)).unwrap().contains("foreverUpload = true"));
+        assert!(!root.join("_retail_/Interface/AddOns/GoldCap_AppData").exists());
+        // The same fold on the next tick is not sent again (no server is listening now).
+        let again = sync_forever_at(&crate::sync::build_client(), "http://127.0.0.1:9", &config, &logger, &state_path, &store, 1_790_464_900).await;
+        assert_eq!(again.installs.values().next().unwrap().market.as_deref(), Some("m"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn unpaired_nothing_is_uploaded_but_the_install_is_listed() {
+        let root = machine("unpaired");
+        put(&root, "_classic_beta_", REAL);
+        let config = crate::config::Config::default(); // no retail path, no token
+        let logger = crate::logging::Logger::new(&root.join("logs")).unwrap();
+        let store = std::sync::Mutex::new(std::collections::HashMap::new());
+        let state = sync_forever_at_root(&crate::sync::build_client(), "http://127.0.0.1:9", &root, &config, &logger, &root.join("s.json"), &store, 1).await;
+        assert!(state.sent.is_empty());
+        assert_eq!(state.games[0].game, crate::games::GameKind::Forever);
+        assert_eq!(state.games[0].state.last_scan_at, Some(1_790_464_249));
+        let lua = std::fs::read_to_string(root.join("_classic_beta_/Interface/AddOns/GoldCap_AppData/AppData.lua")).unwrap();
+        assert_eq!(lua, "GoldCap_AppData = { writtenAt = 1 }\n", "no foreverUpload: the addon must not promise sharing");
+        std::fs::remove_dir_all(&root).ok();
     }
 }

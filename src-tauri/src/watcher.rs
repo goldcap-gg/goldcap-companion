@@ -59,6 +59,26 @@ impl Debouncer {
     }
 }
 
+/// Every `WTF/Account` whose SavedVariables writes should trigger a sync: the configured retail
+/// one (exactly as before), then each WoW: Forever install's (games.rs). Other game folders are
+/// not watched: nothing is uploaded from them.
+pub fn account_roots(config: &Config) -> Vec<PathBuf> {
+    let retail = config.wow_retail_path.trim();
+    let mut roots = Vec::new();
+    if !retail.is_empty() {
+        roots.push(PathBuf::from(retail).join("WTF").join("Account"));
+    }
+    if let Some(root) = crate::games::wow_root(config) {
+        let retail_dir = (!retail.is_empty()).then(|| PathBuf::from(retail));
+        for g in crate::games::discover(&root, retail_dir.as_deref()) {
+            if g.kind == crate::games::GameKind::Forever {
+                roots.push(g.dir.join("WTF").join("Account"));
+            }
+        }
+    }
+    roots
+}
+
 /// Watches `<wow_retail_path>/WTF/Account` and fires `trigger_tx` (the same
 /// channel as the tray's "Sync now") after a debounced SavedVariables write.
 /// Rebuilds the watcher whenever the config (and thus possibly the WoW path)
@@ -72,17 +92,12 @@ pub async fn run_loop(
         let wow_path = config_rx.borrow().wow_retail_path.trim().to_string();
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<PathBuf>();
 
-        // Held for its Drop: dropping the watcher (on config change) stops
-        // the notify thread watching the old path.
-        let _watcher = if wow_path.is_empty() {
-            None
-        } else {
-            build_watcher(
-                PathBuf::from(&wow_path).join("WTF").join("Account"),
-                event_tx,
-                &logger,
-            )
-        };
+        // Held for their Drop: dropping the watchers (on config change) stops
+        // the notify threads watching the old paths.
+        let _watchers: Vec<RecommendedWatcher> = account_roots(&config_rx.borrow())
+            .into_iter()
+            .filter_map(|root| build_watcher(root, event_tx.clone(), &logger))
+            .collect();
 
         let mut debounce = Debouncer::default();
         loop {
@@ -254,5 +269,29 @@ mod tests {
                 p.display()
             );
         }
+    }
+
+    #[test]
+    fn the_watcher_watches_retail_as_before_plus_each_forever_install() {
+        let root = std::env::temp_dir().join(format!("goldcap-watch-roots-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for (folder, lua) in [
+            ("_retail_", r#"GoldCapDB = {}"#),
+            ("_classic_beta_", r#"GoldCapDB = { client = { interface = 16001, build = "1.60.1.70009" } }"#),
+            ("_ptr_", r#"GoldCapDB = { client = { interface = 120100, build = "12.1.0.1" } }"#),
+        ] {
+            let sv = root.join(folder).join("WTF").join("Account").join("A").join("SavedVariables");
+            std::fs::create_dir_all(&sv).unwrap();
+            std::fs::write(sv.join("GoldCap.lua"), lua).unwrap();
+        }
+        let config = Config { wow_retail_path: root.join("_retail_").to_string_lossy().into_owned(), ..Config::default() };
+        assert_eq!(
+            account_roots(&config),
+            vec![root.join("_retail_").join("WTF").join("Account"), root.join("_classic_beta_").join("WTF").join("Account")]
+        );
+        // Retail alone configured and nothing else on disk: exactly the one root it always watched.
+        std::fs::remove_dir_all(root.join("_classic_beta_")).unwrap();
+        assert_eq!(account_roots(&config), vec![root.join("_retail_").join("WTF").join("Account")]);
+        std::fs::remove_dir_all(&root).ok();
     }
 }

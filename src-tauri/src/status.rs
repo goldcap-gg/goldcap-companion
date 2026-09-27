@@ -48,6 +48,7 @@ pub struct StatusSnapshot {
     pub market_items: Option<u32>,
     pub market_ts: Option<i64>,
     pub version: String,
+    pub games: Vec<crate::forever::GameStatus>,
 }
 
 fn unix(at: SystemTime) -> Option<i64> {
@@ -169,6 +170,7 @@ pub fn build(
         market_items: status.region.map(|r| r.items),
         market_ts: status.region.map(|r| r.ts),
         version: env!("CARGO_PKG_VERSION").to_string(),
+        games: Vec::new(),
     }
 }
 

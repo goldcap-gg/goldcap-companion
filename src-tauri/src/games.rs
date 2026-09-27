@@ -7,8 +7,6 @@ use crate::config::Config;
 use crate::forever::{is_forever_interface, read_passport};
 use std::path::{Path, PathBuf};
 
-// used from Task C5 on
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum GameKind {
@@ -17,8 +15,6 @@ pub enum GameKind {
     Other,
 }
 
-// used from Task C5 on
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct GameInstall {
     pub dir: PathBuf,
@@ -31,14 +27,10 @@ pub struct GameInstall {
 }
 
 /// `_name_`: Blizzard's own shape for a game folder under the WoW root.
-// used from Task C5 on
-#[allow(dead_code)]
 fn is_game_folder(name: &str) -> bool {
     name.len() > 2 && name.starts_with('_') && name.ends_with('_')
 }
 
-// used from Task C5 on
-#[allow(dead_code)]
 fn has_game_folder(root: &Path) -> bool {
     std::fs::read_dir(root)
         .map(|entries| {
@@ -51,8 +43,6 @@ fn has_game_folder(root: &Path) -> bool {
 
 /// The WoW root: the folder the configured `_retail_` sits in, or else the first detected
 /// install base that holds any game folder (Decision E2).
-// used from Task C5 on
-#[allow(dead_code)]
 pub fn wow_root(config: &Config) -> Option<PathBuf> {
     let retail = config.wow_retail_path.trim();
     if !retail.is_empty() {
@@ -74,8 +64,6 @@ pub fn wow_root(config: &Config) -> Option<PathBuf> {
         .find(|c| has_game_folder(c))
 }
 
-// used from Task C5 on
-#[allow(dead_code)]
 fn same_dir(a: &Path, b: &Path) -> bool {
     match (a.canonicalize(), b.canonicalize()) {
         (Ok(x), Ok(y)) => x == y,
@@ -88,8 +76,6 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 /// opened here: retail behaves exactly as it did before this module existed (Decision E3). Any
 /// other folder is Forever only when one of its files carries a Forever passport; a retail
 /// passport there, or none at all, is Other and is uploaded nowhere.
-// used from Task C5 on
-#[allow(dead_code)]
 pub fn discover(root: &Path, retail_dir: Option<&Path>) -> Vec<GameInstall> {
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();

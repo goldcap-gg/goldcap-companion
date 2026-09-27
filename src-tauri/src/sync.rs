@@ -486,6 +486,7 @@ pub async fn run_loop(
                 _ = ticker.tick() => {
                     schedule_next_tick(&status, SystemTime::now() + interval);
                     sync_once(&client, &config, &status, &logger, &state_dir).await;
+                    crate::forever::sync_forever(&client, &config, &logger, &state_dir).await;
                     on_tick();
                 }
                 maybe = trigger_rx.recv() => {
@@ -493,6 +494,7 @@ pub async fn run_loop(
                         return; // sender dropped — app is shutting down
                     }
                     sync_once(&client, &config, &status, &logger, &state_dir).await;
+                    crate::forever::sync_forever(&client, &config, &logger, &state_dir).await;
                     on_tick();
                 }
                 changed = config_rx.changed() => {

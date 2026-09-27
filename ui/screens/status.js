@@ -1,4 +1,4 @@
-import { relativeTime, countdown, groupDigits } from "../lib/format.js";
+import { relativeTime, countdown, groupDigits, gameLine } from "../lib/format.js";
 import { brandMarkSvg } from "../lib/brandMark.js";
 
 const POLL_MS = 5000;
@@ -137,7 +137,9 @@ export function render(el, ctx) {
   // version line stay fully visible either way.
   const scroll = document.createElement("div");
   scroll.className = "status-scroll";
-  scroll.append(hero, stages, meta);
+  const gamesList = document.createElement("ul");
+  gamesList.className = "games dim";
+  scroll.append(hero, stages, meta, gamesList);
 
   el.append(top, scroll, action, foot);
 
@@ -212,6 +214,14 @@ export function render(el, ctx) {
       : left
         ? `Next sync in ${left}`
         : "";
+
+    gamesList.replaceChildren(
+      ...(snapshot.games ?? []).map((g) => {
+        const li = document.createElement("li");
+        li.textContent = gameLine(g, now);
+        return li;
+      }),
+    );
   }
 
   async function refresh() {
