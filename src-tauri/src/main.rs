@@ -4,6 +4,8 @@
 mod autostart;
 mod commands;
 mod config;
+mod forever;
+mod games;
 mod health;
 mod ledger_summary;
 mod logging;

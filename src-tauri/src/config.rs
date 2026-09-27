@@ -182,13 +182,11 @@ pub fn normalize_retail_dir(candidate: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Best-effort auto-detect of a WoW retail install. Windows checks the
-/// registry keys Blizzard/Battle.net write, then a set of common locations
-/// across all drive letters; macOS checks the standard /Applications path.
-/// Empty string when nothing is found — the user fills the path in via
-/// Settings (or the Browse dialog).
+/// Where a WoW install's base folder may be: on Windows the registry keys Blizzard/Battle.net
+/// write, then common locations across every drive letter; on macOS the standard
+/// /Applications path. Shared by `detect_wow_retail_path` and games.rs's root detection.
 #[cfg(target_os = "windows")]
-pub fn detect_wow_retail_path() -> String {
+pub fn wow_base_candidates() -> Vec<PathBuf> {
     use winreg::enums::HKEY_LOCAL_MACHINE;
     use winreg::RegKey;
 
@@ -240,22 +238,26 @@ pub fn detect_wow_retail_path() -> String {
     }
 
     candidates
+}
+
+#[cfg(target_os = "macos")]
+pub fn wow_base_candidates() -> Vec<PathBuf> {
+    vec![PathBuf::from("/Applications/World of Warcraft")]
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub fn wow_base_candidates() -> Vec<PathBuf> {
+    Vec::new()
+}
+
+/// Best-effort auto-detect of a WoW retail install (see `wow_base_candidates`). Empty string
+/// when nothing is found — the user fills the path in via Settings (or the Browse dialog).
+pub fn detect_wow_retail_path() -> String {
+    wow_base_candidates()
         .iter()
         .find_map(|c| normalize_retail_dir(c))
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default()
-}
-
-#[cfg(target_os = "macos")]
-pub fn detect_wow_retail_path() -> String {
-    normalize_retail_dir(Path::new("/Applications/World of Warcraft"))
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_default()
-}
-
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
-pub fn detect_wow_retail_path() -> String {
-    String::new()
 }
 
 #[cfg(test)]

@@ -184,7 +184,7 @@ fn is_valid_passport_interface(interface: i64) -> bool {
 
 /// Matches the API's `^\d+(\.\d+){0,5}$` on the build half of the header: 1 to 6
 /// dot-separated groups, each non-empty and all ASCII digits. No regex crate needed.
-fn is_valid_passport_build(build: &str) -> bool {
+pub(crate) fn is_valid_passport_build(build: &str) -> bool {
     let groups: Vec<&str> = build.split('.').collect();
     !groups.is_empty()
         && groups.len() <= 6
@@ -218,14 +218,14 @@ pub fn saved_variables_paths(wow_retail_path: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-fn opt_string(t: &Table, key: &str) -> Option<String> {
+pub(crate) fn opt_string(t: &Table, key: &str) -> Option<String> {
     match t.get::<Value>(key) {
         Ok(Value::String(s)) => s.to_str().ok().map(|s| s.to_string()),
         _ => None,
     }
 }
 
-fn opt_int(t: &Table, key: &str) -> Option<i64> {
+pub(crate) fn opt_int(t: &Table, key: &str) -> Option<i64> {
     match t.get::<Value>(key) {
         Ok(Value::Integer(i)) => Some(i),
         Ok(Value::Number(n)) => Some(n as i64),
@@ -245,7 +245,7 @@ fn opt_exact_int(t: &Table, key: &str) -> Option<i64> {
     }
 }
 
-fn flag(t: &Table, key: &str) -> bool {
+pub(crate) fn flag(t: &Table, key: &str) -> bool {
     matches!(t.get::<Value>(key), Ok(Value::Boolean(true)))
 }
 
