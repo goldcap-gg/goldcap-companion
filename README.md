@@ -52,6 +52,8 @@ settings and log in your user profile. It reads the GoldCap addon's saved
 variables. It installs for your user only, with no administrator prompt, and it
 never touches the game's memory or its process.
 
+**WoW: Forever.** If you also play WoW: Forever, the Companion finds that install next to retail. After each /reload it sends your Forever auction house scan to goldcap.gg (only the scan: never your ledger or characters), and it writes every player's Forever prices into the Forever install's `GoldCap_AppData`. It tells the two games apart by what the addon writes into its own save file, not by folder names. Retail works exactly as before.
+
 ## Checking the file you downloaded
 
 1. **Compare the hash.** Each release's SHA-256 is published at

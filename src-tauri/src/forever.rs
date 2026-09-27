@@ -1041,4 +1041,31 @@ mod tests {
         assert_eq!(lua, "GoldCap_AppData = { writtenAt = 1 }\n", "no foreverUpload: the addon must not promise sharing");
         std::fs::remove_dir_all(&root).ok();
     }
+
+    /// Run by hand against plan 2a's local stand (Task 12: API on :8093, token
+    /// `stand-forever-token`), never in CI:
+    ///   GOLDCAP_E2E_API=http://localhost:8093 cargo test --locked -- --ignored forever_e2e
+    /// Reads the owner's real beta SavedVariables, read-only, re-stamps the fold's `at` to now
+    /// (the site refuses a fold older than a day) and sends it.
+    #[tokio::test]
+    #[ignore]
+    async fn forever_e2e_against_the_local_stand() {
+        let base = std::env::var("GOLDCAP_E2E_API").expect("GOLDCAP_E2E_API");
+        let pattern = "/Applications/World of Warcraft/_classic_beta_/WTF/Account";
+        let file = std::fs::read_dir(pattern).unwrap().flatten()
+            .map(|a| a.path().join("SavedVariables").join("GoldCap.lua"))
+            .find(|p| p.is_file()).expect("a beta GoldCap.lua");
+        let mut up = parse_forever_upload(&std::fs::read_to_string(&file).unwrap()).unwrap().expect("a Forever fold");
+        up.fold.at = crate::luafile::now_unix() - 60;
+        let out = upload_fold(&crate::sync::build_client(), &base, "stand-forever-token", &up).await;
+        let UploadOutcome::Done { market: Some(market), .. } = out else { panic!("{out:?}") };
+        assert_eq!(market, "us-beta-classic-beta-pve-2-horde");
+        let logger = crate::logging::Logger::new(&std::env::temp_dir().join("goldcap-e2e-log")).unwrap();
+        let store = std::sync::Mutex::new(std::collections::HashMap::new());
+        // The stand aggregates on `pnpm --filter @wowa/api forever:aggregate`; run it first.
+        let crowd = refresh_crowd_at(&crate::sync::build_client(), &base, &store, "e2e", &market, &logger, crate::luafile::now_unix()).await;
+        let (body, summary) = crowd.expect("GCF1 back from the stand — did you run forever:aggregate?");
+        assert!(body.starts_with("GCF1;us-beta-classic-beta-pve-2-horde;90;Classic Beta PvE 2;Horde;"));
+        assert!(summary.items > 1000);
+    }
 }
