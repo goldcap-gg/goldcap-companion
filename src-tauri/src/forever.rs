@@ -4,8 +4,9 @@
 //! "WoW: Forever upload contract").
 
 use mlua::{Lua, LuaOptions, StdLib, Table, Value};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::path::Path;
 
 /// WoW: Forever's interface numbers: 16001 in the beta. The same range as the addon's
 /// `GC.Game.FOREVER_MIN_INTERFACE`/`FOREVER_MAX_INTERFACE` and the API's `isForeverInterface`.
@@ -201,6 +202,123 @@ pub fn parse_forever_upload(source: &str) -> Result<Option<ForeverUpload>, Strin
     }))
 }
 
+// used from Task C5 on
+#[allow(dead_code)]
+pub const API_BASE: &str = "https://api.goldcap.gg";
+// used from Task C5 on
+#[allow(dead_code)]
+pub const STATE_FILE_NAME: &str = "forever.json";
+
+// used from Task C5 on
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum UploadOutcome {
+    /// The site has had its say about this fold; it is never sent again (Decision E5).
+    /// `market`: the market the fold was filed under, when the site named one.
+    /// `note`: what the Status screen should tell the player, when anything.
+    Done { market: Option<String>, note: Option<String> },
+    /// Nothing decided: the next tick sends it again.
+    Retry(String),
+}
+
+// used from Task C5 on
+#[allow(dead_code)]
+fn note_for(status: &str, reason: Option<&str>) -> Option<String> {
+    match (status, reason) {
+        ("quarantined", Some("unlinked")) => Some("Link Battle.net on goldcap.gg for your scans to count in public prices".into()),
+        ("quarantined", Some(_)) => Some("Your scans are not counted in public prices right now".into()),
+        ("rejected", Some("stale")) => Some("The last scan was over a day old when it was sent".into()),
+        ("rejected", Some(r)) => Some(format!("goldcap.gg refused the last scan ({r})")),
+        _ => None,
+    }
+}
+
+/// Sends one fold to `POST {base}/v1/forever/scans` under the pairing token, with the Forever
+/// passport as `X-GoldCap-Client` (plan 2a Task 3).
+// used from Task C5 on
+#[allow(dead_code)]
+pub async fn upload_fold(client: &reqwest::Client, base: &str, token: &str, up: &ForeverUpload) -> UploadOutcome {
+    let sent = client
+        .post(format!("{base}/v1/forever/scans"))
+        .bearer_auth(token)
+        .header(crate::upload::CLIENT_HEADER, format!("{}/{}", up.client.interface, up.client.build))
+        .json(up)
+        .send()
+        .await;
+    let res = match sent {
+        Ok(r) => r,
+        Err(e) => return UploadOutcome::Retry(e.to_string()),
+    };
+    let code = res.status().as_u16();
+    let body: serde_json::Value = res.json().await.unwrap_or(serde_json::Value::Null);
+    let market = body["market"].as_str().map(str::to_string);
+    let status = body["status"].as_str().unwrap_or("");
+    match code {
+        200 | 422 => UploadOutcome::Done { market, note: note_for(status, body["reason"].as_str()) },
+        400 | 409 | 413 => UploadOutcome::Done {
+            market: None,
+            note: Some(format!("goldcap.gg refused the last scan ({})", body["error"].as_str().unwrap_or("unknown"))),
+        },
+        _ => UploadOutcome::Retry(format!("status {code}")),
+    }
+}
+
+// used from Task C5 on
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct InstallState {
+    pub market: Option<String>,
+    pub last_scan_at: Option<i64>,
+    pub last_sent_at: Option<i64>,
+    pub note: Option<String>,
+    pub crowd_items: Option<u32>,
+    pub crowd_ts: Option<i64>,
+}
+
+/// One row of the Status screen's game list.
+// used from Task C5 on
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameStatus {
+    pub folder: String,
+    pub game: crate::games::GameKind,
+    #[serde(flatten)]
+    pub state: InstallState,
+}
+
+// used from Task C5 on
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ForeverState {
+    /// SavedVariables path → the fold `at` the site has had its say about.
+    pub sent: BTreeMap<String, i64>,
+    /// Install dir → what the Forever leg knows about it.
+    pub installs: BTreeMap<String, InstallState>,
+    /// Every game folder the last tick found, for the Status screen.
+    pub games: Vec<GameStatus>,
+}
+
+// used from Task C5 on
+#[allow(dead_code)]
+impl ForeverState {
+    pub fn load_from(path: &Path) -> Self {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, serde_json::to_string_pretty(self).map_err(std::io::Error::from)?)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,5 +392,101 @@ mod tests {
         .unwrap();
         assert_eq!(up.fold.items.keys().collect::<Vec<_>>(), vec!["1"]);
         assert_eq!(up.fold.faction, None);
+    }
+
+    /// One canned HTTP answer on a local port; hands back the base URL and the raw request.
+    fn serve_once(response: String) -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0u8; 65536];
+            // Read headers, then as much body as Content-Length says.
+            loop {
+                let n = stream.read(&mut buf).unwrap();
+                if n == 0 { break; }
+                request.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&request);
+                if let Some(end) = text.find("\r\n\r\n") {
+                    let len = text[..end].lines()
+                        .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0)))
+                        .unwrap_or(0);
+                    if request.len() >= end + 4 + len { break; }
+                }
+            }
+            tx.send(String::from_utf8_lossy(&request).into_owned()).unwrap();
+            let _ = stream.write_all(response.as_bytes());
+        });
+        (base, rx)
+    }
+
+    fn answer(status: &str, body: &str) -> String {
+        format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+    }
+
+    #[tokio::test]
+    async fn the_upload_names_the_forever_passport_and_the_token() {
+        let up = parse_forever_upload(REAL).unwrap().unwrap();
+        let (base, seen) = serve_once(answer("200 OK", r#"{"status":"accepted","market":"us-beta-classic-beta-pve-2-horde","items":1974,"dropped":0}"#));
+        let out = upload_fold(&crate::sync::build_client(), &base, "tok", &up).await;
+        assert_eq!(out, UploadOutcome::Done { market: Some("us-beta-classic-beta-pve-2-horde".into()), note: None });
+        let request = seen.recv().unwrap();
+        let lower = request.to_ascii_lowercase();
+        assert!(lower.starts_with("post /v1/forever/scans "), "{}", &request[..60]);
+        assert!(lower.contains("x-goldcap-client: 16001/1.60.1.70009"));
+        assert!(lower.contains("authorization: bearer tok"));
+        assert!(request.contains("\"realm\":\"Classic Beta PvE 2\""));
+        assert!(!request.contains("fixture-sale-1"), "the ledger never rides along");
+    }
+
+    #[tokio::test]
+    async fn what_the_site_says_decides_whether_the_fold_is_done() {
+        let up = parse_forever_upload(REAL).unwrap().unwrap();
+        let cases = [
+            ("200 OK", r#"{"status":"quarantined","market":"m","items":1,"dropped":0,"reason":"unlinked"}"#, true),
+            ("200 OK", r#"{"status":"duplicate","market":"m","items":1,"dropped":0}"#, true),
+            ("422 Unprocessable Entity", r#"{"status":"rejected","reason":"stale","market":"m"}"#, true),
+            ("409 Conflict", r#"{"error":"wrong_game"}"#, true),
+            ("400 Bad Request", r#"{"error":"bad_request"}"#, true),
+            ("413 Payload Too Large", r#"{"error":"too_large"}"#, true),
+            ("401 Unauthorized", r#"{"error":"unauthorized"}"#, false),
+            ("429 Too Many Requests", r#"{"error":"rate_limited","retryAfterSec":60}"#, false),
+            ("502 Bad Gateway", "<html>", false),
+        ];
+        for (status, body, done) in cases {
+            let (base, _seen) = serve_once(answer(status, body));
+            let out = upload_fold(&crate::sync::build_client(), &base, "tok", &up).await;
+            assert_eq!(matches!(out, UploadOutcome::Done { .. }), done, "{status} {body}");
+        }
+        // Nobody listening at all: retried.
+        let out = upload_fold(&crate::sync::build_client(), "http://127.0.0.1:9", "tok", &up).await;
+        assert!(matches!(out, UploadOutcome::Retry(_)));
+    }
+
+    #[tokio::test]
+    async fn an_unlinked_account_is_told_what_to_do() {
+        let up = parse_forever_upload(REAL).unwrap().unwrap();
+        let (base, _seen) = serve_once(answer("200 OK", r#"{"status":"quarantined","market":"m","items":1,"dropped":0,"reason":"unlinked"}"#));
+        let UploadOutcome::Done { note, .. } = upload_fold(&crate::sync::build_client(), &base, "tok", &up).await else { panic!() };
+        assert_eq!(note.as_deref(), Some("Link Battle.net on goldcap.gg for your scans to count in public prices"));
+    }
+
+    #[test]
+    fn state_round_trips_and_a_missing_or_broken_file_is_empty() {
+        let dir = std::env::temp_dir().join(format!("goldcap-forever-state-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join(STATE_FILE_NAME);
+        assert_eq!(ForeverState::load_from(&path), ForeverState::default());
+        let mut s = ForeverState::default();
+        s.sent.insert("/x/GoldCap.lua".into(), 1790464249);
+        s.installs.entry("/x".into()).or_default().market = Some("us-beta-classic-beta-pve-2-horde".into());
+        s.save_to(&path).unwrap();
+        assert_eq!(ForeverState::load_from(&path), s);
+        std::fs::write(&path, "{nope").unwrap();
+        assert_eq!(ForeverState::load_from(&path), ForeverState::default());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
