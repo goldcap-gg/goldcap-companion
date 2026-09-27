@@ -98,6 +98,10 @@ pub async fn run_loop(
             .into_iter()
             .filter_map(|root| build_watcher(root, event_tx.clone(), &logger))
             .collect();
+        // Each watcher above holds its own clone; this original must go too, or
+        // `event_rx.recv()` never sees the channel close when every watch failed (or there was
+        // nothing to watch at all), and the retry-on-next-config-save path below never fires.
+        drop(event_tx);
 
         let mut debounce = Debouncer::default();
         loop {
@@ -294,4 +298,59 @@ mod tests {
         assert_eq!(account_roots(&config), vec![root.join("_retail_").join("WTF").join("Account")]);
         std::fs::remove_dir_all(&root).ok();
     }
+
+    // I2: before this fix, `event_tx` stayed alive in `run_loop` after the watchers were built
+    // (each watcher only held a clone), so a watch that failed at startup (WTF\Account not
+    // created yet, a fresh WoW install) never made `event_rx.recv()` return None — the
+    // park-until-config-change retry below it never ran, and only a WoW *path* change (never a
+    // plain settings save) rebuilt the watcher. 1.13.0 retried on any config save.
+    #[tokio::test]
+    async fn a_failed_watch_rebuilds_on_the_next_config_save() {
+        let dir = std::env::temp_dir().join(format!("goldcap-watcher-retry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // WTF/Account does not exist yet under this path: the first watch attempt must fail.
+        let retail = dir.join("_retail_");
+        let config = Config {
+            wow_retail_path: retail.to_string_lossy().into_owned(),
+            ..Config::default()
+        };
+
+        let logger_dir = dir.join("log");
+        std::fs::create_dir_all(&logger_dir).unwrap();
+        let logger = Arc::new(Logger::new(&logger_dir).unwrap());
+
+        let (config_tx, config_rx) = watch::channel(config);
+        let (trigger_tx, mut trigger_rx) = mpsc::channel(4);
+
+        let handle = tokio::spawn(run_loop(config_rx, trigger_tx, logger));
+
+        // Give the failed watch attempt time to run and park.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Now the path exists, so a retry would succeed — but nothing retries it yet.
+        let account_root = retail.join("WTF").join("Account");
+        std::fs::create_dir_all(&account_root).unwrap();
+
+        // A settings save that does not touch the WoW path at all — exactly what pairing or an
+        // interval change looks like. This alone must be enough to rebuild the watcher.
+        config_tx.send_modify(|c| c.interval_minutes = 45);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let sv = account_root.join("A").join("SavedVariables");
+        std::fs::create_dir_all(&sv).unwrap();
+        std::fs::write(sv.join("GoldCap.lua"), "GoldCapDB = {}").unwrap();
+
+        let got = tokio::time::timeout(Duration::from_secs(10), trigger_rx.recv()).await;
+
+        handle.abort();
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(
+            got.is_ok() && got.unwrap().is_some(),
+            "no trigger within 10s: the watcher never rebuilt after the failed initial watch"
+        );
+    }
 }
+

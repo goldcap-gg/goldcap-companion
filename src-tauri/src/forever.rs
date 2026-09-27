@@ -50,6 +50,11 @@ pub fn read_passport(source: &str) -> Option<Passport> {
 /// them alone.
 pub const MAX_ITEMS: usize = 20_000;
 pub const MAX_ITEM_CHARS: usize = 256;
+/// The whole request body, uncompressed — a fold past this is refused whole by the server
+/// (413). Checked locally before sending so a slow uplink's 20 s request timeout cannot turn a
+/// body this big into an endless Retry loop that resends it every tick (fix round 1 M5,
+/// mirroring FOREVER_SCAN_MAX_BYTES in packages/api-contract).
+pub const MAX_UPLOAD_BYTES: usize = 2 * 1024 * 1024;
 const SOURCES: [&str; 3] = ["replicate", "replicate+browse", "browse"];
 const FACTIONS: [&str; 3] = ["Horde", "Alliance", "Neutral"];
 
@@ -91,10 +96,15 @@ pub struct ForeverUpload {
     pub fold: ForeverFold,
 }
 
+/// Postgres `int4` max: the server drops an id above this as unknown (it can never exist in
+/// the catalogue, whose lookup array is also int4) rather than let the query crash — mirrored
+/// here so the companion drops the same items locally instead of sending them for nothing.
+const ITEM_MAX_ID: i64 = 2_147_483_647;
+
 fn item_id(key: &Value) -> Option<i64> {
     match key {
-        Value::Integer(i) if (1..=9_999_999_999).contains(i) => Some(*i),
-        Value::Number(n) if n.fract() == 0.0 && *n >= 1.0 && *n <= 9_999_999_999.0 => Some(*n as i64),
+        Value::Integer(i) if (1..=ITEM_MAX_ID).contains(i) => Some(*i),
+        Value::Number(n) if n.fract() == 0.0 && *n >= 1.0 && *n <= ITEM_MAX_ID as f64 => Some(*n as i64),
         _ => None,
     }
 }
@@ -112,9 +122,23 @@ fn read_items(fold: &Table) -> BTreeMap<String, String> {
     items
 }
 
+/// A fold timestamped further than this from now is a forged or corrupt `at` — the server
+/// refuses it outright (400) rather than accept and clamp it, so the companion never sends one
+/// (fix round 1 M5, mirroring `FOREVER_FOLD_MAX_CLOCK_SKEW_SEC` in packages/api-contract).
+const FOLD_MAX_CLOCK_SKEW_SECS: i64 = 10 * 365 * 24 * 3600;
+
+/// The server's `NO_CONTROL_CHARS_RE`: a bare C0 control character or DEL anywhere in the
+/// string. Realm and ruleset are stored, logged and turned into a URL slug, and one of these
+/// used to reach an INSERT and crash it server-side.
+fn has_control_char(s: &str) -> bool {
+    s.chars().any(|c| (c as u32) <= 0x1f || c as u32 == 0x7f)
+}
+
 /// The Forever upload one SavedVariables file holds, or None: no Forever passport, no fold,
-/// or a fold the site would refuse whole (no items, an unknown source, no realm). A courier:
-/// the items go as the addon wrote them, and the site checks their grammar.
+/// or a fold the site would refuse whole (no items, an unknown source, no realm, a corrupt or
+/// out-of-range `at`). A courier: the items go as the addon wrote them, and the site checks
+/// their grammar; a `ruleset` with a control character is dropped alone rather than take the
+/// whole fold down with it, exactly as `faction` already is.
 pub fn parse_forever_upload(source: &str) -> Result<Option<ForeverUpload>, String> {
     let lua = Lua::new_with(StdLib::NONE, LuaOptions::default()).map_err(|e| e.to_string())?;
     lua.load(source).exec().map_err(|e| e.to_string())?;
@@ -147,7 +171,17 @@ pub fn parse_forever_upload(source: &str) -> Result<Option<ForeverUpload>, Strin
         return Ok(None);
     };
     let items = read_items(&f);
-    if items.is_empty() || items.len() > MAX_ITEMS || !SOURCES.contains(&source.as_str()) || realm.is_empty() || realm.chars().count() > 64 {
+    // `at` mirrors the server's own bounds: positive, and no more than ten years from now — a
+    // NaN or an out-of-range Lua number saturates through `opt_int`'s `as i64` cast to a value
+    // far outside this window anyway, so no separate finiteness check is needed.
+    if items.is_empty()
+        || items.len() > MAX_ITEMS
+        || !SOURCES.contains(&source.as_str())
+        || realm.is_empty()
+        || realm.chars().count() > 64
+        || at <= 0
+        || (at - crate::luafile::now_unix()).abs() > FOLD_MAX_CLOCK_SKEW_SECS
+    {
         return Ok(None);
     }
     Ok(Some(ForeverUpload {
@@ -162,7 +196,9 @@ pub fn parse_forever_upload(source: &str) -> Result<Option<ForeverUpload>, Strin
             region,
             realm,
             faction: opt_string(&f, "faction").filter(|x| FACTIONS.contains(&x.as_str())),
-            ruleset: opt_string(&f, "ruleset").map(|r| r.trim().to_string()).filter(|r| !r.is_empty() && r.len() <= 32),
+            ruleset: opt_string(&f, "ruleset")
+                .map(|r| r.trim().to_string())
+                .filter(|r| !r.is_empty() && r.chars().count() <= 32 && !has_control_char(r)),
             build: fold_build,
             interface: fold_interface,
             items,
@@ -176,9 +212,17 @@ pub const STATE_FILE_NAME: &str = "forever.json";
 #[derive(Debug, Clone, PartialEq)]
 pub enum UploadOutcome {
     /// The site has had its say about this fold; it is never sent again (Decision E5).
-    /// `market`: the market the fold was filed under, when the site named one.
+    /// `market`: the market the fold was filed under — only ever set from an `accepted` or
+    /// `duplicate` answer (fix round 1 M7). E6 wants the latest *accepted* fold's market; a
+    /// `quarantined` or `rejected` answer can name a market that is not this install's own (a
+    /// stale fold from another character's realm), and must not switch it.
     /// `note`: what the Status screen should tell the player, when anything.
     Done { market: Option<String>, note: Option<String> },
+    /// The token itself was refused (401): nothing decided about this fold, so it is retried
+    /// next tick like any other unresolved answer — but distinct from `Retry` so the caller can
+    /// stop telling the addon this install uploads until a later attempt actually succeeds
+    /// (fix round 1 M8).
+    Unauthorized,
     /// Nothing decided: the next tick sends it again.
     Retry(String),
 }
@@ -209,14 +253,22 @@ pub async fn upload_fold(client: &reqwest::Client, base: &str, token: &str, up: 
     };
     let code = res.status().as_u16();
     let body: serde_json::Value = res.json().await.unwrap_or(serde_json::Value::Null);
-    let market = body["market"].as_str().map(str::to_string);
-    let status = body["status"].as_str().unwrap_or("");
+    let status = body["status"].as_str();
+    let market = status
+        .filter(|s| matches!(*s, "accepted" | "duplicate"))
+        .and_then(|_| body["market"].as_str())
+        .map(str::to_string);
     match code {
-        200 | 422 => UploadOutcome::Done { market, note: note_for(status, body["reason"].as_str()) },
+        // A captive portal or a proxy's own error page can answer 200 with a body that carries
+        // no `status` at all — that is not the site having its say, so the fold is retried
+        // rather than silently marked sent and lost (fix round 1 M4).
+        200 if status.is_none() => UploadOutcome::Retry("200 without a status".into()),
+        200 | 422 => UploadOutcome::Done { market, note: note_for(status.unwrap_or(""), body["reason"].as_str()) },
         400 | 409 | 413 => UploadOutcome::Done {
             market: None,
             note: Some(format!("goldcap.gg refused the last scan ({})", body["error"].as_str().unwrap_or("unknown"))),
         },
+        401 => UploadOutcome::Unauthorized,
         _ => UploadOutcome::Retry(format!("status {code}")),
     }
 }
@@ -230,6 +282,10 @@ pub struct InstallState {
     pub note: Option<String>,
     pub crowd_items: Option<u32>,
     pub crowd_ts: Option<i64>,
+    /// The last upload attempt got a 401: the token is no longer good, so `AppData.lua` must
+    /// say `foreverUpload = false` until a fresh upload actually succeeds — the addon's "shared
+    /// on your next /reload" line must not lie about a revoked token (fix round 1 M8).
+    pub unauthorized: bool,
 }
 
 /// One row of the Status screen's game list.
@@ -261,11 +317,15 @@ impl ForeverState {
             .unwrap_or_default()
     }
 
+    /// Atomic (temp + rename): `get_status` reads this file every 5 s, so a torn write would
+    /// flash the games list empty, and a crash mid-write would lose `sent`, re-sending every
+    /// current fold once (fix round 1 M1).
     pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(path, serde_json::to_string_pretty(self).map_err(std::io::Error::from)?)
+        let text = serde_json::to_string_pretty(self).map_err(std::io::Error::from)?;
+        crate::luafile::write_atomic(path, &text)
     }
 }
 
@@ -383,6 +443,58 @@ pub async fn sync_forever_at(
     }
 }
 
+type ParsedCache = std::collections::HashMap<String, (i64, u64, Option<ForeverUpload>)>;
+
+/// (SavedVariables path → (mtime, byte length, the parse result)), for the life of the
+/// process. Shared by every install: paths are absolute, so two installs never collide.
+fn parsed_cache() -> &'static std::sync::Mutex<ParsedCache> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<ParsedCache>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn file_stamp(path: &Path) -> Option<(i64, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    Some((mtime, meta.len()))
+}
+
+/// `parse_forever_upload`, cached by the file's (mtime, length): a tick where nothing on disk
+/// changed since the fold was last looked at parses nothing at all — no read, no Lua interpreter
+/// (fix round 1 M2). A file that cannot be stat'd or read right now is never cached, so the next
+/// tick retries it; a file that parses to "no valid fold" (an unknown shape) IS cached as such,
+/// so a genuinely bad file is not re-parsed every tick either.
+fn parse_forever_upload_cached(file: &Path, logger: &crate::logging::Logger) -> Option<ForeverUpload> {
+    let stamp = file_stamp(file)?;
+    let file_key = file.to_string_lossy().into_owned();
+    let cached = parsed_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&file_key)
+        .filter(|(m, l, _)| (*m, *l) == stamp)
+        .map(|(_, _, up)| up.clone());
+    if let Some(up) = cached {
+        return up;
+    }
+    let src = std::fs::read_to_string(file).ok()?;
+    let parsed = match parse_forever_upload(&src) {
+        Ok(v) => v,
+        Err(e) => {
+            logger.error(&format!("{}: not readable yet ({e})", file.display()));
+            return None;
+        }
+    };
+    parsed_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(file_key, (stamp.0, stamp.1, parsed.clone()));
+    parsed
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn sync_forever_at_root(
     client: &reqwest::Client,
@@ -401,24 +513,43 @@ pub async fn sync_forever_at_root(
     let games = crate::games::discover(root, retail_dir.as_deref());
     let token = config.companion_token.trim().to_string();
 
+    // Never had a Forever install, and none exists now: behave exactly like 1.13.0 — no
+    // forever.json is ever created, and the Status screen has no games list to show
+    // (fix round 1 I1). A machine that once had one keeps its history even if that install is
+    // gone this tick, same as retail's own stage rows keep their last-good state.
+    if !games.iter().any(|g| g.kind == GameKind::Forever) && state.installs.is_empty() {
+        return state;
+    }
+
     for game in games.iter().filter(|g| g.kind == GameKind::Forever) {
         let key = game.dir.to_string_lossy().into_owned();
+        // The max Forever interface seen, not whichever file happened to parse last (read_dir
+        // order is arbitrary) — otherwise a second, older account can regress the TOC and make
+        // the Forever client treat GoldCap_AppData as out of date (fix round 1 M3).
         let mut interface = game.interface.unwrap_or(FOREVER_MIN_INTERFACE + 1);
         for file in &game.saved_vars {
-            let Ok(src) = std::fs::read_to_string(file) else { continue };
-            let up = match parse_forever_upload(&src) {
-                Ok(Some(up)) => up,
-                Ok(None) => continue,
-                Err(e) => {
-                    logger.error(&format!("{}: not readable yet ({e})", file.display()));
-                    continue;
-                }
-            };
-            interface = up.client.interface;
+            let Some(up) = parse_forever_upload_cached(file, logger) else { continue };
+            interface = interface.max(up.client.interface);
             let entry = state.installs.entry(key.clone()).or_default();
             entry.last_scan_at = entry.last_scan_at.max(Some(up.fold.at));
             let file_key = file.to_string_lossy().into_owned();
             if token.is_empty() || state.sent.get(&file_key) == Some(&up.fold.at) {
+                continue;
+            }
+            // The server refuses a body over MAX_UPLOAD_BYTES whole (413) anyway, but on a slow
+            // uplink the client's own request timeout fires first — a Retry, which would resend
+            // this same oversized body every tick forever. Check first and mark it done locally
+            // instead (fix round 1 M5).
+            let body_len = serde_json::to_vec(&up).map(|b| b.len()).unwrap_or(0);
+            if body_len > MAX_UPLOAD_BYTES {
+                logger.error(&format!(
+                    "forever scan from {}: {body_len} bytes over the {} MiB cap — not sent",
+                    game.folder,
+                    MAX_UPLOAD_BYTES / (1024 * 1024)
+                ));
+                state.sent.insert(file_key, up.fold.at);
+                let entry = state.installs.entry(key.clone()).or_default();
+                entry.note = Some("The last scan was too large to send".into());
                 continue;
             }
             match upload_fold(client, base, &token, &up).await {
@@ -428,9 +559,15 @@ pub async fn sync_forever_at_root(
                     let entry = state.installs.entry(key.clone()).or_default();
                     entry.last_sent_at = Some(now);
                     entry.note = note;
+                    entry.unauthorized = false;
                     if market.is_some() {
                         entry.market = market;
                     }
+                }
+                UploadOutcome::Unauthorized => {
+                    logger.error(&format!("forever scan from {}: token refused (401)", game.folder));
+                    let entry = state.installs.entry(key.clone()).or_default();
+                    entry.unauthorized = true;
                 }
                 UploadOutcome::Retry(why) => logger.error(&format!("forever scan from {}: will retry ({why})", game.folder)),
             }
@@ -443,11 +580,14 @@ pub async fn sync_forever_at_root(
         let entry = state.installs.entry(key.clone()).or_default();
         entry.crowd_items = crowd.as_ref().map(|(_, s)| s.items);
         entry.crowd_ts = crowd.as_ref().map(|(_, s)| s.ts);
+        // A revoked token that 401s every tick must not keep promising "shared on your next
+        // /reload" — the addon only prints that while `foreverUpload == true` (fix round 1 M8).
+        let can_upload = !token.is_empty() && !entry.unauthorized;
         if let Err(e) = crate::luafile::write_forever_app_data(
             &crate::luafile::addon_dir(&game.dir),
             interface,
             crowd.as_ref().map(|(body, _)| body.as_str()),
-            !token.is_empty(),
+            can_upload,
             now,
         ) {
             logger.error(&format!("forever prices for {}: could not write ({e})", game.folder));
@@ -543,6 +683,58 @@ mod tests {
         assert_eq!(up.fold.faction, None);
     }
 
+    // fix round 1 M5: mirror the server's own bounds, so the companion never sends what it
+    // would refuse anyway — `at` non-positive or more than ten years from now.
+    #[test]
+    fn a_fold_timestamped_far_from_now_is_not_sent() {
+        let with = |fold: &str| format!(r#"GoldCapDB = {{ client = {{ interface = 16001, build = "1.60.1.70009", regionId = 90 }}, foreverScan = {{ fold = {{ {fold} }} }} }}"#);
+        let base = r#"v = 2, source = "replicate", itemCount = 1, region = 90, realm = "R", build = "1.60.1.70009", interface = 16001, items = { [1] = "1,1,1,;0x1" }"#;
+        let now = crate::luafile::now_unix();
+        let ten_years = 10 * 365 * 24 * 3600;
+        assert_eq!(parse_forever_upload(&with(&format!("{base}, at = {}", now + ten_years + 3600))).unwrap(), None, "forged clock, far future");
+        assert_eq!(parse_forever_upload(&with(&format!("{base}, at = 0"))).unwrap(), None, "non-positive at");
+        assert!(parse_forever_upload(&with(&format!("{base}, at = {now}"))).unwrap().is_some(), "within the window");
+    }
+
+    // fix round 1 M5: an id above Postgres int4 max can never exist in the catalogue — the
+    // server drops it as unknown rather than let the lookup query crash, so the companion drops
+    // it locally too, alone, the same as an over-long item string.
+    #[test]
+    fn an_item_id_past_postgres_int4_is_dropped_not_the_whole_fold() {
+        let with = |fold: &str| format!(r#"GoldCapDB = {{ client = {{ interface = 16001, build = "1.60.1.70009", regionId = 90 }}, foreverScan = {{ fold = {{ {fold} }} }} }}"#);
+        let base = r#"v = 2, at = 1790464249, source = "replicate", itemCount = 1, region = 90, realm = "R", build = "1.60.1.70009", interface = 16001"#;
+        let up = parse_forever_upload(&with(&format!(
+            "{base}, items = {{ [1] = \"1,1,1,;0x1\", [2147483648] = \"1,1,1,;0x1\" }}"
+        )))
+        .unwrap()
+        .unwrap();
+        assert_eq!(up.fold.items.keys().collect::<Vec<_>>(), vec!["1"]);
+    }
+
+    // fix round 1 M5: a control character in `ruleset` used to reach an INSERT and crash it
+    // server-side (400 on the whole fold); dropping just the ruleset keeps the fold sendable.
+    #[test]
+    fn a_ruleset_with_a_control_character_is_dropped_alone() {
+        let with = |fold: &str| format!(r#"GoldCapDB = {{ client = {{ interface = 16001, build = "1.60.1.70009", regionId = 90 }}, foreverScan = {{ fold = {{ {fold} }} }} }}"#);
+        let base = r#"v = 2, at = 1790464249, source = "replicate", itemCount = 1, region = 90, realm = "R", build = "1.60.1.70009", interface = 16001, items = { [1] = "1,1,1,;0x1" }"#;
+        let up = parse_forever_upload(&with(&format!("{base}, ruleset = \"a\\1b\""))).unwrap().unwrap();
+        assert_eq!(up.fold.ruleset, None);
+    }
+
+    // fix round 1 M5: the server counts `ruleset`'s length in characters, not bytes — a byte
+    // check would drop a valid non-ASCII ruleset the server would accept.
+    #[test]
+    fn ruleset_length_is_counted_in_characters_not_bytes() {
+        let with = |fold: &str| format!(r#"GoldCapDB = {{ client = {{ interface = 16001, build = "1.60.1.70009", regionId = 90 }}, foreverScan = {{ fold = {{ {fold} }} }} }}"#);
+        let base = r#"v = 2, at = 1790464249, source = "replicate", itemCount = 1, region = 90, realm = "R", build = "1.60.1.70009", interface = 16001, items = { [1] = "1,1,1,;0x1" }"#;
+        // 32 two-byte Cyrillic characters: 64 bytes in UTF-8, but 32 characters.
+        let ruleset = "ы".repeat(32);
+        assert_eq!(ruleset.chars().count(), 32);
+        assert_eq!(ruleset.len(), 64);
+        let up = parse_forever_upload(&with(&format!("{base}, ruleset = \"{ruleset}\""))).unwrap().unwrap();
+        assert_eq!(up.fold.ruleset.as_deref(), Some(ruleset.as_str()));
+    }
+
     /// One canned HTTP answer on a local port; hands back the base URL and the raw request.
     fn serve_once(response: String) -> (String, std::sync::mpsc::Receiver<String>) {
         use std::io::{Read, Write};
@@ -621,6 +813,95 @@ mod tests {
         let (base, _seen) = serve_once(answer("200 OK", r#"{"status":"quarantined","market":"m","items":1,"dropped":0,"reason":"unlinked"}"#));
         let UploadOutcome::Done { note, .. } = upload_fold(&crate::sync::build_client(), &base, "tok", &up).await else { panic!() };
         assert_eq!(note.as_deref(), Some("Link Battle.net on goldcap.gg for your scans to count in public prices"));
+    }
+
+    // fix round 1 M4: a captive portal or a proxy's own error page can answer 200 with no
+    // `status` field at all — that is not the site having its say, so the fold must be retried.
+    #[tokio::test]
+    async fn a_200_without_a_json_status_is_retried_not_sent() {
+        let up = parse_forever_upload(REAL).unwrap().unwrap();
+        let (base, _seen) = serve_once(answer("200 OK", r#"{"ok":true}"#));
+        let out = upload_fold(&crate::sync::build_client(), &base, "tok", &up).await;
+        assert!(matches!(out, UploadOutcome::Retry(_)), "{out:?}");
+    }
+
+    // fix round 1 M7: only accepted/duplicate name the install's market — E6 wants the latest
+    // *accepted* fold's market, and a quarantined or rejected answer can name another one (a
+    // stale fold from another character's realm) that must not switch it.
+    #[tokio::test]
+    async fn the_market_is_taken_only_from_accepted_or_duplicate_answers() {
+        let up = parse_forever_upload(REAL).unwrap().unwrap();
+        let (base, _seen) = serve_once(answer("200 OK", r#"{"status":"quarantined","market":"m","items":1,"dropped":0,"reason":"unlinked"}"#));
+        let UploadOutcome::Done { market, .. } = upload_fold(&crate::sync::build_client(), &base, "tok", &up).await else { panic!() };
+        assert_eq!(market, None);
+
+        let (base, _seen) = serve_once(answer("200 OK", r#"{"status":"duplicate","market":"m","items":1,"dropped":0}"#));
+        let UploadOutcome::Done { market, .. } = upload_fold(&crate::sync::build_client(), &base, "tok", &up).await else { panic!() };
+        assert_eq!(market.as_deref(), Some("m"));
+    }
+
+    // fix round 1 M8: distinct from a generic Retry, so the caller can stop promising "shared on
+    // your next /reload" while the token itself is bad.
+    #[tokio::test]
+    async fn a_401_is_unauthorized_not_a_generic_retry() {
+        let up = parse_forever_upload(REAL).unwrap().unwrap();
+        let (base, _seen) = serve_once(answer("401 Unauthorized", r#"{"error":"unauthorized"}"#));
+        let out = upload_fold(&crate::sync::build_client(), &base, "tok", &up).await;
+        assert_eq!(out, UploadOutcome::Unauthorized);
+    }
+
+    // fix round 1 M8, end to end: a revoked token 401s, and until a later attempt actually
+    // succeeds the Forever install's AppData must not promise sharing that is not happening.
+    #[tokio::test]
+    async fn foreverupload_stays_false_after_a_401_until_the_next_success() {
+        let root = machine("401-then-ok");
+        put(&root, "_classic_beta_", REAL);
+        let config = crate::config::Config { companion_token: "tok".into(), ..crate::config::Config::default() };
+        let logger = crate::logging::Logger::new(&root.join("logs")).unwrap();
+        let store = std::sync::Mutex::new(std::collections::HashMap::new());
+        let state_path = root.join("s.json");
+
+        let (base, _seen) = serve_once(answer("401 Unauthorized", r#"{"error":"unauthorized"}"#));
+        let state = sync_forever_at_root(&crate::sync::build_client(), &base, &root, &config, &logger, &state_path, &store, 1).await;
+        assert!(state.installs.values().next().unwrap().unauthorized);
+        let lua = std::fs::read_to_string(root.join("_classic_beta_/Interface/AddOns/GoldCap_AppData/AppData.lua")).unwrap();
+        assert!(!lua.contains("foreverUpload"), "{lua}");
+
+        let (base, _seen) = serve_once(answer("200 OK", r#"{"status":"accepted","market":"m","items":1974,"dropped":0}"#));
+        let state = sync_forever_at_root(&crate::sync::build_client(), &base, &root, &config, &logger, &state_path, &store, 2).await;
+        assert!(!state.installs.values().next().unwrap().unauthorized);
+        let lua = std::fs::read_to_string(root.join("_classic_beta_/Interface/AddOns/GoldCap_AppData/AppData.lua")).unwrap();
+        assert!(lua.contains("foreverUpload = true"), "{lua}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // fix round 1 M5: the server refuses a body over MAX_UPLOAD_BYTES whole (413) anyway, but on
+    // a slow uplink the client's own request timeout fires first, turning it into an endless
+    // Retry. The pre-check must catch it before ever sending.
+    #[tokio::test]
+    async fn a_body_over_two_megabytes_is_marked_done_without_being_sent() {
+        let root = machine("oversized");
+        let mut entries = String::new();
+        for i in 1..=9000 {
+            entries.push_str(&format!("[{i}] = \"{}\",", "1".repeat(MAX_ITEM_CHARS)));
+        }
+        let lua = format!(
+            r#"GoldCapDB = {{ client = {{ interface = 16001, build = "1.60.1.70009", regionId = 90 }}, foreverScan = {{ fold = {{ v = 2, at = 1790464249, source = "replicate", itemCount = 9000, region = 90, realm = "R", build = "1.60.1.70009", interface = 16001, items = {{ {entries} }} }} }} }}"#
+        );
+        put(&root, "_classic_beta_", &lua);
+        let config = crate::config::Config { companion_token: "tok".into(), ..crate::config::Config::default() };
+        let logger = crate::logging::Logger::new(&root.join("logs")).unwrap();
+        let store = std::sync::Mutex::new(std::collections::HashMap::new());
+        let state_path = root.join("s.json");
+        // Port 9 answers nothing at all — if the pre-check did not trip, this would be a Retry.
+        let state = sync_forever_at_root(&crate::sync::build_client(), "http://127.0.0.1:9", &root, &config, &logger, &state_path, &store, 1).await;
+        assert_eq!(state.sent.len(), 1, "an oversized fold must be marked done locally, never endlessly retried");
+        assert_eq!(
+            state.installs.values().next().unwrap().note.as_deref(),
+            Some("The last scan was too large to send")
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -709,9 +990,10 @@ mod tests {
         // Port 9 answers nothing: any request would be a Retry logged; none must be made at all.
         let state = sync_forever_at(&crate::sync::build_client(), "http://127.0.0.1:9", &config, &logger, &root.join("state").join(STATE_FILE_NAME), &store, 1_790_000_000).await;
         assert_eq!(state.sent.len(), 0);
-        assert_eq!(state.games.iter().map(|g| (g.folder.as_str(), g.game)).collect::<Vec<_>>(), vec![("_retail_", crate::games::GameKind::Retail)]);
-        let after: Vec<String> = files_under(&root).into_iter().filter(|p| !p.contains("/logs/") && !p.contains("/state/")).collect();
-        assert_eq!(after, before, "nothing new under the WoW root");
+        // No Forever install ever seen: no games list either, exactly like 1.13.0 (fix round 1 I1).
+        assert!(state.games.is_empty(), "{:?}", state.games);
+        let after: Vec<String> = files_under(&root).into_iter().filter(|p| !p.contains("/logs/")).collect();
+        assert_eq!(after, before, "nothing new under the WoW root, including no forever.json");
         assert!(!root.join("_retail_/Interface/AddOns/GoldCap_AppData").exists());
         std::fs::remove_dir_all(&root).ok();
     }

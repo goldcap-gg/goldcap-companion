@@ -100,7 +100,10 @@ pub fn discover(root: &Path, retail_dir: Option<&Path>) -> Vec<GameInstall> {
                 .filter_map(|p| std::fs::read_to_string(p).ok())
                 .filter_map(|src| read_passport(&src).map(|p| p.interface))
                 .collect();
-            let forever = interfaces.iter().copied().find(|i| is_forever_interface(*i));
+            // The max, not the first found: `read_dir` order is arbitrary, and taking whichever
+            // account happened to come first could report an older interface than the install
+            // actually has (fix round 1 M3).
+            let forever = interfaces.iter().copied().filter(|i| is_forever_interface(*i)).max();
             let kind = if forever.is_some() { GameKind::Forever } else { GameKind::Other };
             Some(GameInstall { dir, folder, kind, interface: forever.or(interfaces.first().copied()), saved_vars })
         })
@@ -198,5 +201,18 @@ mod tests {
         for no in ["_", "__", "retail", "_retail", "Data", "Interface"] {
             assert!(!is_game_folder(no), "{no}");
         }
+    }
+
+    // fix round 1 M3: read_dir order across two accounts is arbitrary, so whichever file parses
+    // last must not decide the TOC's interface — the higher one, a later Forever patch, must win
+    // regardless of order.
+    #[test]
+    fn the_forever_interface_is_the_max_seen_across_accounts() {
+        let r = root("interfaces");
+        saved(&r, "_classic_beta_", "A", r#"GoldCapDB = { client = { interface = 16001, build = "1.60.1.70009" } }"#);
+        saved(&r, "_classic_beta_", "B", r#"GoldCapDB = { client = { interface = 16002, build = "1.61.0.70100" } }"#);
+        let games = discover(&r, None);
+        assert_eq!(games[0].interface, Some(16002));
+        fs::remove_dir_all(&r).ok();
     }
 }
