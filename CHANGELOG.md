@@ -4,7 +4,7 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
-## 1.14.0 (unreleased)
+## 1.14.0 (2026-09-28)
 
 - WoW: Forever: the Companion now finds your Forever install next to retail.
   After each /reload it sends your Forever auction house scan to goldcap.gg,
