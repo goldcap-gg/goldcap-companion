@@ -173,6 +173,53 @@ pub fn remove_runs(dir: &Path) -> io::Result<()> {
     }
 }
 
+/// A WoW: Forever install's own toc for the mini-addon: the Forever client loads
+/// `<Addon>_Camelot.toc` (spec, "The client"). Never written into `_retail_`.
+// used from Task C5 on
+#[allow(dead_code)]
+pub const FOREVER_TOC_FILE_NAME: &str = "GoldCap_AppData_Camelot.toc";
+
+/// The toc, with the interface the addon's passport reported, so it follows Forever patches.
+// used from Task C5 on
+#[allow(dead_code)]
+pub fn forever_toc_contents(interface: i64) -> String {
+    format!(
+        "## Interface: {interface}\n## Title: GoldCap AppData\n## Notes: Auto-synced market data for GoldCap. File is rewritten by the GoldCap companion app.\n## LoadOnDemand: 0\nAppData.lua\n"
+    )
+}
+
+/// `GoldCap_AppData = { foreverString = '…', foreverUpload = true, writtenAt = … }`:
+/// `foreverString` — every player's prices for this install's market (GCF1), when kept;
+/// `foreverUpload` — this companion is paired and sends this install's scans (the addon says
+/// "shared on your next /reload" only then). No retail key is ever written here.
+// used from Task C5 on
+#[allow(dead_code)]
+pub fn render_forever_app_data_lua(forever_string: Option<&str>, uploads: bool, written_at: i64) -> String {
+    let mut fields = Vec::new();
+    if let Some(s) = forever_string {
+        fields.push(format!("foreverString = '{}'", escape_lua_string(s)));
+    }
+    if uploads {
+        fields.push("foreverUpload = true".to_string());
+    }
+    fields.push(format!("writtenAt = {written_at}"));
+    format!("GoldCap_AppData = {{ {} }}\n", fields.join(", "))
+}
+
+/// The Forever install's `GoldCap_AppData`: its `_Camelot.toc` (written only when it differs)
+/// and `AppData.lua` (atomic). Nothing else: no retail toc, no LedgerSummary.lua, no Runs.lua.
+// used from Task C5 on
+#[allow(dead_code)]
+pub fn write_forever_app_data(dir: &Path, interface: i64, forever_string: Option<&str>, uploads: bool, written_at: i64) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    let toc = dir.join(FOREVER_TOC_FILE_NAME);
+    let want = forever_toc_contents(interface);
+    if fs::read_to_string(&toc).ok().as_deref() != Some(want.as_str()) {
+        fs::write(&toc, &want)?;
+    }
+    write_atomic(&dir.join(LUA_FILE_NAME), &render_forever_app_data_lua(forever_string, uploads, written_at))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,5 +459,42 @@ mod tests {
                 "/Applications/World of Warcraft/_retail_/Interface/AddOns/GoldCap_AppData"
             )
         );
+    }
+
+    #[test]
+    fn a_forever_install_gets_its_own_toc_and_nothing_retail() {
+        let dir = temp_dir("forever-appdata");
+        write_forever_app_data(&dir, 16001, Some("GCF1;s;90;R;Horde;1;I:1=2=2===3=1=0"), true, 1790000000).unwrap();
+        let mut names: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names, vec!["AppData.lua".to_string(), FOREVER_TOC_FILE_NAME.to_string()]);
+        assert!(std::fs::read_to_string(dir.join(FOREVER_TOC_FILE_NAME)).unwrap().starts_with("## Interface: 16001\n"));
+        assert_eq!(
+            std::fs::read_to_string(dir.join(LUA_FILE_NAME)).unwrap(),
+            "GoldCap_AppData = { foreverString = 'GCF1;s;90;R;Horde;1;I:1=2=2===3=1=0', foreverUpload = true, writtenAt = 1790000000 }\n"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_forever_install_without_prices_or_pairing_still_says_the_companion_is_there() {
+        assert_eq!(render_forever_app_data_lua(None, false, 5), "GoldCap_AppData = { writtenAt = 5 }\n");
+        assert_eq!(render_forever_app_data_lua(None, true, 5), "GoldCap_AppData = { foreverUpload = true, writtenAt = 5 }\n");
+        // A realm with a quote survives the Lua string.
+        assert_eq!(
+            render_forever_app_data_lua(Some("GCF1;s;90;Zul'jin;-;1;I:1=2=2===3=1=0"), false, 5),
+            "GoldCap_AppData = { foreverString = 'GCF1;s;90;Zul\\'jin;-;1;I:1=2=2===3=1=0', writtenAt = 5 }\n"
+        );
+    }
+
+    #[test]
+    fn retail_appdata_is_byte_for_byte_what_it_was() {
+        // The two shapes retail has ever written — this plan must not move a byte of either.
+        assert_eq!(render_app_data_lua("GCS1;eu;x;1;I:1=2", None, 7), "GoldCap_AppData = { importString = 'GCS1;eu;x;1;I:1=2', writtenAt = 7 }\n");
+        assert_eq!(
+            render_app_data_lua("GCS1;eu;x;1;I:1=2", Some("GCM1;eu;1;I:1=2"), 7),
+            "GoldCap_AppData = { importString = 'GCS1;eu;x;1;I:1=2', regionString = 'GCM1;eu;1;I:1=2', writtenAt = 7 }\n"
+        );
+        assert!(!TOC_CONTENTS.contains("16001"), "retail's toc is retail's");
     }
 }

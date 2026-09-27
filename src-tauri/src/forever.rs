@@ -319,6 +319,112 @@ impl ForeverState {
     }
 }
 
+/// Older than this by its own scan time, and the addon's tooltip would print a days-old price as
+/// "AH value": the site sends nothing older (plan 2a D15), and the companion writes nothing older.
+// used from Task C5 on
+#[allow(dead_code)]
+pub const CROWD_MAX_AGE_SECS: i64 = 72 * 3600;
+/// The site builds at most 2,000,000 characters (plan 2a Task 9).
+// used from Task C5 on
+#[allow(dead_code)]
+pub const CROWD_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+// used from Task C5 on
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CrowdSummary {
+    pub items: u32,
+    pub ts: i64,
+}
+
+// used from Task C5 on
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct KeptCrowd {
+    pub slug: String,
+    pub body: String,
+    pub etag: Option<String>,
+    pub summary: CrowdSummary,
+}
+
+/// `GCF1;<slug>;<regionId>;<realm>;<faction>;<ts>;I:…` for exactly this market, with items.
+// used from Task C5 on
+#[allow(dead_code)]
+pub fn summarize_gcf1(body: &str, slug: &str) -> Result<CrowdSummary, String> {
+    if body.len() > CROWD_MAX_BYTES {
+        return Err("Forever prices too large".into());
+    }
+    let rest = body
+        .strip_prefix(&format!("GCF1;{slug};"))
+        .ok_or_else(|| format!("not the Forever prices of {slug}"))?;
+    let fields: Vec<&str> = rest.splitn(5, ';').collect();
+    let [_, _, _, ts, sections] = fields[..] else { return Err("Forever prices have no header".into()) };
+    let ts: i64 = ts.parse().map_err(|_| "Forever prices have no time".to_string())?;
+    let items = sections
+        .split(';')
+        .find_map(|s| s.strip_prefix("I:"))
+        .map(|t| if t.is_empty() { 0 } else { t.split(',').count() as u32 })
+        .unwrap_or(0);
+    if items == 0 {
+        return Err("Forever prices carried no items".into());
+    }
+    Ok(CrowdSummary { items, ts })
+}
+
+/// Kept Forever payloads, by install dir, for the life of the process.
+// used from Task C5 on
+#[allow(dead_code)]
+pub fn kept_crowd_store() -> &'static std::sync::Mutex<std::collections::HashMap<String, KeptCrowd>> {
+    static KEPT: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, KeptCrowd>>> = std::sync::OnceLock::new();
+    KEPT.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// One install's prices-back leg: revalidate or fetch `GET {base}/v1/forever/addon-data?market=`,
+/// keep the last good body, and hand back the body to write with its summary — or None when
+/// nothing is kept, or what is kept is older than CROWD_MAX_AGE_SECS. Never an error: a failure
+/// is a log line.
+// used from Task C5 on
+#[allow(dead_code)]
+pub async fn refresh_crowd_at(
+    client: &reqwest::Client,
+    base: &str,
+    store: &std::sync::Mutex<std::collections::HashMap<String, KeptCrowd>>,
+    install_key: &str,
+    slug: &str,
+    logger: &crate::logging::Logger,
+    now: i64,
+) -> Option<(String, CrowdSummary)> {
+    let previous = store.lock().unwrap_or_else(|p| p.into_inner()).remove(install_key).filter(|k| k.slug == slug);
+    let etag = previous.as_ref().and_then(|k| k.etag.clone());
+    let request = client
+        .get(format!("{base}/v1/forever/addon-data"))
+        .query(&[("market", slug)])
+        .timeout(std::time::Duration::from_secs(60));
+    let fetched = crate::region::fetch_capped(request, etag.as_deref()).await;
+    let kept = match fetched {
+        Ok(crate::region::Fetched::Fresh { body, etag }) => match summarize_gcf1(&body, slug) {
+            Ok(summary) => Some(KeptCrowd { slug: slug.to_string(), body, etag, summary }),
+            Err(e) => {
+                logger.error(&format!("forever prices {slug}: {e}"));
+                previous
+            }
+        },
+        Ok(crate::region::Fetched::NotModified) => previous,
+        Err(e) => {
+            logger.error(&format!("forever prices {slug} failed: {e}"));
+            previous
+        }
+    };
+    let write = kept
+        .as_ref()
+        .filter(|k| now - k.summary.ts <= CROWD_MAX_AGE_SECS)
+        .map(|k| (k.body.clone(), k.summary));
+    if let Some(k) = kept {
+        store.lock().unwrap_or_else(|p| p.into_inner()).insert(install_key.to_string(), k);
+    }
+    write
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -488,5 +594,39 @@ mod tests {
         std::fs::write(&path, "{nope").unwrap();
         assert_eq!(ForeverState::load_from(&path), ForeverState::default());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_gcf1_body_is_kept_only_for_its_own_market() {
+        let body = "GCF1;us-beta-x-horde;90;Classic Beta PvE 2;Horde;1790000000;I:2589=68=70=69=79=7000=2=0,2592=255=269===2029=1=20";
+        assert_eq!(summarize_gcf1(body, "us-beta-x-horde"), Ok(CrowdSummary { items: 2, ts: 1_790_000_000 }));
+        assert!(summarize_gcf1(body, "us-beta-y-horde").is_err(), "another market");
+        assert!(summarize_gcf1("GCM1;eu;1;I:1=2", "us-beta-x-horde").is_err(), "retail's payload");
+        assert!(summarize_gcf1("GCF1;us-beta-x-horde;90;R;-;1;I:", "us-beta-x-horde").is_err(), "no items");
+        assert!(summarize_gcf1("no_data", "us-beta-x-horde").is_err());
+    }
+
+    #[tokio::test]
+    async fn prices_come_back_revalidated_and_stop_being_written_when_three_days_old() {
+        let store = std::sync::Mutex::new(std::collections::HashMap::new());
+        let logger = crate::logging::Logger::new(&std::env::temp_dir().join(format!("goldcap-forever-log-{}", std::process::id()))).unwrap();
+        let body = "GCF1;m;90;R;Horde;1790000000;I:1=2=2===3=1=0";
+        let (base, _seen) = serve_once(format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nETag: W/\"gcf1-m-1790000100\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        ));
+        let got = refresh_crowd_at(&crate::sync::build_client(), &base, &store, "/wow/_classic_beta_", "m", &logger, 1_790_000_600).await;
+        assert_eq!(got, Some((body.to_string(), CrowdSummary { items: 1, ts: 1_790_000_000 })));
+
+        let (base, seen) = serve_once("HTTP/1.1 304 Not Modified\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into());
+        let again = refresh_crowd_at(&crate::sync::build_client(), &base, &store, "/wow/_classic_beta_", "m", &logger, 1_790_000_900).await;
+        assert!(again.is_some());
+        let request = seen.recv().unwrap().to_ascii_lowercase();
+        assert!(request.contains("if-none-match: w/\"gcf1-m-1790000100\""), "{request}");
+        assert!(request.contains("market=m"));
+
+        // Three days on and the site unreachable: the kept body is no longer written.
+        let late = refresh_crowd_at(&crate::sync::build_client(), "http://127.0.0.1:9", &store, "/wow/_classic_beta_", "m", &logger, 1_790_000_000 + CROWD_MAX_AGE_SECS + 1).await;
+        assert_eq!(late, None);
     }
 }
