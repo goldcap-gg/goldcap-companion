@@ -143,7 +143,7 @@ pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// can take tens of seconds to build a realm's string after an ingest tick.
 pub(crate) const IMPORT_TIMEOUT: Duration = Duration::from_secs(60);
 /// Waits before the first and the second retry of the import string. Two entries = at most
-/// two retries, three attempts in all.
+/// two retries, three attempts in all (a timeout allows only one of them, see `retry_delay`).
 const RETRY_BACKOFF: [Duration; 2] = [Duration::from_secs(3), Duration::from_secs(10)];
 /// A server's `Retry-After` is honoured up to this long.
 const RETRY_AFTER_CAP: Duration = Duration::from_secs(30);
@@ -204,19 +204,37 @@ fn source_chain(e: &dyn std::error::Error) -> String {
 /// What went wrong with one attempt, as far as the retry policy cares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Failure {
-    /// The request never got an answer: timed out or could not connect.
-    Transport,
+    /// The connection could not be opened (refused, unreachable, DNS, TLS, or the
+    /// connect timeout). Fails fast, in at most `CONNECT_TIMEOUT`.
+    Connect,
+    /// The connection was made but the answer did not come in the request's whole time
+    /// budget. Each one costs a full budget, so it is retried less than the rest.
+    Timeout,
     Status { code: u16, retry_after: Option<Duration> },
 }
 
 /// How long to wait before the next attempt, or `None` to give up. `retries_done` is how
-/// many retries have already been made. Only a transport failure (timeout, no connection),
-/// a 5xx and a 429 are worth another try; every other status -- notably the API's 404
-/// `realm_not_found` / `no_data` -- would answer the same again.
-fn retry_delay(backoff: &[Duration], retries_done: usize, failure: Failure) -> Option<Duration> {
+/// many retries have already been made; `timed_out_at` is what `retries_done` was when
+/// the first attempt timed out, counting the attempt being judged (`None`: none has).
+///
+/// A failed connection, a 5xx and a 429 are worth two retries; every other status --
+/// notably the API's 404 `realm_not_found` / `no_data` -- would answer the same again.
+/// A timeout is worth only ONE retry, however the attempts before and after it went: once
+/// any attempt has timed out, the retry after it is the last (a site slow enough to time
+/// out once rarely recovers within seconds, and each further wait of a whole budget would
+/// hold up the Forever leg and config changes queued behind this tick).
+fn retry_delay(
+    backoff: &[Duration],
+    retries_done: usize,
+    timed_out_at: Option<usize>,
+    failure: Failure,
+) -> Option<Duration> {
+    if timed_out_at.is_some_and(|at| retries_done > at) {
+        return None;
+    }
     let base = *backoff.get(retries_done)?;
     match failure {
-        Failure::Transport => Some(base),
+        Failure::Connect | Failure::Timeout => Some(base),
         Failure::Status { code, retry_after } if code >= 500 || code == 429 => {
             Some(retry_after.map_or(base, |d| d.min(RETRY_AFTER_CAP)))
         }
@@ -230,10 +248,18 @@ fn retry_delay(backoff: &[Duration], retries_done: usize, failure: Failure) -> O
 /// or an unexpected body is a `SyncError`, never written to disk.
 ///
 /// A slow or briefly failing site is retried: up to two more attempts, after 3 s and
-/// then 10 s, on a timeout, a failed connection, a 5xx or a 429 (a `Retry-After` in
-/// seconds replaces the wait, up to 30 s). Worst case is three full attempts of
-/// `IMPORT_TIMEOUT` plus the two waits -- 3 x 60 + 3 + 10 = 193 s -- or 3 x 60 + 30 + 30 =
-/// 240 s when the site keeps sending the longest `Retry-After`.
+/// then 10 s, on a failed connection, a 5xx or a 429 (a `Retry-After` in seconds replaces
+/// the wait, up to 30 s) -- but only one more attempt once any attempt has timed out.
+///
+/// Worst case, by what the site does:
+/// - a site that only times out: 60 + 3 + 60 = 123 s (two attempts);
+/// - a dead connection: 3 x 10 (connect timeout) + 3 + 10 = 43 s;
+/// - a site that answers 5xx / 429 just under the limit each time, and never times out:
+///   3 x 60 + 3 + 10 = 193 s, or 3 x 60 + 30 + 30 = 240 s with the longest `Retry-After`
+///   (a fast 5xx costs nothing; the slow ones are the unusual case);
+/// - the worst mix, two slow 5xx / 429 answers with the longest `Retry-After` and then a
+///   timeout: 60 + 30 + 60 + 30 + 60 = 240 s, the same bound -- a timeout never adds a
+///   fourth attempt.
 pub async fn fetch_import_string(
     client: &reqwest::Client,
     region: &str,
@@ -252,13 +278,17 @@ async fn fetch_import_string_at(
     backoff: &[Duration],
 ) -> Result<String, SyncError> {
     let mut retries = 0;
+    let mut timed_out_at = None;
     loop {
         let (err, failure) =
             match attempt_import_string(client, url, region, realm, timeout).await {
                 Ok(body) => return Ok(body),
                 Err(failed) => failed,
             };
-        match failure.and_then(|f| retry_delay(backoff, retries, f)) {
+        if failure == Some(Failure::Timeout) {
+            timed_out_at.get_or_insert(retries);
+        }
+        match failure.and_then(|f| retry_delay(backoff, retries, timed_out_at, f)) {
             Some(wait) => {
                 tokio::time::sleep(wait).await;
                 retries += 1;
@@ -285,7 +315,14 @@ async fn attempt_import_string(
     timeout: Duration,
 ) -> Result<String, (SyncError, Option<Failure>)> {
     let request_failed = |e: reqwest::Error| {
-        let failure = (e.is_timeout() || e.is_connect()).then_some(Failure::Transport);
+        // A connect timeout is a failed connection (10 s), not a slow answer (a whole budget).
+        let failure = if e.is_connect() {
+            Some(Failure::Connect)
+        } else if e.is_timeout() {
+            Some(Failure::Timeout)
+        } else {
+            None
+        };
         (SyncError::Request(describe_err(&e, timeout)), failure)
     };
 
@@ -1040,29 +1077,54 @@ mod tests {
     }
 
     #[test]
-    fn a_transport_failure_is_retried_twice_after_three_then_ten_seconds() {
-        assert_eq!(retry_delay(&BACKOFF, 0, Failure::Transport), Some(Duration::from_secs(3)));
-        assert_eq!(retry_delay(&BACKOFF, 1, Failure::Transport), Some(Duration::from_secs(10)));
-        assert_eq!(retry_delay(&BACKOFF, 2, Failure::Transport), None);
+    fn a_failed_connection_is_retried_twice_after_three_then_ten_seconds() {
+        assert_eq!(retry_delay(&BACKOFF, 0, None, Failure::Connect), Some(Duration::from_secs(3)));
+        assert_eq!(retry_delay(&BACKOFF, 1, None, Failure::Connect), Some(Duration::from_secs(10)));
+        assert_eq!(retry_delay(&BACKOFF, 2, None, Failure::Connect), None);
+    }
+
+    #[test]
+    fn a_timeout_is_retried_once_after_three_seconds() {
+        assert_eq!(retry_delay(&BACKOFF, 0, Some(0), Failure::Timeout), Some(Duration::from_secs(3)));
+        assert_eq!(retry_delay(&BACKOFF, 1, Some(0), Failure::Timeout), None);
+    }
+
+    #[test]
+    fn a_timeout_on_a_later_attempt_still_allows_exactly_one_more() {
+        // 5xx first, then a timeout: the retry after the timeout is the last one.
+        assert_eq!(retry_delay(&BACKOFF, 1, Some(1), Failure::Timeout), Some(Duration::from_secs(10)));
+        assert_eq!(retry_delay(&BACKOFF, 2, Some(1), Failure::Timeout), None);
+    }
+
+    #[test]
+    fn once_an_attempt_has_timed_out_no_other_failure_gets_a_second_retry() {
+        // Timeout first (retry 1 made), then a 5xx / 429 / failed connection: stop.
+        for f in [Failure::Connect, status(503, None), status(429, Some(1))] {
+            assert_eq!(retry_delay(&BACKOFF, 1, Some(0), f), None, "{f:?}");
+        }
+        // The same failures before any timeout keep both retries.
+        for f in [Failure::Connect, status(503, None), status(429, Some(1))] {
+            assert!(retry_delay(&BACKOFF, 1, None, f).is_some(), "{f:?}");
+        }
     }
 
     #[test]
     fn a_5xx_and_a_429_are_retried_but_no_other_status_is() {
         for code in [500, 502, 503, 504, 429] {
-            assert_eq!(retry_delay(&BACKOFF, 0, status(code, None)), Some(Duration::from_secs(3)), "{code}");
-            assert_eq!(retry_delay(&BACKOFF, 2, status(code, None)), None, "{code}");
+            assert_eq!(retry_delay(&BACKOFF, 0, None, status(code, None)), Some(Duration::from_secs(3)), "{code}");
+            assert_eq!(retry_delay(&BACKOFF, 2, None, status(code, None)), None, "{code}");
         }
         for code in [400, 401, 403, 404, 410, 422, 304] {
-            assert_eq!(retry_delay(&BACKOFF, 0, status(code, None)), None, "{code}");
-            assert_eq!(retry_delay(&BACKOFF, 0, status(code, Some(1))), None, "{code}");
+            assert_eq!(retry_delay(&BACKOFF, 0, None, status(code, None)), None, "{code}");
+            assert_eq!(retry_delay(&BACKOFF, 0, None, status(code, Some(1))), None, "{code}");
         }
     }
 
     #[test]
     fn retry_after_replaces_the_wait_but_never_past_thirty_seconds() {
-        assert_eq!(retry_delay(&BACKOFF, 0, status(429, Some(7))), Some(Duration::from_secs(7)));
-        assert_eq!(retry_delay(&BACKOFF, 1, status(503, Some(120))), Some(Duration::from_secs(30)));
-        assert_eq!(retry_delay(&BACKOFF, 0, status(503, Some(0))), Some(Duration::ZERO));
+        assert_eq!(retry_delay(&BACKOFF, 0, None, status(429, Some(7))), Some(Duration::from_secs(7)));
+        assert_eq!(retry_delay(&BACKOFF, 1, None, status(503, Some(120))), Some(Duration::from_secs(30)));
+        assert_eq!(retry_delay(&BACKOFF, 0, None, status(503, Some(0))), Some(Duration::ZERO));
     }
 
     const FAST: [Duration; 2] = [Duration::from_millis(5), Duration::from_millis(5)];
@@ -1104,6 +1166,44 @@ mod tests {
         let (url, seen) = serve_script(vec![None, Some(http("200 OK", "", GOOD_BODY))]);
         assert_eq!(fetch(&url, Duration::from_millis(300)).await.unwrap(), GOOD_BODY);
         assert_eq!(seen.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_site_that_keeps_timing_out_gets_two_attempts_and_no_more() {
+        let (url, seen) = serve_script(vec![None]);
+        let out = fetch(&url, Duration::from_millis(200)).await;
+        let Err(SyncError::Request(msg)) = out else { panic!("{out:?}") };
+        assert!(msg.starts_with("timed out after "), "{msg}");
+        assert!(msg.ends_with("(tried 2 times)"), "{msg}");
+        assert_eq!(seen.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_timeout_then_a_5xx_is_not_retried_again() {
+        let (url, seen) = serve_script(vec![None, Some(http("503 Service Unavailable", "", ""))]);
+        let out = fetch(&url, Duration::from_millis(200)).await;
+        assert!(matches!(out, Err(SyncError::BadStatus(503))), "{out:?}");
+        assert_eq!(seen.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_5xx_then_a_timeout_gets_one_more_attempt() {
+        let (url, seen) = serve_script(vec![
+            Some(http("503 Service Unavailable", "", "")),
+            None,
+            Some(http("200 OK", "", GOOD_BODY)),
+        ]);
+        assert_eq!(fetch(&url, Duration::from_millis(200)).await.unwrap(), GOOD_BODY);
+        assert_eq!(seen.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn a_5xx_then_two_timeouts_stops_at_three_attempts() {
+        let (url, seen) = serve_script(vec![Some(http("503 Service Unavailable", "", "")), None]);
+        let out = fetch(&url, Duration::from_millis(200)).await;
+        let Err(SyncError::Request(msg)) = out else { panic!("{out:?}") };
+        assert!(msg.ends_with("(tried 3 times)"), "{msg}");
+        assert_eq!(seen.load(Ordering::SeqCst), 3);
     }
 
     #[tokio::test]
