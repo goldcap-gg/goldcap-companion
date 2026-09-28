@@ -59,9 +59,10 @@ export async function mount(root, api) {
   // survives every screen swap.
   mountUpdateBanner(root.parentElement ?? document.body);
   try {
-    const config = await api.getConfig();
-    const complete =
-      config.realmSlug.trim() !== "" && config.wowRetailPath.trim() !== "";
+    // The one setup-complete rule lives in Rust (config.rs's `is_complete`) — this used to
+    // duplicate it here as "realm and retail path both set", which is exactly why a
+    // Forever-only player could never finish setup: no retail path is ever coming.
+    const complete = await api.setupComplete();
     show(complete ? "status" : "wizard");
   } catch (e) {
     root.textContent = `Could not read settings: ${e}`;
