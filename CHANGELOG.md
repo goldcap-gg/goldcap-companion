@@ -16,6 +16,12 @@ data.
 - The Status screen shows a card per game you have turned on — a Forever
   card with your last scan and the crowd prices that came back, a Retail
   card with today's three stages — instead of one fixed layout for everyone.
+- When goldcap.gg answers slowly, prices still come through: the Companion
+  now waits longer for a realm's prices and tries again a couple of times
+  before giving up.
+- When prices cannot be fetched, the Status screen now says why — the site
+  timed out, or your computer could not connect to it — instead of one
+  vague "request failed".
 
 ## 1.14.0 (2026-09-28)
 
