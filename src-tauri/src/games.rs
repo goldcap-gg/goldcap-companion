@@ -26,8 +26,10 @@ pub struct GameInstall {
     pub saved_vars: Vec<PathBuf>,
 }
 
-/// `_name_`: Blizzard's own shape for a game folder under the WoW root.
-fn is_game_folder(name: &str) -> bool {
+/// `_name_`: Blizzard's own shape for a game folder under the WoW root. `pub(crate)` so
+/// `config.rs`'s Battle.net-derived candidates (product.db paths, uninstall entries) can
+/// recognize the same shape rather than re-deriving it.
+pub(crate) fn is_game_folder(name: &str) -> bool {
     name.len() > 2 && name.starts_with('_') && name.ends_with('_')
 }
 
