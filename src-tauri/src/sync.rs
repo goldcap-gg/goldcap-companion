@@ -461,6 +461,28 @@ pub async fn sync_once(
     .await;
 }
 
+/// One full tick: the Retail leg (`sync_once` — import string, region data, ledger upload, runs,
+/// retail SavedVariables) only when `retail_enabled`, then the Forever leg (`sync_forever`) only
+/// when `forever_enabled`. A disabled game is skipped outright rather than run and hidden — for
+/// Retail that matters even functionally: an unconfigured `sync_once` would otherwise publish
+/// "not configured" into `SyncStatus`, which the tray label and the Status screen would both
+/// read as a real error rather than a game the player never turned on. Extracted from the loop
+/// below so a disabled game's silence can be tested without spinning up the whole interval timer.
+async fn run_tick(
+    client: &reqwest::Client,
+    config: &Config,
+    status: &Arc<Mutex<SyncStatus>>,
+    logger: &Logger,
+    state_dir: &Path,
+) {
+    if config.retail_enabled {
+        sync_once(client, config, status, logger, state_dir).await;
+    }
+    if config.forever_enabled {
+        crate::forever::sync_forever(client, config, logger, state_dir).await;
+    }
+}
+
 /// The sync loop: on every interval tick (recomputed from `config_rx`'s
 /// current `intervalMinutes` whenever it changes) or "sync now" trigger,
 /// runs one `sync_once`. `on_tick` is called after every attempt so the
@@ -485,16 +507,14 @@ pub async fn run_loop(
             tokio::select! {
                 _ = ticker.tick() => {
                     schedule_next_tick(&status, SystemTime::now() + interval);
-                    sync_once(&client, &config, &status, &logger, &state_dir).await;
-                    crate::forever::sync_forever(&client, &config, &logger, &state_dir).await;
+                    run_tick(&client, &config, &status, &logger, &state_dir).await;
                     on_tick();
                 }
                 maybe = trigger_rx.recv() => {
                     if maybe.is_none() {
                         return; // sender dropped — app is shutting down
                     }
-                    sync_once(&client, &config, &status, &logger, &state_dir).await;
-                    crate::forever::sync_forever(&client, &config, &logger, &state_dir).await;
+                    run_tick(&client, &config, &status, &logger, &state_dir).await;
                     on_tick();
                 }
                 changed = config_rx.changed() => {
@@ -655,6 +675,83 @@ mod tests {
         assert!(addon_dir.join("GoldCap_AppData.toc").exists());
         assert!(addon_dir.join("AppData.lua").exists());
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // A disabled game must be silent, not report "not configured" as though the player forgot
+    // to finish setup — that would flip the tray label to "error: ..." for someone who simply
+    // turned Retail off to play Forever-only.
+    #[tokio::test]
+    async fn a_disabled_retail_leg_is_never_run() {
+        let client = build_client();
+        let config = Config { retail_enabled: false, forever_enabled: false, ..Config::default() };
+        let status = Arc::new(Mutex::new(SyncStatus::default()));
+        let dir = std::env::temp_dir()
+            .join(format!("goldcap-companion-run-tick-off-{}", std::process::id()));
+        let logger = Logger::new(&dir).unwrap();
+
+        run_tick(&client, &config, &status, &logger, &dir).await;
+
+        let s = status.lock().unwrap();
+        assert!(s.last_error.is_none(), "a disabled game is quiet, not an error");
+        assert!(s.last_attempt_at.is_none(), "sync_once itself must never have run");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // The inverse: an enabled-but-unconfigured Retail leg still reports the error it always
+    // did — turning games on/off must not accidentally swallow a real "not configured" case.
+    #[tokio::test]
+    async fn an_enabled_but_unconfigured_retail_leg_still_reports_its_error() {
+        let client = build_client();
+        let config = Config { retail_enabled: true, forever_enabled: false, ..Config::default() };
+        let status = Arc::new(Mutex::new(SyncStatus::default()));
+        let dir = std::env::temp_dir()
+            .join(format!("goldcap-companion-run-tick-on-{}", std::process::id()));
+        let logger = Logger::new(&dir).unwrap();
+
+        run_tick(&client, &config, &status, &logger, &dir).await;
+
+        let s = status.lock().unwrap();
+        assert!(s.last_error.is_some());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // The Forever leg must not be gated open by a config that only turned Retail on — otherwise
+    // a Retail-only player who never touched Forever would still have it probed every tick.
+    #[tokio::test]
+    async fn a_disabled_forever_leg_never_touches_a_forever_install_that_exists_on_disk() {
+        let client = build_client();
+        let dir = std::env::temp_dir()
+            .join(format!("goldcap-companion-run-tick-forever-off-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let sv = dir
+            .join("_classic_beta_")
+            .join("WTF")
+            .join("Account")
+            .join("A")
+            .join("SavedVariables");
+        std::fs::create_dir_all(&sv).unwrap();
+        std::fs::write(
+            sv.join("GoldCap.lua"),
+            r#"GoldCapDB = { client = { interface = 16001, build = "1.60.1.70009", regionId = 90 } }"#,
+        )
+        .unwrap();
+
+        let config = Config {
+            wow_root_path: dir.to_string_lossy().into_owned(),
+            retail_enabled: false,
+            forever_enabled: false,
+            ..Config::default()
+        };
+        let status = Arc::new(Mutex::new(SyncStatus::default()));
+        let logger = Logger::new(&dir.join("logs")).unwrap();
+
+        run_tick(&client, &config, &status, &logger, &dir).await;
+
+        assert!(
+            !dir.join(crate::forever::STATE_FILE_NAME).exists(),
+            "forever_enabled=false must skip the Forever leg entirely, even with an install present"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
