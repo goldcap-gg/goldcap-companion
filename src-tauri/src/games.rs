@@ -41,51 +41,79 @@ pub fn has_game_folder(root: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// The WoW root: the player's own `wow_root_path` when the wizard (or Settings) has set one,
-/// else the folder the configured `_retail_` sits in, else the first detected install base that
-/// holds any game folder (Decision E2).
-pub fn wow_root(config: &Config) -> Option<PathBuf> {
-    let explicit = config.wow_root_path.trim();
-    if !explicit.is_empty() {
-        return Some(PathBuf::from(explicit));
+/// A registry/common-path candidate as `_retail_` itself (Blizzard's `InstallPath` sometimes
+/// points straight at it) normalized to its parent — the shape every root-hunting function here
+/// wants, since a folder is classified by what lives *under* it.
+fn normalize_root_candidate(c: PathBuf) -> PathBuf {
+    if c.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("_retail_")) {
+        c.parent().map(Path::to_path_buf).unwrap_or(c)
+    } else {
+        c
     }
-    let retail = config.wow_retail_path.trim();
-    if !retail.is_empty() {
-        let path = Path::new(retail);
-        if path.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("_retail_")) {
-            return path.parent().map(Path::to_path_buf);
-        }
-    }
-    crate::config::wow_base_candidates()
-        .into_iter()
-        .map(|c| {
-            // Some registry values point at `_retail_` itself rather than at the base folder.
-            if c.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("_retail_")) {
-                c.parent().map(Path::to_path_buf).unwrap_or(c)
-            } else {
-                c
-            }
-        })
-        .find(|c| has_game_folder(c))
 }
 
-/// Best-effort auto-detect of the WoW base install folder, for the wizard's "Which WoW do you
-/// play?" step and Settings' "Detect" button — the same candidates `wow_root` falls back to when
-/// nothing is configured yet, but usable before any `Config` exists. Empty string when nothing is
-/// found.
-pub fn detect_wow_root() -> String {
+/// WoW: Forever's own root: exactly `config.forever_root_path`, the way `sync_once` (sync.rs)
+/// reads `config.wow_retail_path` directly for Retail — no live re-detection at sync time, and
+/// deliberately never a fallback through `wow_retail_path` either: Retail and Forever are
+/// searched, configured, and found independently, since a player can have one on each of two
+/// different drives. Auto-detect (`detect_forever_root`) is offered only where the player asks
+/// for it — the wizard's "Which WoW do you play?" step and Settings' "Detect" — never silently
+/// behind this getter, or a tick on a machine that also happens to have some *other* Forever
+/// install lying around (a second account, a leftover from testing) would start syncing it the
+/// moment the configured root went briefly missing.
+pub fn forever_root(config: &Config) -> Option<PathBuf> {
+    let explicit = config.forever_root_path.trim();
+    (!explicit.is_empty()).then(|| PathBuf::from(explicit))
+}
+
+/// Best-effort auto-detect of the WoW: Forever root, for the wizard's "Which WoW do you play?"
+/// step and Settings' "Change…"/"Detect" for Forever — the same candidates `detect_wow_retail_path`
+/// walks for Retail, but classified independently: a candidate qualifies the moment it holds a
+/// `_classic_beta_` folder or any folder carrying a Forever passport (see `detect_games`), even
+/// when it holds no `_retail_` at all. Usable before any `Config` exists. Empty string when
+/// nothing is found.
+pub fn detect_forever_root() -> String {
     crate::config::wow_base_candidates()
         .into_iter()
-        .map(|c| {
-            if c.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("_retail_")) {
-                c.parent().map(Path::to_path_buf).unwrap_or(c)
-            } else {
-                c
-            }
-        })
-        .find(|c| has_game_folder(c))
+        .map(normalize_root_candidate)
+        .find(|c| detect_games(c).iter().any(|g| g.kind == DetectedKind::Forever))
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default()
+}
+
+/// What the wizard's "Which WoW do you play?" step (and Settings' auto-detect) offer up front,
+/// before the player has picked or confirmed anything: Retail's exact `_retail_` folder and
+/// Forever's own root, found independently — plus whether a Classic Era install was seen under
+/// either one, so the step can show it disabled rather than silently omitting it.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameDetection {
+    pub retail_path: String,
+    pub forever_root_path: String,
+    pub classic_era_found: bool,
+}
+
+pub fn detect_installs() -> GameDetection {
+    let retail_path = crate::config::detect_wow_retail_path();
+    let forever_root_path = detect_forever_root();
+
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if !retail_path.is_empty() {
+        if let Some(parent) = Path::new(&retail_path).parent() {
+            roots.push(parent.to_path_buf());
+        }
+    }
+    if !forever_root_path.is_empty() {
+        let root = PathBuf::from(&forever_root_path);
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    let classic_era_found = roots
+        .iter()
+        .any(|r| detect_games(r).iter().any(|g| g.kind == DetectedKind::ClassicEra));
+
+    GameDetection { retail_path, forever_root_path, classic_era_found }
 }
 
 /// What the wizard's "Which WoW do you play?" step offers for one game folder under the WoW
@@ -277,12 +305,15 @@ mod tests {
         fs::remove_dir_all(&r).ok();
     }
 
+    // Forever's root must never be guessed from Retail's path, and must never fall back to
+    // live-scanning the machine mid-sync (which would pick up an unrelated Forever install lying
+    // around on the test/CI machine) — an unset forever_root_path is simply no root at all.
     #[test]
-    fn the_root_is_the_folder_the_configured_retail_sits_in() {
-        let r = root("config");
+    fn forever_root_never_falls_back_through_the_retail_path_or_auto_detect() {
+        let r = root("no-forever-fallback");
         fs::create_dir_all(r.join("_retail_")).unwrap();
         let config = Config { wow_retail_path: r.join("_retail_").to_string_lossy().into_owned(), ..Config::default() };
-        assert_eq!(wow_root(&config), Some(r.clone()));
+        assert_eq!(forever_root(&config), None);
         fs::remove_dir_all(&r).ok();
     }
 
@@ -310,15 +341,44 @@ mod tests {
     }
 
     #[test]
-    fn wow_root_prefers_the_explicit_root_path_over_everything_else() {
-        let r = root("explicit-root");
+    fn forever_root_prefers_the_explicit_root_path_over_auto_detect() {
+        let r = root("explicit-forever-root");
+        // A retail path pointed somewhere else entirely (a different drive, in the real case)
+        // must have no bearing on which folder forever_root reports.
         let config = Config {
-            wow_root_path: r.to_string_lossy().into_owned(),
+            forever_root_path: r.to_string_lossy().into_owned(),
             wow_retail_path: r.join("elsewhere").join("_retail_").to_string_lossy().into_owned(),
             ..Config::default()
         };
-        assert_eq!(wow_root(&config), Some(r.clone()));
+        assert_eq!(forever_root(&config), Some(r.clone()));
         fs::remove_dir_all(&r).ok();
+    }
+
+    // The two-drives case in miniature: Retail's own root (holding `_retail_`) and Forever's own
+    // root (holding `_classic_beta_`) are two entirely separate temp trees, standing in for two
+    // separate drive letters. Forever's root must be found from ITS tree alone.
+    #[test]
+    fn forever_root_is_found_independently_of_where_retail_lives() {
+        let retail_drive = root("two-drives-retail");
+        let forever_drive = root("two-drives-forever");
+        fs::create_dir_all(retail_drive.join("_retail_")).unwrap();
+        saved(&forever_drive, "_classic_beta_", "A", FOREVER);
+
+        let config = Config {
+            wow_retail_path: retail_drive.join("_retail_").to_string_lossy().into_owned(),
+            forever_root_path: forever_drive.to_string_lossy().into_owned(),
+            ..Config::default()
+        };
+        assert_eq!(forever_root(&config), Some(forever_drive.clone()));
+
+        // And the games actually discovered under that root are Forever's alone — the retail
+        // drive is never consulted.
+        let games = discover(&forever_drive, None);
+        assert_eq!(games.len(), 1);
+        assert_eq!(games[0].kind, GameKind::Forever);
+
+        fs::remove_dir_all(&retail_drive).ok();
+        fs::remove_dir_all(&forever_drive).ok();
     }
 
     #[test]

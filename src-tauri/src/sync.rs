@@ -738,7 +738,7 @@ mod tests {
         .unwrap();
 
         let config = Config {
-            wow_root_path: dir.to_string_lossy().into_owned(),
+            forever_root_path: dir.to_string_lossy().into_owned(),
             retail_enabled: false,
             forever_enabled: false,
             ..Config::default()

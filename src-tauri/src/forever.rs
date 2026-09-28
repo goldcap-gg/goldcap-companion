@@ -452,7 +452,7 @@ pub async fn sync_forever_at(
     store: &std::sync::Mutex<std::collections::HashMap<String, KeptCrowd>>,
     now: i64,
 ) -> ForeverState {
-    match crate::games::wow_root(config) {
+    match crate::games::forever_root(config) {
         Some(root) => sync_forever_at_root(client, base, &root, config, logger, state_path, store, now).await,
         None => ForeverState::load_from(state_path),
     }
@@ -1006,6 +1006,7 @@ mod tests {
         let before = files_under(&root);
         let config = crate::config::Config {
             wow_retail_path: root.join("_retail_").to_string_lossy().into_owned(),
+            forever_root_path: root.to_string_lossy().into_owned(),
             companion_token: "tok".into(),
             ..crate::config::Config::default()
         };
@@ -1029,6 +1030,7 @@ mod tests {
         let sv = put(&root, "_classic_beta_", REAL);
         let config = crate::config::Config {
             wow_retail_path: root.join("_retail_").to_string_lossy().into_owned(),
+            forever_root_path: root.to_string_lossy().into_owned(),
             companion_token: "tok".into(),
             ..crate::config::Config::default()
         };
@@ -1048,6 +1050,38 @@ mod tests {
         let again = sync_forever_at(&crate::sync::build_client(), "http://127.0.0.1:9", &config, &logger, &state_path, &store, 1_790_464_900).await;
         assert_eq!(again.installs.values().next().unwrap().market.as_deref(), Some("m"));
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    // The two-drives case: Retail lives under one WoW folder, Forever's client under a
+    // completely separate one (its own `forever_root_path`, standing in for e.g. `D:\Games\World
+    // of Warcraft`). sync_forever must scan Forever's own root, never Retail's — a config that
+    // only set wow_retail_path (no forever_root_path) must not fall back through it.
+    #[tokio::test]
+    async fn sync_forever_uses_the_forever_root_when_retail_lives_on_a_different_drive() {
+        let retail_drive = machine("two-drives-retail");
+        let forever_drive = machine("two-drives-forever");
+        put(&retail_drive, "_retail_", r#"GoldCapDB = { client = { interface = 120100, build = "12.1.0.69933" }, ledger = {} }"#);
+        let sv = put(&forever_drive, "_classic_beta_", REAL);
+
+        let config = crate::config::Config {
+            wow_retail_path: retail_drive.join("_retail_").to_string_lossy().into_owned(),
+            forever_root_path: forever_drive.to_string_lossy().into_owned(),
+            companion_token: "tok".into(),
+            ..crate::config::Config::default()
+        };
+        let logger = crate::logging::Logger::new(&forever_drive.join("logs")).unwrap();
+        let store = std::sync::Mutex::new(std::collections::HashMap::new());
+        let (base, seen) = serve_once(answer("200 OK", r#"{"status":"accepted","market":"m","items":1974,"dropped":0}"#));
+        let state_path = forever_drive.join("state").join(STATE_FILE_NAME);
+        let state = sync_forever_at(&crate::sync::build_client(), &base, &config, &logger, &state_path, &store, 1_790_464_500).await;
+
+        assert!(seen.recv().unwrap().to_ascii_lowercase().starts_with("post /v1/forever/scans"));
+        assert_eq!(state.sent.get(&sv.to_string_lossy().into_owned()), Some(&1_790_464_249));
+        // Nothing was ever written under the retail drive — it was never scanned at all.
+        assert!(!retail_drive.join("_retail_/Interface/AddOns/GoldCap_AppData").exists());
+
+        std::fs::remove_dir_all(&retail_drive).ok();
+        std::fs::remove_dir_all(&forever_drive).ok();
     }
 
     // The Status screen's Forever card reads realm/faction/item count straight off the
