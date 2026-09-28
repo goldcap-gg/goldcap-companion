@@ -1,4 +1,4 @@
-import { relativeTime, countdown, groupDigits, gameLine } from "../lib/format.js";
+import { relativeTime, countdown, groupDigits, foreverScanLine, foreverCrowdLine, foreverMarketLine } from "../lib/format.js";
 import { brandMarkSvg } from "../lib/brandMark.js";
 
 const POLL_MS = 5000;
@@ -30,18 +30,38 @@ const IDLE_PHRASE = {
   ledger: "Prices are flowing",
 };
 
+// Enabled Forever installs only — a game the player turned off must read as absent here too,
+// even while stale state from before they turned it off still sits in forever.json on disk.
+function foreverGames(s) {
+  return s.foreverEnabled ? (s.games ?? []).filter((g) => g.game === "forever") : [];
+}
+
+function foreverBroken(games) {
+  return games.some((g) => g.unauthorized);
+}
+
 // The earliest failing link, in pipeline order — the ones after it may only
-// be failing because of it, so it is the one worth naming.
+// be failing because of it, so it is the one worth naming. Retail's three
+// stages only exist to consult once Retail is actually on; a Forever-only
+// player is judged by its own installs instead.
 function heroPhrase(s) {
   if (!s.configured) return "Not configured";
-  const broken = ORDER.find((k) => s[k].state === "broken");
-  if (broken) return BROKEN_PHRASE[broken];
-  const idle = ORDER.find((k) => s[k].state === "notConnected");
-  if (idle) return IDLE_PHRASE[idle];
-  return "Everything works";
+  if (s.retailEnabled) {
+    const broken = ORDER.find((k) => s[k].state === "broken");
+    if (broken) return BROKEN_PHRASE[broken];
+    const idle = ORDER.find((k) => s[k].state === "notConnected");
+    if (idle) return IDLE_PHRASE[idle];
+  }
+  const games = foreverGames(s);
+  if (foreverBroken(games)) return "WoW: Forever needs attention";
+  if (s.retailEnabled) return "Everything works";
+  return games.some((g) => g.lastSentAt) ? "Everything works" : "Waiting for your first scan";
 }
 
 function heroState(s) {
+  const games = foreverGames(s);
+  if (foreverBroken(games)) return "broken";
+  if (!s.retailEnabled) return games.some((g) => g.lastSentAt) ? "ok" : "notConnected";
   const stages = [s.prices, s.addon, s.ledger];
   if (stages.some((st) => st.state === "broken")) return "broken";
   if (stages.every((st) => st.state === "ok")) return "ok";
@@ -94,6 +114,54 @@ function stageRow(key, stage, ctx, canPair) {
   return { row, detailEl: detail };
 }
 
+// One Forever install's card: market (realm · faction), the scan and crowd-prices lines, any
+// note the site sent back, and the fixed reminder about when a scan actually reaches disk.
+// Returns the card alongside its two age-bearing paragraphs so paintTime can re-date them every
+// second without rebuilding the card (and losing focus/animation the way paintSnapshot's own
+// rebuild would).
+function foreverCard(g) {
+  const card = document.createElement("div");
+  card.className = "card";
+
+  const head = document.createElement("div");
+  head.className = "row";
+  const title = document.createElement("span");
+  title.className = "stage-title";
+  title.textContent = "WoW: Forever";
+  head.append(title);
+  const market = foreverMarketLine(g);
+  if (market) {
+    const where = document.createElement("span");
+    where.className = "muted mono";
+    where.textContent = market;
+    head.append(where);
+  }
+  card.append(head);
+
+  const scan = document.createElement("p");
+  scan.className = "stage-detail";
+  card.append(scan);
+
+  const crowd = document.createElement("p");
+  crowd.className = "stage-detail";
+  card.append(crowd);
+
+  if (g.note) {
+    const note = document.createElement("p");
+    note.className = "stage-error mono";
+    note.textContent = g.note;
+    card.append(note);
+  }
+
+  const hint = document.createElement("p");
+  hint.className = "muted";
+  hint.textContent =
+    "A new scan uploads after /reload or logging out — that is when WoW writes it to disk.";
+  card.append(hint);
+
+  return { card, scanEl: scan, crowdEl: crowd };
+}
+
 export function render(el, ctx) {
   el.classList.add("screen-status");
 
@@ -112,8 +180,28 @@ export function render(el, ctx) {
   const hero = document.createElement("div");
   hero.className = "card card-hero hero";
 
+  // The Retail card: a small title row above the same three stage rows this screen has always
+  // shown, wrapped in .card so it reads next to the Forever card(s) rather than floating loose —
+  // hidden outright while Retail is off (see paintSnapshot).
+  const retailCard = document.createElement("div");
+  retailCard.className = "card";
+  const retailHead = document.createElement("div");
+  retailHead.className = "row";
+  const retailTitle = document.createElement("span");
+  retailTitle.className = "stage-title";
+  retailTitle.textContent = "Retail";
+  const retailWhere = document.createElement("span");
+  retailWhere.className = "muted mono";
+  retailHead.append(retailTitle, retailWhere);
   const stages = document.createElement("div");
   stages.className = "stages";
+  retailCard.append(retailHead, stages);
+
+  // One card per Forever install currently enabled — rebuilt on every structural repaint
+  // (installs can appear/disappear between polls), unlike the Retail card above which is
+  // built once and only ever hidden/shown.
+  const foreverCards = document.createElement("div");
+  foreverCards.className = "stack";
 
   const meta = document.createElement("p");
   meta.className = "meta dim";
@@ -137,9 +225,7 @@ export function render(el, ctx) {
   // version line stay fully visible either way.
   const scroll = document.createElement("div");
   scroll.className = "status-scroll";
-  const gamesList = document.createElement("ul");
-  gamesList.className = "games dim";
-  scroll.append(hero, stages, meta, gamesList);
+  scroll.append(hero, foreverCards, retailCard, meta);
 
   el.append(top, scroll, action, foot);
 
@@ -148,6 +234,9 @@ export function render(el, ctx) {
   // One entry per stage row, so the 1-second timer can rewrite just the
   // detail text instead of rebuilding the row (and evicting focus from it).
   let stageDetails = [];
+  // One entry per Forever card, same reason: the 1-second timer re-dates the scan/crowd lines
+  // without rebuilding the card underneath a focused element.
+  let foreverDetails = [];
 
   // Everything structural: hero, stage rows (titles, dots, errors, the
   // Pair button), the Sync button's label/disabled state, the version
@@ -165,22 +254,37 @@ export function render(el, ctx) {
     const where = document.createElement("p");
     where.className = "muted hero-where mono";
     where.textContent = snapshot.configured
-      ? `${snapshot.realmSlug} · ${snapshot.region.toUpperCase()}`
-      : "no realm yet";
+      ? snapshot.retailEnabled
+        ? `${snapshot.realmSlug} · ${snapshot.region.toUpperCase()}`
+        : "WoW: Forever"
+      : "not set up yet";
     const headline = document.createElement("div");
     headline.className = "row";
     headline.append(dot, phrase);
     hero.append(headline, where);
 
-    // Pairing is only offered once there is a realm to pair against — an
-    // unconfigured companion routes to the wizard, not to Settings.
-    const canPair = snapshot.configured && !snapshot.paired;
-    const rows = ORDER.map((k) => {
-      const { row, detailEl } = stageRow(k, snapshot[k], ctx, canPair);
-      return { row, stage: snapshot[k], el: detailEl };
-    });
-    stageDetails = rows.map(({ stage, el }, i) => ({ key: ORDER[i], stage, el }));
-    stages.replaceChildren(...rows.map(({ row }) => row));
+    // Retail's three stage rows only exist while Retail is actually on — a disabled game gets
+    // no card at all, never a card full of "Retail is off" rows.
+    retailCard.hidden = !snapshot.retailEnabled;
+    if (snapshot.retailEnabled) {
+      retailWhere.textContent = `${snapshot.realmSlug} · ${snapshot.region.toUpperCase()}`;
+      // Pairing is only offered once there is a realm to pair against — an
+      // unconfigured companion routes to the wizard, not to Settings.
+      const canPair = snapshot.configured && !snapshot.paired;
+      const rows = ORDER.map((k) => {
+        const { row, detailEl } = stageRow(k, snapshot[k], ctx, canPair);
+        return { row, stage: snapshot[k], el: detailEl };
+      });
+      stageDetails = rows.map(({ stage, el }, i) => ({ key: ORDER[i], stage, el }));
+      stages.replaceChildren(...rows.map(({ row }) => row));
+    } else {
+      stageDetails = [];
+    }
+
+    const games = foreverGames(snapshot);
+    const cards = games.map((g) => ({ g, ...foreverCard(g) }));
+    foreverDetails = cards;
+    foreverCards.replaceChildren(...cards.map(({ card }) => card));
 
     action.textContent = snapshot.syncing ? "Syncing…" : "Sync now";
     action.disabled = snapshot.syncing || !snapshot.configured;
@@ -190,9 +294,9 @@ export function render(el, ctx) {
     paintTime();
   }
 
-  // Only the time-derived strings: each stage's relative age and the
-  // countdown. Runs every second, independent of the poll, so times keep
-  // moving between snapshots without touching the DOM nodes above them.
+  // Only the time-derived strings: each stage's relative age, the Forever cards' scan/crowd
+  // lines, and the countdown. Runs every second, independent of the poll, so times keep moving
+  // between snapshots without touching the DOM nodes above them.
   function paintTime() {
     if (!snapshot) return;
     const now = Math.floor(Date.now() / 1000);
@@ -208,20 +312,19 @@ export function render(el, ctx) {
       el.textContent = text;
     }
 
+    for (const { g, scanEl, crowdEl } of foreverDetails) {
+      scanEl.textContent = foreverScanLine(g, now);
+      const crowdText = foreverCrowdLine(g, now);
+      crowdEl.textContent = crowdText;
+      crowdEl.hidden = !crowdText;
+    }
+
     const left = countdown(snapshot.nextTickAt, now);
     meta.textContent = snapshot.syncing
       ? "Syncing now…"
       : left
         ? `Next sync in ${left}`
         : "";
-
-    gamesList.replaceChildren(
-      ...(snapshot.games ?? []).map((g) => {
-        const li = document.createElement("li");
-        li.textContent = gameLine(g, now);
-        return li;
-      }),
-    );
   }
 
   async function refresh() {
