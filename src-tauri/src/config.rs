@@ -74,6 +74,24 @@ pub struct Config {
     pub realm_auto: bool,
     #[serde(default)]
     pub wow_retail_path: String,
+    /// The World of Warcraft folder that holds `_retail_`, `_classic_beta_`, … — one level up
+    /// from `wow_retail_path`. Set by the wizard's "Which WoW do you play?" step (or Settings'
+    /// "WoW folder"); `games::wow_root` prefers this over deriving a root from
+    /// `wow_retail_path` when it is set. A config written before this field existed gets one
+    /// migrated in from `wow_retail_path` on load — see `migrate`.
+    #[serde(default)]
+    pub wow_root_path: String,
+    /// Whether the Retail leg of the tick (import string, region data, ledger upload, runs,
+    /// retail SavedVariables) runs at all. A config written before this field existed is
+    /// migrated to `true` when it already named a realm or a retail path — see `migrate`.
+    #[serde(default)]
+    pub retail_enabled: bool,
+    /// Whether the WoW: Forever leg of the tick (`forever::sync_forever`) runs at all. A config
+    /// written before this field existed is migrated to `true` — Forever's own sync is already a
+    /// no-op on a machine with no Forever install, so this never invents work on a retail-only
+    /// machine (see `migrate`).
+    #[serde(default)]
+    pub forever_enabled: bool,
     #[serde(default = "default_interval_minutes")]
     pub interval_minutes: u32,
     /// Defaults to on: most players want the companion syncing in the
@@ -106,6 +124,13 @@ impl Default for Config {
             realm_slug: String::new(),
             realm_auto: true,
             wow_retail_path: String::new(),
+            wow_root_path: String::new(),
+            // A brand-new config is never written to disk with these already decided — the
+            // wizard is what turns them on, per game the player actually picks. See `migrate`
+            // for the different rule an EXISTING config on disk gets when read for the first
+            // time by a build that has these fields.
+            retail_enabled: false,
+            forever_enabled: false,
             interval_minutes: default_interval_minutes(),
             launch_at_startup: default_launch_at_startup(),
             auto_update: default_auto_update(),
@@ -123,14 +148,24 @@ impl Config {
 
     /// Whether this config can actually sync. Also decides which screen the
     /// window opens on — an incomplete config means the first-run wizard —
-    /// so no separate "onboarded" flag is persisted.
+    /// so no separate "onboarded" flag is persisted. The single rule the UI
+    /// defers to (via the `setup_complete` command) instead of guessing at
+    /// its own copy of it: the WoW root is set, at least one game is turned
+    /// on, and — only when Retail is one of them — a realm is either pinned
+    /// or auto-follow is on. A Forever-only player never needs a realm.
     pub fn is_complete(&self) -> bool {
-        !self.realm_slug.trim().is_empty() && !self.wow_retail_path.trim().is_empty()
+        !self.wow_root_path.trim().is_empty()
+            && (self.retail_enabled || self.forever_enabled)
+            && (!self.retail_enabled || self.realm_auto || !self.realm_slug.trim().is_empty())
     }
 
     pub fn load_from(path: &Path) -> io::Result<Config> {
         let text = fs::read_to_string(path)?;
-        serde_json::from_str(&text).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        let raw: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let cfg: Config = serde_json::from_value(raw.clone())
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        Ok(migrate(&raw, cfg))
     }
 
     pub fn save_to(&self, path: &Path) -> io::Result<()> {
@@ -148,16 +183,83 @@ impl Config {
         match Self::load_from(path) {
             Ok(cfg) => Ok(cfg),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                let cfg = Config {
-                    wow_retail_path: detect_wow_retail_path(),
-                    ..Config::default()
-                };
+                let wow_retail_path = detect_wow_retail_path();
+                // Derived immediately, the same way `migrate` would derive it on the very next
+                // load of the file this is about to write — otherwise a machine with a detectable
+                // retail install would read differently the first time (this branch) than every
+                // time after (load_from -> migrate), for a fact that has nothing to do with the
+                // wizard.
+                let wow_root_path = derive_wow_root_path(&wow_retail_path);
+                let cfg = Config { wow_retail_path, wow_root_path, ..Config::default() };
                 cfg.save_to(path)?;
                 Ok(cfg)
             }
             Err(e) => Err(e),
         }
     }
+}
+
+/// `wow_retail_path` derived from `wow_root_path`: `{root}/_retail_`, joined with the platform's
+/// own separator rather than string concatenation (Windows paths use `\`). Once a player has a
+/// root, this is the ONLY thing `wow_retail_path` is — never independently typed — which is what
+/// lets every existing retail reader (health.rs, savedvars.rs, upload.rs, luafile::addon_dir,
+/// wtf.rs) keep reading `wow_retail_path` directly, untouched by this feature, while the UI only
+/// ever asks the player for the root.
+pub fn retail_dir_from_root(root: &str) -> String {
+    let root = root.trim();
+    if root.is_empty() {
+        return String::new();
+    }
+    Path::new(root).join("_retail_").to_string_lossy().into_owned()
+}
+
+/// `wow_root_path` derivable from a `_retail_` path: its parent, or empty when the path doesn't
+/// look like one. Shared by `migrate` (an existing config) and `load_or_init` (a brand-new one)
+/// so the two agree.
+fn derive_wow_root_path(wow_retail_path: &str) -> String {
+    let retail = Path::new(wow_retail_path.trim());
+    if retail.file_name().is_some_and(|n| n.eq_ignore_ascii_case("_retail_")) {
+        retail
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    } else {
+        String::new()
+    }
+}
+
+/// Fills in `wow_root_path`/`retail_enabled`/`forever_enabled` for a config saved before those
+/// fields existed, so an existing install keeps syncing exactly as it did before this version —
+/// without this, an upgrade would read every one of them as `false`/empty (their `serde(default)`)
+/// and the sync loop would go silent for everyone already running the companion.
+///
+/// Pure and given the raw JSON alongside the already-deserialized struct on purpose: `serde`'s
+/// `#[serde(default)]` throws away *whether* a key was present, leaving only its filled-in value
+/// — and "the key was never written" (an old config; migrate it) and "the key was written as
+/// `false`" (a player who saved Retail off through this very feature; leave it alone) both land on
+/// `false`. Only the raw object still knows which one happened.
+fn migrate(raw: &serde_json::Value, mut cfg: Config) -> Config {
+    let had_key = |k: &str| raw.get(k).is_some();
+
+    if cfg.wow_root_path.trim().is_empty() {
+        let derived = derive_wow_root_path(&cfg.wow_retail_path);
+        if !derived.is_empty() {
+            cfg.wow_root_path = derived;
+        }
+    }
+
+    if !had_key("retailEnabled") {
+        cfg.retail_enabled =
+            !cfg.realm_slug.trim().is_empty() || !cfg.wow_retail_path.trim().is_empty();
+    }
+    if !had_key("foreverEnabled") {
+        // Forever's own sync is already a no-op without an install on disk (forever.rs), so
+        // turning it on for every pre-existing config never invents work for a retail-only
+        // machine — it just lets an install that is already there start being offered.
+        cfg.forever_enabled = true;
+    }
+
+    cfg
 }
 
 /// Accepts a candidate that is either the WoW base install dir or the
@@ -298,6 +400,9 @@ mod tests {
         // config without the field keeps its pinned realm (serde default).
         assert!(cfg.realm_auto);
         assert_eq!(cfg.wow_retail_path, "");
+        assert_eq!(cfg.wow_root_path, "");
+        assert!(!cfg.retail_enabled, "a brand-new config waits for the wizard");
+        assert!(!cfg.forever_enabled, "a brand-new config waits for the wizard");
         assert_eq!(cfg.interval_minutes, 30);
         assert!(cfg.launch_at_startup);
         assert!(cfg.auto_update);
@@ -337,6 +442,9 @@ mod tests {
         let json = serde_json::to_string(&cfg).unwrap();
         assert!(json.contains("\"realmSlug\":\"dentarg\""));
         assert!(json.contains("\"wowRetailPath\""));
+        assert!(json.contains("\"wowRootPath\":\"\""));
+        assert!(json.contains("\"retailEnabled\":false"));
+        assert!(json.contains("\"foreverEnabled\":false"));
         assert!(json.contains("\"intervalMinutes\":30"));
         assert!(json.contains("\"launchAtStartup\":true"));
         assert!(json.contains("\"autoUpdate\":true"));
@@ -391,6 +499,12 @@ mod tests {
             realm_slug: "area-52".into(),
             realm_auto: false,
             wow_retail_path: "/tmp/wow/_retail_".into(),
+            // Set explicitly, matching what a real save always writes — a round trip must not
+            // let `migrate` (which only fills in a key that was truly ABSENT) rederive over
+            // top of an already-saved choice.
+            wow_root_path: "/tmp/wow".into(),
+            retail_enabled: true,
+            forever_enabled: false,
             interval_minutes: 45,
             launch_at_startup: true,
             auto_update: false,
@@ -487,34 +601,155 @@ mod tests {
     }
 
     #[test]
-    fn a_config_missing_either_half_is_not_complete() {
-        let realm_only = Config { realm_slug: "dentarg".into(), ..Config::default() };
-        assert!(!realm_only.is_complete());
-
-        let path_only = Config {
-            wow_retail_path: "/tmp/wow/_retail_".into(),
+    fn no_root_or_no_game_enabled_is_not_complete() {
+        let no_root = Config {
+            retail_enabled: true,
+            realm_slug: "dentarg".into(),
             ..Config::default()
         };
-        assert!(!path_only.is_complete());
+        assert!(!no_root.is_complete(), "no wow_root_path");
+
+        let no_game = Config {
+            wow_root_path: "/tmp/wow".into(),
+            realm_slug: "dentarg".into(),
+            ..Config::default()
+        };
+        assert!(!no_game.is_complete(), "neither game turned on");
     }
 
     #[test]
-    fn whitespace_does_not_count_as_configured() {
+    fn whitespace_does_not_count_as_a_root() {
         let cfg = Config {
-            realm_slug: "  ".into(),
-            wow_retail_path: "  ".into(),
+            wow_root_path: "  ".into(),
+            retail_enabled: true,
+            realm_slug: "dentarg".into(),
             ..Config::default()
         };
         assert!(!cfg.is_complete());
     }
 
     #[test]
-    fn a_config_with_both_halves_is_complete() {
-        let cfg = Config {
+    fn retail_on_needs_a_realm_unless_auto_follow_is_on() {
+        let no_realm = Config {
+            wow_root_path: "/tmp/wow".into(),
+            retail_enabled: true,
+            realm_auto: false,
+            realm_slug: "  ".into(),
+            ..Config::default()
+        };
+        assert!(!no_realm.is_complete());
+
+        let pinned = Config {
+            wow_root_path: "/tmp/wow".into(),
+            retail_enabled: true,
+            realm_auto: false,
             realm_slug: "dentarg".into(),
-            wow_retail_path: "/tmp/wow/_retail_".into(),
+            ..Config::default()
+        };
+        assert!(pinned.is_complete());
+
+        let auto = Config {
+            wow_root_path: "/tmp/wow".into(),
+            retail_enabled: true,
+            realm_auto: true,
+            realm_slug: "".into(),
+            ..Config::default()
+        };
+        assert!(auto.is_complete(), "auto-follow needs no realm named yet");
+    }
+
+    // A Forever-only player never sees a realm picker at all (the wizard's own rule) — the
+    // completeness check must not invent a realm requirement for them.
+    #[test]
+    fn forever_only_needs_no_realm() {
+        let cfg = Config {
+            wow_root_path: "/tmp/wow".into(),
+            forever_enabled: true,
+            retail_enabled: false,
+            realm_auto: false,
+            realm_slug: "".into(),
             ..Config::default()
         };
         assert!(cfg.is_complete());
+    }
+
+    #[test]
+    fn both_games_with_retail_configured_is_complete() {
+        let cfg = Config {
+            wow_root_path: "/tmp/wow".into(),
+            retail_enabled: true,
+            forever_enabled: true,
+            realm_auto: false,
+            realm_slug: "dentarg".into(),
+            ..Config::default()
+        };
+        assert!(cfg.is_complete());
+    }
+
+    #[test]
+    fn retail_dir_from_root_joins_with_the_platform_separator() {
+        let expected = Path::new("/tmp/wow").join("_retail_").to_string_lossy().into_owned();
+        assert_eq!(retail_dir_from_root("/tmp/wow"), expected);
+        assert_eq!(retail_dir_from_root("  "), "");
+        assert_eq!(retail_dir_from_root(""), "");
+    }
+
+    // ---- migrate() ---------------------------------------------------------
+
+    fn migrated(json: &str) -> Config {
+        let raw: serde_json::Value = serde_json::from_str(json).unwrap();
+        let cfg: Config = serde_json::from_value(raw.clone()).unwrap();
+        migrate(&raw, cfg)
+    }
+
+    #[test]
+    fn an_old_retail_config_is_migrated_to_retail_on_forever_on_with_a_derived_root() {
+        let cfg = migrated(
+            r#"{"realmSlug": "dentarg", "wowRetailPath": "/Applications/World of Warcraft/_retail_"}"#,
+        );
+        assert!(cfg.retail_enabled, "it already named a realm and a retail path");
+        assert!(cfg.forever_enabled, "forever's own sync no-ops without an install anyway");
+        assert_eq!(cfg.wow_root_path, "/Applications/World of Warcraft");
+        assert!(cfg.is_complete(), "an existing retail player must not be sent back to the wizard");
+    }
+
+    // A config with neither a realm nor a retail path (freakishly old, or hand-edited to `{}`)
+    // has nothing to turn retail on FOR — it must not claim retail is enabled with no path to
+    // sync against, which would show a Retail card with every stage stuck on "Waiting for setup".
+    #[test]
+    fn an_empty_old_config_does_not_turn_retail_on() {
+        let cfg = migrated("{}");
+        assert!(!cfg.retail_enabled);
+        assert!(cfg.forever_enabled);
+        assert_eq!(cfg.wow_root_path, "");
+    }
+
+    // A player who explicitly saved retailEnabled/foreverEnabled through Settings must have that
+    // choice respected on the next load, even though the stored value is `false` — the same
+    // false a pre-migration file's *absence* of the key would also deserialize to. Only the raw
+    // JSON's key presence tells the two apart.
+    #[test]
+    fn an_explicit_false_survives_migration_even_though_it_looks_like_an_old_files_default() {
+        let cfg = migrated(
+            r#"{"realmSlug": "dentarg", "wowRetailPath": "/tmp/wow/_retail_", "wowRootPath": "/tmp/wow", "retailEnabled": false, "foreverEnabled": false}"#,
+        );
+        assert!(!cfg.retail_enabled, "the player's own choice, not the old-config default");
+        assert!(!cfg.forever_enabled);
+    }
+
+    #[test]
+    fn a_saved_wow_root_path_is_never_overwritten_by_a_derived_one() {
+        let cfg = migrated(
+            r#"{"wowRetailPath": "/Applications/World of Warcraft/_retail_", "wowRootPath": "/custom/root"}"#,
+        );
+        assert_eq!(cfg.wow_root_path, "/custom/root");
+    }
+
+    // A retail path that is not shaped like `.../_retail_` (defensive — normalize_retail_dir
+    // should prevent this from ever being saved) derives nothing rather than guessing.
+    #[test]
+    fn a_retail_path_not_shaped_like_retail_derives_no_root() {
+        let cfg = migrated(r#"{"wowRetailPath": "/tmp/not-retail"}"#);
+        assert_eq!(cfg.wow_root_path, "");
     }
 }
