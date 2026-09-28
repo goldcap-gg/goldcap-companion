@@ -19,9 +19,8 @@ data.
 - When goldcap.gg answers slowly, prices still come through: the Companion
   now waits longer for a realm's prices and tries again a couple of times
   before giving up.
-- When prices cannot be fetched, the Status screen now says why — the site
-  timed out, or your computer could not connect to it — instead of one
-  vague "request failed".
+- When prices cannot be fetched, the Status screen now says why: the site
+  took too long to answer, or your computer could not connect to it.
 
 ## 1.14.0 (2026-09-28)
 
