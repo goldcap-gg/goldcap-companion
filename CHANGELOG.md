@@ -10,8 +10,9 @@ data.
   setup and start syncing without ever pointing the Companion at a retail
   install — no realm, no retail folder, nothing to skip.
 - Settings has a "Games" section to turn Retail or WoW: Forever on or off at
-  any time, and "WoW folder" now points at the folder that holds both
-  clients rather than the retail one alone.
+  any time, with its own folder and its own "Change…" for each — Retail and
+  WoW: Forever no longer have to share one folder, so they work correctly
+  even installed on two different drives.
 - The Status screen shows a card per game you have turned on — a Forever
   card with your last scan and the crowd prices that came back, a Retail
   card with today's three stages — instead of one fixed layout for everyone.
