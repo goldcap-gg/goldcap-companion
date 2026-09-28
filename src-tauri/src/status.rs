@@ -206,7 +206,7 @@ mod tests {
             region: Region::Eu,
             realm_slug: "dentarg".into(),
             wow_retail_path: "/tmp/wow/_retail_".into(),
-            wow_root_path: "/tmp/wow".into(),
+            forever_root_path: "/tmp/wow".into(),
             retail_enabled: true,
             ..Config::default()
         }
