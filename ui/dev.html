@@ -51,13 +51,24 @@
       function apiFor(name) {
         const f = structuredClone(FIXTURES[name]);
         const delay = (v) => new Promise((r) => setTimeout(() => r(v), 120));
+        // Mirrors config.rs's is_complete for this harness only — the real app never
+        // duplicates the rule (it calls setup_complete), but a fixture stub has no Rust
+        // behind it to ask.
+        const isComplete = (c) =>
+          Boolean(c.wowRootPath?.trim()) &&
+          (c.retailEnabled || c.foreverEnabled) &&
+          (!c.retailEnabled || c.realmAuto || Boolean(c.realmSlug?.trim()));
         return {
           getConfig: () => delay(f.config),
           saveConfig: (config) => { Object.assign(f.config, config); return delay(); },
           getStatus: () => delay(f.status),
           syncNow: () => delay(),
+          setupComplete: () => delay(isComplete(f.config)),
           detectWowPath: () => delay(f.detectedPath ?? ""),
           pickWowPath: () => delay(f.detectedPath ?? ""),
+          detectWowRoot: () => delay(f.wowRoot ?? ""),
+          pickWowRoot: () => delay(f.wowRoot ?? ""),
+          detectGames: () => delay(f.detectedGames ?? []),
           detectGame: () => delay(f.game ?? { region: "eu", realmNames: [] }),
           resolveRealm: (region, name) =>
             delay({ slug: name.toLowerCase().replace(/\s+/g, "-"), nameEn: name }),
