@@ -4,6 +4,18 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
+## 1.15.0 (unreleased)
+
+- First run now asks which WoW you play. A WoW: Forever player can finish
+  setup and start syncing without ever pointing the Companion at a retail
+  install — no realm, no retail folder, nothing to skip.
+- Settings has a "Games" section to turn Retail or WoW: Forever on or off at
+  any time, and "WoW folder" now points at the folder that holds both
+  clients rather than the retail one alone.
+- The Status screen shows a card per game you have turned on — a Forever
+  card with your last scan and the crowd prices that came back, a Retail
+  card with today's three stages — instead of one fixed layout for everyone.
+
 ## 1.14.0 (2026-09-28)
 
 - WoW: Forever: the Companion now finds your Forever install next to retail.
