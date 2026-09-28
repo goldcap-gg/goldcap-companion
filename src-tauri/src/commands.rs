@@ -28,20 +28,20 @@ pub fn setup_complete(state: State<AppState>) -> bool {
         .is_complete()
 }
 
-/// Backs the wizard's "Which WoW do you play?" step and Settings' "Detect" button for the WoW
-/// root folder — the folder that holds `_retail_`, `_classic_beta_`, … Empty string when nothing
-/// is found.
+/// Backs the wizard's "Which WoW do you play?" step: Retail's exact `_retail_` folder and
+/// Forever's own root, found independently (they may sit on entirely different drives), plus
+/// whether a Classic Era install was seen under either one — see `games::detect_installs`.
 #[tauri::command]
-pub fn detect_wow_root() -> String {
-    crate::games::detect_wow_root()
+pub fn detect_installs() -> crate::games::GameDetection {
+    crate::games::detect_installs()
 }
 
-/// Settings' "Change" and the wizard's own "Change" button for the WoW root: a native folder
-/// picker, accepting any folder that actually holds a WoW game folder (`_retail_`,
-/// `_classic_beta_`, …) — unlike `pick_wow_path`, it does not require `_retail_` specifically, so
-/// a Forever-only install validates too.
+/// Settings' "Change…" for the WoW: Forever folder and the wizard's own "Change…"/"Choose
+/// folder…" for it: a native folder picker, accepting any folder that actually holds a WoW game
+/// folder (`_retail_`, `_classic_beta_`, …) — unlike `pick_wow_path`, it does not require
+/// `_retail_` specifically, since Forever's own client folder name isn't fixed.
 #[tauri::command]
-pub async fn pick_wow_root(app: AppHandle) -> Result<Option<String>, String> {
+pub async fn pick_forever_root(app: AppHandle) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
 
     let picked =
@@ -55,15 +55,15 @@ pub async fn pick_wow_root(app: AppHandle) -> Result<Option<String>, String> {
     let path = folder.into_path().map_err(|e| e.to_string())?;
     if !crate::games::has_game_folder(&path) {
         return Err(format!(
-            "No World of Warcraft install found under {} — pick the folder that holds _retail_ or your Forever client",
+            "No World of Warcraft install found under {} — pick the folder that holds your Forever client",
             path.display()
         ));
     }
     Ok(Some(path.to_string_lossy().into_owned()))
 }
 
-/// Backs the wizard's "Which WoW do you play?" step: which games exist under a WoW root, for the
-/// player to turn on or off — see `games::detect_games`.
+/// Backs the wizard's and Settings' game lists for one already-known root: which games exist
+/// under it — see `games::detect_games`.
 #[tauri::command]
 pub fn detect_games(root: String) -> Vec<crate::games::DetectedGame> {
     crate::games::detect_games(Path::new(&root))
@@ -204,14 +204,10 @@ pub fn sync_now(state: State<AppState>) -> Result<(), String> {
 /// it to the running sync loop so a new `intervalMinutes` (or realm/region)
 /// takes effect without restarting the app.
 #[tauri::command]
-pub fn save_config(app: AppHandle, state: State<AppState>, mut config: Config) -> Result<(), String> {
-    // wow_retail_path is derived, never independently typed by the UI — see
-    // config::retail_dir_from_root. Every existing retail reader still reads
-    // wow_retail_path directly, so this is the one place that keeps it in sync with
-    // whatever root the player actually chose.
-    if !config.wow_root_path.trim().is_empty() {
-        config.wow_retail_path = config::retail_dir_from_root(&config.wow_root_path);
-    }
+pub fn save_config(app: AppHandle, state: State<AppState>, config: Config) -> Result<(), String> {
+    // wow_retail_path and forever_root_path are each set directly by the UI now (per-game
+    // Change…/Detect — see detect_wow_path/pick_wow_path for Retail and
+    // detect_installs/pick_forever_root for Forever), not derived from a shared root.
     config
         .save_to(&state.config_path)
         .map_err(|e| e.to_string())?;
