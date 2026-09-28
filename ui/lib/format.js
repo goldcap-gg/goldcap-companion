@@ -50,3 +50,23 @@ export function gameLine(g, now) {
   if (g.note) parts.push(g.note);
   return parts.join(" · ");
 }
+
+// The Forever card's "scan uploaded" line: how long ago the last scan reached goldcap.gg and how
+// many items it carried, or that nothing has gone up yet.
+export function foreverScanLine(g, now) {
+  if (!g.lastSentAt) return "No scan uploaded yet";
+  const items = g.sentItems ? ` · ${groupDigits(g.sentItems)} items` : "";
+  return `Scan uploaded ${relativeTime(g.lastSentAt, now)}${items}`;
+}
+
+// The Forever card's "crowd prices" line: when the companion last actually wrote everyone
+// else's prices into this install's addon folder. Empty until that has happened once.
+export function foreverCrowdLine(g, now) {
+  return g.crowdWrittenAt ? `Crowd prices written to the addon ${relativeTime(g.crowdWrittenAt, now)}` : "";
+}
+
+// The Forever card's "market" subtitle: realm · faction, or nothing before the first accepted
+// scan has named one.
+export function foreverMarketLine(g) {
+  return [g.realm, g.faction].filter(Boolean).join(" · ");
+}
