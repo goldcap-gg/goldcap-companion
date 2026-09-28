@@ -21,14 +21,16 @@ export function render(el, ctx) {
     region: "eu",
     realmSlug: "",
     wowRetailPath: "",
-    wowRootPath: "",
+    foreverRootPath: "",
     retailEnabled: false,
     foreverEnabled: false,
     intervalMinutes: 30,
     launchAtStartup: false,
     companionToken: "",
   };
-  let detectedGames = []; // DetectedGame[] from api.detectGames(wowRootPath)
+  // Whether a Classic Era install was seen under either game's folder — shown disabled, not
+  // omitted, so a player who has it knows GoldCap saw it and left it alone on purpose.
+  let classicEraFound = false;
   let realmNames = [];
   let step = 0;
 
@@ -85,7 +87,7 @@ export function render(el, ctx) {
   }
 
   // Bumped on every navigation, including detect()'s own — guards against a
-  // detect() still in flight (auto-detect, detectGames) landing after the
+  // detect() still in flight (auto-detect, detectInstalls) landing after the
   // user has already moved on some other way.
   let requestGen = 0;
 
@@ -104,10 +106,11 @@ export function render(el, ctx) {
 
   // ---- detecting: runs once on entry, before any step exists -------------
   //
-  // Everything the Games step needs to offer a choice — the WoW root and
-  // which games live under it — is read straight out of the filesystem.
+  // Everything the Games step needs to offer a choice — Retail's path and
+  // Forever's own root, found independently since the two games can live on
+  // entirely different drives — is read straight out of the filesystem.
   // Silent throughout: a failed probe here just means the step still exists
-  // to ask the question by hand (an empty root, an empty games list).
+  // to ask the question by hand (an empty path, "Not found").
   async function detect() {
     const gen = ++requestGen;
 
@@ -121,8 +124,8 @@ export function render(el, ctx) {
 
     // Seed everything the wizard never asks about directly — interval,
     // launch-at-startup, any pairing token already on disk — from what is
-    // actually saved, before anything below touches wowRootPath/the game
-    // toggles/region/realmSlug. Without this, a config from a previous
+    // actually saved, before anything below touches either game's path/the
+    // game toggles/region/realmSlug. Without this, a config from a previous
     // visit that this pass reopens for (say, Retail chosen but no realm
     // resolved yet before the player hit "Later") would have every one of
     // these silently reset the moment it saves.
@@ -133,59 +136,53 @@ export function render(el, ctx) {
       draft.region = config.region;
       draft.realmSlug = config.realmSlug;
       draft.wowRetailPath = config.wowRetailPath;
-      draft.wowRootPath = config.wowRootPath;
+      draft.foreverRootPath = config.foreverRootPath;
       draft.retailEnabled = config.retailEnabled;
       draft.foreverEnabled = config.foreverEnabled;
     }
 
-    if (!draft.wowRootPath) {
-      try {
-        draft.wowRootPath = (await ctx.api.detectWowRoot()) || "";
-      } catch {
-        draft.wowRootPath = "";
-      }
-      if (gen !== requestGen) return;
+    // Retail and Forever are searched independently — a saved path for one wins over whatever
+    // auto-detect finds, but an unset one is filled in from the scan.
+    let detected = { retailPath: "", foreverRootPath: "", classicEraFound: false };
+    try {
+      detected = await ctx.api.detectInstalls();
+    } catch {
+      /* the step still works by hand */
     }
-
-    await loadDetectedGames(gen);
     if (gen !== requestGen) return;
+    if (!draft.wowRetailPath) draft.wowRetailPath = detected.retailPath || "";
+    if (!draft.foreverRootPath) draft.foreverRootPath = detected.foreverRootPath || "";
+    classicEraFound = Boolean(detected.classicEraFound);
+
+    // A config that never decided either game (a brand-new install, or an old config migrated
+    // with neither turned on) gets the checkboxes defaulted to whatever was actually found. A
+    // config that already decided (a returning "Later" visit) keeps its own choice even if a
+    // game folder has since disappeared, so a player is never silently un-enrolled by an install
+    // being temporarily unavailable.
+    if (!draft.retailEnabled && !draft.foreverEnabled) {
+      draft.retailEnabled = Boolean(draft.wowRetailPath);
+      draft.foreverEnabled = Boolean(draft.foreverRootPath);
+    }
 
     go(0);
   }
 
-  // Re-reads which games exist under draft.wowRootPath. A config that never
-  // decided either game (a brand-new install, or an old config migrated with
-  // neither turned on) gets the checkboxes defaulted to whatever was
-  // actually found — matching the "found" badges the step shows. A config
-  // that already decided (a returning "Later" visit) keeps its own choice
-  // even if a game folder has since disappeared, so a player is never
-  // silently un-enrolled by an install being temporarily unavailable.
-  async function loadDetectedGames(gen) {
-    if (!draft.wowRootPath) {
-      detectedGames = [];
-      return;
-    }
-    try {
-      detectedGames = await ctx.api.detectGames(draft.wowRootPath);
-    } catch {
-      detectedGames = [];
-    }
-    if (gen !== undefined && gen !== requestGen) return;
-    if (!draft.retailEnabled && !draft.foreverEnabled) {
-      draft.retailEnabled = detectedGames.some((g) => g.kind === "retail");
-      draft.foreverEnabled = detectedGames.some((g) => g.kind === "forever");
-    }
-  }
+  // A checkbox row for one game, with its OWN path and its OWN Change…/Choose folder… button —
+  // Retail and Forever are found, configured, and picked independently, since they may not even
+  // share a drive.
+  function gameFolderRow(opts) {
+    const { title, subtitle, path, checked, disabled, onToggle, onChange } = opts;
 
-  // A checkbox row for one found game: title, a short line about what it
-  // does, and a "found" badge — mirrors the design canvas's Games step.
-  function gameCheckboxRow(title, subtitle, checked, onChange) {
-    const label = document.createElement("label");
-    label.className = "checkbox-row card";
+    const row = document.createElement("div");
+    row.className = "checkbox-row card stack";
+
+    const top = document.createElement("label");
+    top.className = "row";
     const box = document.createElement("input");
     box.type = "checkbox";
     box.checked = checked;
-    box.addEventListener("change", () => onChange(box.checked));
+    box.disabled = disabled;
+    box.addEventListener("change", () => onToggle(box.checked));
     const body = document.createElement("div");
     body.className = "stage-body";
     const t = document.createElement("span");
@@ -195,8 +192,31 @@ export function render(el, ctx) {
     sub.className = "muted";
     sub.textContent = subtitle;
     body.append(t, sub);
-    label.append(box, body);
-    return label;
+    top.append(box, body);
+
+    const pathRow = document.createElement("div");
+    pathRow.className = "row";
+    const pathLabel = document.createElement("span");
+    pathLabel.className = "mono muted";
+    pathLabel.textContent = path ? truncateMiddle(path, 38) : "Not found";
+    pathLabel.title = path;
+    const pathSpacer = document.createElement("span");
+    pathSpacer.className = "spacer";
+    const change = document.createElement("button");
+    change.className = "btn btn-sm";
+    change.type = "button";
+    change.textContent = path ? "Change…" : "Choose folder…";
+    change.addEventListener("click", async () => {
+      try {
+        await onChange();
+      } catch (e) {
+        ctx.toast(String(e), true);
+      }
+    });
+    pathRow.append(pathLabel, pathSpacer, change);
+
+    row.append(top, pathRow);
+    return row;
   }
 
   // Classic Era: shown, not omitted, specifically disabled so a player who
@@ -223,27 +243,11 @@ export function render(el, ctx) {
   // ---- step 0: which games ------------------------------------------------
 
   function stepGames() {
-    setHead("Which WoW do you play?", "We found your World of Warcraft folder. Pick the games GoldCap should keep in sync.");
+    setHead("Which WoW do you play?", "Each game gets its own folder — pick the ones GoldCap should keep in sync.");
     bodyEl.replaceChildren();
-
-    const pathRow = document.createElement("div");
-    pathRow.className = "card row";
-    const pathLabel = document.createElement("span");
-    pathLabel.className = "mono";
-    const rowSpacer = document.createElement("span");
-    rowSpacer.className = "spacer";
-    const change = document.createElement("button");
-    change.className = "btn btn-sm";
-    change.type = "button";
-    change.textContent = "Change…";
-    pathRow.append(pathLabel, rowSpacer, change);
 
     const list = document.createElement("div");
     list.className = "stack";
-
-    const empty = document.createElement("p");
-    empty.className = "muted";
-    empty.textContent = "No install found — point at your World of Warcraft folder.";
 
     const hint = document.createElement("p");
     hint.className = "muted wizard-hint";
@@ -254,77 +258,72 @@ export function render(el, ctx) {
     next.type = "button";
     next.textContent = "Next →";
 
-    function paintPath() {
-      pathLabel.textContent = draft.wowRootPath ? truncateMiddle(draft.wowRootPath, 42) : "No folder set";
-      pathLabel.title = draft.wowRootPath;
-    }
-
     function paintNext() {
-      next.disabled = !draft.wowRootPath || (!draft.retailEnabled && !draft.foreverEnabled);
+      next.disabled =
+        (!draft.retailEnabled && !draft.foreverEnabled) ||
+        (draft.retailEnabled && !draft.wowRetailPath) ||
+        (draft.foreverEnabled && !draft.foreverRootPath);
     }
 
     function paintGames() {
       list.replaceChildren();
-      const retail = detectedGames.find((g) => g.kind === "retail");
-      const forever = detectedGames.find((g) => g.kind === "forever");
-      const classicEra = detectedGames.find((g) => g.kind === "classicEra");
 
-      if (forever) {
-        list.append(
-          gameCheckboxRow(
-            "WoW: Forever",
-            "Client found · uploads your scans, brings back crowd prices",
-            draft.foreverEnabled,
-            (checked) => {
-              draft.foreverEnabled = checked;
-              paintNext();
-            },
-          ),
-        );
-      }
-      if (retail) {
-        list.append(
-          gameCheckboxRow(
-            "Retail",
-            "Client found · realm prices, ledger",
-            draft.retailEnabled,
-            (checked) => {
-              draft.retailEnabled = checked;
-              paintNext();
-            },
-          ),
-        );
-      }
-      if (classicEra) {
+      list.append(
+        gameFolderRow({
+          title: "WoW: Forever",
+          subtitle: "Uploads your scans, brings back crowd prices",
+          path: draft.foreverRootPath,
+          checked: draft.foreverEnabled,
+          disabled: !draft.foreverRootPath,
+          onToggle: (checked) => {
+            draft.foreverEnabled = checked;
+            paintNext();
+          },
+          onChange: async () => {
+            const picked = await ctx.api.pickForeverRoot();
+            if (!picked) return;
+            draft.foreverRootPath = picked;
+            draft.foreverEnabled = true;
+            paintGames();
+          },
+        }),
+      );
+
+      list.append(
+        gameFolderRow({
+          title: "Retail",
+          subtitle: "Realm prices, ledger",
+          path: draft.wowRetailPath,
+          checked: draft.retailEnabled,
+          disabled: !draft.wowRetailPath,
+          onToggle: (checked) => {
+            draft.retailEnabled = checked;
+            paintNext();
+          },
+          onChange: async () => {
+            const picked = await ctx.api.pickWowPath();
+            if (!picked) return;
+            draft.wowRetailPath = picked;
+            draft.retailEnabled = true;
+            paintGames();
+          },
+        }),
+      );
+
+      if (classicEraFound) {
         list.append(unsupportedGameRow("Classic Era", "Found, not supported by GoldCap"));
       }
       // The choice it describes only exists when both games were found.
-      hint.hidden = !(retail && forever);
+      hint.hidden = !(draft.wowRetailPath && draft.foreverRootPath);
 
-      empty.hidden = detectedGames.length > 0;
-      list.hidden = detectedGames.length === 0;
       paintNext();
     }
 
-    change.addEventListener("click", async () => {
-      try {
-        const picked = await ctx.api.pickWowRoot();
-        if (!picked) return;
-        draft.wowRootPath = picked;
-        paintPath();
-        await loadDetectedGames();
-        paintGames();
-      } catch (e) {
-        ctx.toast(String(e), true);
-      }
-    });
-
     next.addEventListener("click", () => go(1));
 
-    bodyEl.append(pathRow, empty, list, hint);
+    bodyEl.append(list, hint);
     nav.replaceChildren(Object.assign(document.createElement("div"), { className: "spacer" }), next);
 
-    paintPath();
     paintGames();
   }
 
