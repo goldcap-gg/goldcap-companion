@@ -121,7 +121,7 @@ function stageRow(key, stage, ctx, canPair) {
 // rebuild would).
 function foreverCard(g) {
   const card = document.createElement("div");
-  card.className = "card";
+  card.className = "card card-forever";
 
   const head = document.createElement("div");
   head.className = "row";

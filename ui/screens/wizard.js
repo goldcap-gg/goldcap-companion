@@ -298,6 +298,8 @@ export function render(el, ctx) {
       if (classicEra) {
         list.append(unsupportedGameRow("Classic Era", "Found, not supported by GoldCap"));
       }
+      // The choice it describes only exists when both games were found.
+      hint.hidden = !(retail && forever);
 
       empty.hidden = detectedGames.length > 0;
       list.hidden = detectedGames.length === 0;

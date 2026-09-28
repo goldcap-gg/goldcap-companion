@@ -81,6 +81,14 @@ h3 {
   box-shadow: var(--glow-rest);
 }
 
+/* WoW: Forever's card carries the site's Forever blue, so the two games read apart at a glance. */
+.card-forever {
+  border-color: rgba(127, 212, 238, 0.35);
+  background:
+    radial-gradient(120% 120% at 100% 0%, rgba(127, 212, 238, 0.1), transparent 60%),
+    var(--surface);
+}
+
 .glass {
   background: color-mix(in oklab, var(--bg-elev) 82%, transparent);
   backdrop-filter: blur(20px) saturate(1.2);
