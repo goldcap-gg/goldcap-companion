@@ -31,7 +31,7 @@ fn is_game_folder(name: &str) -> bool {
     name.len() > 2 && name.starts_with('_') && name.ends_with('_')
 }
 
-fn has_game_folder(root: &Path) -> bool {
+pub fn has_game_folder(root: &Path) -> bool {
     std::fs::read_dir(root)
         .map(|entries| {
             entries
@@ -41,9 +41,14 @@ fn has_game_folder(root: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// The WoW root: the folder the configured `_retail_` sits in, or else the first detected
-/// install base that holds any game folder (Decision E2).
+/// The WoW root: the player's own `wow_root_path` when the wizard (or Settings) has set one,
+/// else the folder the configured `_retail_` sits in, else the first detected install base that
+/// holds any game folder (Decision E2).
 pub fn wow_root(config: &Config) -> Option<PathBuf> {
+    let explicit = config.wow_root_path.trim();
+    if !explicit.is_empty() {
+        return Some(PathBuf::from(explicit));
+    }
     let retail = config.wow_retail_path.trim();
     if !retail.is_empty() {
         let path = Path::new(retail);
@@ -62,6 +67,94 @@ pub fn wow_root(config: &Config) -> Option<PathBuf> {
             }
         })
         .find(|c| has_game_folder(c))
+}
+
+/// Best-effort auto-detect of the WoW base install folder, for the wizard's "Which WoW do you
+/// play?" step and Settings' "Detect" button — the same candidates `wow_root` falls back to when
+/// nothing is configured yet, but usable before any `Config` exists. Empty string when nothing is
+/// found.
+pub fn detect_wow_root() -> String {
+    crate::config::wow_base_candidates()
+        .into_iter()
+        .map(|c| {
+            if c.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("_retail_")) {
+                c.parent().map(Path::to_path_buf).unwrap_or(c)
+            } else {
+                c
+            }
+        })
+        .find(|c| has_game_folder(c))
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// What the wizard's "Which WoW do you play?" step offers for one game folder under the WoW
+/// root: the folders `discover` would report at runtime, plus a `_classic_beta_` folder even
+/// before the addon inside it has ever written a Forever passport (a fresh Forever install with
+/// no characters yet has nothing else to go on), and `_classic_era_` named specifically so the
+/// step can show it disabled as "not supported" rather than silently omitting it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DetectedKind {
+    Retail,
+    Forever,
+    ClassicEra,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetectedGame {
+    pub folder: String,
+    pub kind: DetectedKind,
+    /// The player-facing GoldCap addon (as opposed to GoldCap_AppData, which the companion
+    /// writes itself) is installed under this folder's `Interface/AddOns`.
+    pub addon_installed: bool,
+}
+
+/// Every game folder directly under `root`, classified for onboarding rather than for the sync
+/// tick: unlike `discover`, a folder counts even when it has never been played (no
+/// SavedVariables yet) — a fresh install is exactly the case the wizard needs to offer.
+pub fn detect_games(root: &Path) -> Vec<DetectedGame> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    // The passport-based classification `discover` already does — folder name never decides,
+    // only the passport — reused here for any Forever install that already has one, whatever
+    // it's named.
+    let passport_forever: std::collections::HashSet<String> = discover(root, None)
+        .into_iter()
+        .filter(|g| g.kind == GameKind::Forever)
+        .map(|g| g.folder)
+        .collect();
+
+    let mut games: Vec<DetectedGame> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let dir = entry.path();
+            let folder = entry.file_name().to_string_lossy().into_owned();
+            if !dir.is_dir() || !is_game_folder(&folder) {
+                return None;
+            }
+            let addon_installed = dir
+                .join("Interface")
+                .join("AddOns")
+                .join(crate::health::ADDON_DIR_NAME)
+                .is_dir();
+            let kind = if folder.eq_ignore_ascii_case("_retail_") {
+                DetectedKind::Retail
+            } else if folder.eq_ignore_ascii_case("_classic_era_") {
+                DetectedKind::ClassicEra
+            } else if passport_forever.contains(&folder) || folder.eq_ignore_ascii_case("_classic_beta_") {
+                DetectedKind::Forever
+            } else {
+                DetectedKind::Other
+            };
+            Some(DetectedGame { folder, kind, addon_installed })
+        })
+        .collect();
+    games.sort_by(|a, b| a.folder.cmp(&b.folder));
+    games
 }
 
 fn same_dir(a: &Path, b: &Path) -> bool {
@@ -214,5 +307,89 @@ mod tests {
         let games = discover(&r, None);
         assert_eq!(games[0].interface, Some(16002));
         fs::remove_dir_all(&r).ok();
+    }
+
+    #[test]
+    fn wow_root_prefers_the_explicit_root_path_over_everything_else() {
+        let r = root("explicit-root");
+        let config = Config {
+            wow_root_path: r.to_string_lossy().into_owned(),
+            wow_retail_path: r.join("elsewhere").join("_retail_").to_string_lossy().into_owned(),
+            ..Config::default()
+        };
+        assert_eq!(wow_root(&config), Some(r.clone()));
+        fs::remove_dir_all(&r).ok();
+    }
+
+    #[test]
+    fn detect_games_offers_retail_only() {
+        let r = root("detect-retail-only");
+        saved(&r, "_retail_", "A", RETAIL);
+        let games = detect_games(&r);
+        assert_eq!(games.len(), 1);
+        assert_eq!(games[0].folder, "_retail_");
+        assert_eq!(games[0].kind, DetectedKind::Retail);
+        fs::remove_dir_all(&r).ok();
+    }
+
+    // A fresh Forever install has no passport yet — nobody has logged in and had the addon write
+    // one — but `_classic_beta_` must still be offered, or a first-time Forever player could
+    // never turn it on.
+    #[test]
+    fn detect_games_offers_a_fresh_classic_beta_before_any_passport_exists() {
+        let r = root("detect-beta-fresh");
+        fs::create_dir_all(r.join("_classic_beta_")).unwrap(); // no WTF, no SavedVariables at all
+        let games = detect_games(&r);
+        assert_eq!(games.len(), 1);
+        assert_eq!(games[0].folder, "_classic_beta_");
+        assert_eq!(games[0].kind, DetectedKind::Forever);
+        fs::remove_dir_all(&r).ok();
+    }
+
+    #[test]
+    fn detect_games_finds_a_forever_passport_under_any_folder_name() {
+        let r = root("detect-passport-anywhere");
+        saved(&r, "_forever_", "A", FOREVER);
+        let games = detect_games(&r);
+        assert_eq!(games.len(), 1);
+        assert_eq!(games[0].folder, "_forever_");
+        assert_eq!(games[0].kind, DetectedKind::Forever);
+        fs::remove_dir_all(&r).ok();
+    }
+
+    #[test]
+    fn detect_games_names_classic_era_as_not_supported_rather_than_omitting_it() {
+        let r = root("detect-classic-era");
+        fs::create_dir_all(r.join("_classic_era_")).unwrap();
+        let games = detect_games(&r);
+        assert_eq!(games.len(), 1);
+        assert_eq!(games[0].kind, DetectedKind::ClassicEra);
+        fs::remove_dir_all(&r).ok();
+    }
+
+    #[test]
+    fn detect_games_reports_all_three_side_by_side_and_whether_the_addon_is_installed() {
+        let r = root("detect-all-three");
+        saved(&r, "_retail_", "A", RETAIL);
+        fs::create_dir_all(r.join("_retail_").join("Interface").join("AddOns").join("GoldCap")).unwrap();
+        fs::create_dir_all(r.join("_classic_beta_")).unwrap();
+        fs::create_dir_all(r.join("_classic_era_")).unwrap();
+        let games = detect_games(&r);
+        let summary: Vec<(&str, DetectedKind, bool)> =
+            games.iter().map(|g| (g.folder.as_str(), g.kind, g.addon_installed)).collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("_classic_beta_", DetectedKind::Forever, false),
+                ("_classic_era_", DetectedKind::ClassicEra, false),
+                ("_retail_", DetectedKind::Retail, true),
+            ]
+        );
+        fs::remove_dir_all(&r).ok();
+    }
+
+    #[test]
+    fn detect_games_on_a_missing_root_is_empty() {
+        assert!(detect_games(Path::new("/definitely/not/here/goldcap")).is_empty());
     }
 }
