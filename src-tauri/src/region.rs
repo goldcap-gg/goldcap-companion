@@ -131,10 +131,12 @@ async fn fetch_from(
     region: &str,
     etag: Option<&str>,
 ) -> Result<Fetched, String> {
-    let mut request = client
-        .get(url)
-        .query(&[("region", region)])
-        .timeout(TIMEOUT);
+    fetch_capped(client.get(url).query(&[("region", region)]).timeout(TIMEOUT), etag).await
+}
+
+/// Sends `request` (with `If-None-Match` when an ETag is kept) and reads the answer under the
+/// MAX_BODY_BYTES running cap. Shared with forever.rs's GCF1 fetch.
+pub(crate) async fn fetch_capped(mut request: reqwest::RequestBuilder, etag: Option<&str>) -> Result<Fetched, String> {
     if let Some(tag) = etag {
         request = request.header(reqwest::header::IF_NONE_MATCH, tag);
     }

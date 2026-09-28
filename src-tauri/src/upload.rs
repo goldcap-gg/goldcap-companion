@@ -31,6 +31,24 @@ pub const OWNED_LOTS_URL: &str = "https://api.goldcap.gg/v1/owned-lots";
 /// Must not exceed the API's own per-request cap (routes/owned-lots.ts).
 pub const MAX_OWNED_LOT_BATCH: usize = 500;
 
+/// The client passport header (docs/companion/AGENTS.md "Client passport").
+pub const CLIENT_HEADER: &str = "X-GoldCap-Client";
+
+/// A file stamped by a non-retail client (WoW: Forever, Classic) must never reach the
+/// retail upload routes. Unstamped files predate the passport and are retail — but that
+/// holds only because this companion reads only `_retail_`. An unstamped file read from
+/// any other folder is unknown, not retail, and must not be treated as uploadable here.
+pub fn uploadable(data: &LedgerData) -> bool {
+    data.client.as_ref().map_or(true, |p| p.is_retail())
+}
+
+pub fn with_client(req: reqwest::RequestBuilder, data: &LedgerData) -> reqwest::RequestBuilder {
+    match &data.client {
+        Some(p) => req.header(CLIENT_HEADER, p.header_value()),
+        None => req,
+    }
+}
+
 /// What the Status screen shows for the ledger stage. Kept next to the dedupe
 /// keys in the same file so a restart does not reset the counter to zero.
 #[derive(Debug, Default, Clone, PartialEq, serde::Serialize)]
@@ -336,11 +354,11 @@ pub async fn claim_code(
 pub async fn upload_batch(
     client: &reqwest::Client,
     token: &str,
+    data: &LedgerData,
     entries: &[&LedgerEntry],
     gold: &[&GoldPoint],
 ) -> Result<(), String> {
-    let res = client
-        .post(UPLOAD_URL)
+    let res = with_client(client.post(UPLOAD_URL), data)
         .bearer_auth(token)
         .json(&serde_json::json!({ "entries": entries, "gold": gold }))
         .send()
@@ -393,6 +411,14 @@ pub async fn upload_once(
             }
         };
 
+        if !uploadable(&data) {
+            logger.info(&format!(
+                "{}: written by another game's client, not uploaded to retail",
+                file.display()
+            ));
+            continue;
+        }
+
         let (entries, gold) = pending(&data, &state);
         if !entries.is_empty() || !gold.is_empty() {
             // Gold rides along with the first batch; it is small and immutable.
@@ -404,7 +430,7 @@ pub async fn upload_once(
             };
 
             for batch in batches {
-                match upload_batch(client, token, batch, gold_to_send).await {
+                match upload_batch(client, token, &data, batch, gold_to_send).await {
                     Ok(()) => {
                         state.remember_entries(batch);
                         state.remember_gold(gold_to_send);
@@ -480,6 +506,14 @@ pub async fn upload_observations_once(
             continue;
         };
 
+        if !uploadable(&data) {
+            logger.info(&format!(
+                "{}: written by another game's client, not uploaded to retail",
+                file.display()
+            ));
+            continue;
+        }
+
         let rows = pending_observations(&data, &state, region);
 
         let wrong_region = data
@@ -500,8 +534,7 @@ pub async fn upload_observations_once(
                 "realmSlug": realm_slug,
                 "observations": batch,
             });
-            let sent = client
-                .post(LIVE_OBSERVATIONS_URL)
+            let sent = with_client(client.post(LIVE_OBSERVATIONS_URL), &data)
                 .bearer_auth(token)
                 .json(&body)
                 .send()
@@ -560,11 +593,17 @@ pub async fn upload_item_names_once(
         let Ok(data) = crate::savedvars::parse_saved_variables(&source) else {
             continue;
         };
+        if !uploadable(&data) {
+            logger.info(&format!(
+                "{}: written by another game's client, not uploaded to retail",
+                file.display()
+            ));
+            continue;
+        }
         let rows = pending_item_names(&data, &state);
         for batch in rows.chunks(MAX_ITEM_NAME_BATCH) {
             let body = serde_json::json!({ "reports": batch });
-            match client
-                .post(ITEM_NAMES_URL)
+            match with_client(client.post(ITEM_NAMES_URL), &data)
                 .bearer_auth(token)
                 .json(&body)
                 .send()
@@ -622,12 +661,19 @@ pub async fn upload_owned_lots_once(
             continue;
         };
 
+        if !uploadable(&data) {
+            logger.info(&format!(
+                "{}: written by another game's client, not uploaded to retail",
+                file.display()
+            ));
+            continue;
+        }
+
         let rows = pending_owned_lots(&data, &state, region);
 
         for batch in rows.chunks(MAX_OWNED_LOT_BATCH) {
             let body = serde_json::json!({ "region": region, "lots": batch });
-            let sent = client
-                .post(OWNED_LOTS_URL)
+            let sent = with_client(client.post(OWNED_LOTS_URL), &data)
                 .bearer_auth(token)
                 .json(&body)
                 .send()
@@ -665,7 +711,8 @@ pub async fn upload_owned_lots_once(
 mod tests {
     use super::*;
     use crate::savedvars::{
-        parse_saved_variables, GoldPoint, LedgerData, LedgerEntry, LiveObservation, OwnedLot,
+        parse_saved_variables, ClientPassport, GoldPoint, LedgerData, LedgerEntry, LiveObservation,
+        OwnedLot,
     };
 
     const REAL_FILE: &str = include_str!("../tests/fixtures/GoldCap.lua");
@@ -949,6 +996,7 @@ mod tests {
             observations: vec![],
             item_names: vec![],
             owned_lots: vec![],
+            client: None,
         };
         let (entries, points) = pending(&data, &UploadState::default());
         assert_eq!(entries.len(), 2);
@@ -989,6 +1037,7 @@ mod tests {
             observations: vec![],
             item_names: vec![],
             owned_lots: vec![],
+            client: None,
         };
         let (entries, _) = pending(&data, &state);
         assert_eq!(entries.len(), 1);
@@ -1012,6 +1061,7 @@ mod tests {
             observations: vec![],
             item_names: vec![],
             owned_lots: vec![],
+            client: None,
         };
         let (entries, _) = pending(&data, &state);
         assert_eq!(
@@ -1040,6 +1090,7 @@ mod tests {
             observations: vec![],
             item_names: vec![],
             owned_lots: vec![],
+            client: None,
         };
         let (entries, _) = pending(&data, &state);
         assert_eq!(entries.len(), 1, "a repaired region must reach the server");
@@ -1055,6 +1106,7 @@ mod tests {
             observations: vec![],
             item_names: vec![],
             owned_lots: vec![],
+            client: None,
         };
         let (_, points) = pending(&data, &state);
         assert_eq!(points.len(), 1);
@@ -1116,6 +1168,7 @@ mod tests {
             observations: vec![],
             item_names: vec![],
             owned_lots: vec![],
+            client: None,
         };
         let (entries, _) = pending(&data, &UploadState::default());
         let batches: Vec<_> = entries.chunks(MAX_BATCH).collect();
@@ -1229,5 +1282,52 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn data_with(client: Option<ClientPassport>) -> LedgerData {
+        LedgerData {
+            client,
+            ..LedgerData::default()
+        }
+    }
+
+    #[test]
+    fn files_without_a_passport_and_retail_files_are_uploadable() {
+        assert!(uploadable(&data_with(None)));
+        assert!(uploadable(&data_with(Some(ClientPassport {
+            interface: 120100,
+            build: "12.1.0.69933".into()
+        }))));
+    }
+
+    #[test]
+    fn a_forever_file_is_not_uploaded_to_retail() {
+        assert!(!uploadable(&data_with(Some(ClientPassport {
+            interface: 16001,
+            build: "1.60.1.69977".into()
+        }))));
+    }
+
+    #[test]
+    fn the_passport_rides_as_a_header_and_its_absence_sends_none() {
+        let client = reqwest::Client::new();
+        let with = with_client(
+            client.post(LIVE_OBSERVATIONS_URL),
+            &data_with(Some(ClientPassport {
+                interface: 120100,
+                build: "12.1.0.69933".into(),
+            })),
+        )
+        .build()
+        .unwrap();
+        assert_eq!(
+            with.headers().get(CLIENT_HEADER).unwrap(),
+            "120100/12.1.0.69933"
+        );
+
+        let without = with_client(client.post(LIVE_OBSERVATIONS_URL), &data_with(None))
+            .build()
+            .unwrap();
+        assert!(without.headers().get(CLIENT_HEADER).is_none());
     }
 }

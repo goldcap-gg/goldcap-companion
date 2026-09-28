@@ -59,6 +59,26 @@ impl Debouncer {
     }
 }
 
+/// Every `WTF/Account` whose SavedVariables writes should trigger a sync: the configured retail
+/// one (exactly as before), then each WoW: Forever install's (games.rs). Other game folders are
+/// not watched: nothing is uploaded from them.
+pub fn account_roots(config: &Config) -> Vec<PathBuf> {
+    let retail = config.wow_retail_path.trim();
+    let mut roots = Vec::new();
+    if !retail.is_empty() {
+        roots.push(PathBuf::from(retail).join("WTF").join("Account"));
+    }
+    if let Some(root) = crate::games::wow_root(config) {
+        let retail_dir = (!retail.is_empty()).then(|| PathBuf::from(retail));
+        for g in crate::games::discover(&root, retail_dir.as_deref()) {
+            if g.kind == crate::games::GameKind::Forever {
+                roots.push(g.dir.join("WTF").join("Account"));
+            }
+        }
+    }
+    roots
+}
+
 /// Watches `<wow_retail_path>/WTF/Account` and fires `trigger_tx` (the same
 /// channel as the tray's "Sync now") after a debounced SavedVariables write.
 /// Rebuilds the watcher whenever the config (and thus possibly the WoW path)
@@ -72,17 +92,16 @@ pub async fn run_loop(
         let wow_path = config_rx.borrow().wow_retail_path.trim().to_string();
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<PathBuf>();
 
-        // Held for its Drop: dropping the watcher (on config change) stops
-        // the notify thread watching the old path.
-        let _watcher = if wow_path.is_empty() {
-            None
-        } else {
-            build_watcher(
-                PathBuf::from(&wow_path).join("WTF").join("Account"),
-                event_tx,
-                &logger,
-            )
-        };
+        // Held for their Drop: dropping the watchers (on config change) stops
+        // the notify threads watching the old paths.
+        let _watchers: Vec<RecommendedWatcher> = account_roots(&config_rx.borrow())
+            .into_iter()
+            .filter_map(|root| build_watcher(root, event_tx.clone(), &logger))
+            .collect();
+        // Each watcher above holds its own clone; this original must go too, or
+        // `event_rx.recv()` never sees the channel close when every watch failed (or there was
+        // nothing to watch at all), and the retry-on-next-config-save path below never fires.
+        drop(event_tx);
 
         let mut debounce = Debouncer::default();
         loop {
@@ -255,4 +274,83 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn the_watcher_watches_retail_as_before_plus_each_forever_install() {
+        let root = std::env::temp_dir().join(format!("goldcap-watch-roots-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for (folder, lua) in [
+            ("_retail_", r#"GoldCapDB = {}"#),
+            ("_classic_beta_", r#"GoldCapDB = { client = { interface = 16001, build = "1.60.1.70009" } }"#),
+            ("_ptr_", r#"GoldCapDB = { client = { interface = 120100, build = "12.1.0.1" } }"#),
+        ] {
+            let sv = root.join(folder).join("WTF").join("Account").join("A").join("SavedVariables");
+            std::fs::create_dir_all(&sv).unwrap();
+            std::fs::write(sv.join("GoldCap.lua"), lua).unwrap();
+        }
+        let config = Config { wow_retail_path: root.join("_retail_").to_string_lossy().into_owned(), ..Config::default() };
+        assert_eq!(
+            account_roots(&config),
+            vec![root.join("_retail_").join("WTF").join("Account"), root.join("_classic_beta_").join("WTF").join("Account")]
+        );
+        // Retail alone configured and nothing else on disk: exactly the one root it always watched.
+        std::fs::remove_dir_all(root.join("_classic_beta_")).unwrap();
+        assert_eq!(account_roots(&config), vec![root.join("_retail_").join("WTF").join("Account")]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // I2: before this fix, `event_tx` stayed alive in `run_loop` after the watchers were built
+    // (each watcher only held a clone), so a watch that failed at startup (WTF\Account not
+    // created yet, a fresh WoW install) never made `event_rx.recv()` return None — the
+    // park-until-config-change retry below it never ran, and only a WoW *path* change (never a
+    // plain settings save) rebuilt the watcher. 1.13.0 retried on any config save.
+    #[tokio::test]
+    async fn a_failed_watch_rebuilds_on_the_next_config_save() {
+        let dir = std::env::temp_dir().join(format!("goldcap-watcher-retry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // WTF/Account does not exist yet under this path: the first watch attempt must fail.
+        let retail = dir.join("_retail_");
+        let config = Config {
+            wow_retail_path: retail.to_string_lossy().into_owned(),
+            ..Config::default()
+        };
+
+        let logger_dir = dir.join("log");
+        std::fs::create_dir_all(&logger_dir).unwrap();
+        let logger = Arc::new(Logger::new(&logger_dir).unwrap());
+
+        let (config_tx, config_rx) = watch::channel(config);
+        let (trigger_tx, mut trigger_rx) = mpsc::channel(4);
+
+        let handle = tokio::spawn(run_loop(config_rx, trigger_tx, logger));
+
+        // Give the failed watch attempt time to run and park.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Now the path exists, so a retry would succeed — but nothing retries it yet.
+        let account_root = retail.join("WTF").join("Account");
+        std::fs::create_dir_all(&account_root).unwrap();
+
+        // A settings save that does not touch the WoW path at all — exactly what pairing or an
+        // interval change looks like. This alone must be enough to rebuild the watcher.
+        config_tx.send_modify(|c| c.interval_minutes = 45);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let sv = account_root.join("A").join("SavedVariables");
+        std::fs::create_dir_all(&sv).unwrap();
+        std::fs::write(sv.join("GoldCap.lua"), "GoldCapDB = {}").unwrap();
+
+        let got = tokio::time::timeout(Duration::from_secs(10), trigger_rx.recv()).await;
+
+        handle.abort();
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(
+            got.is_ok() && got.unwrap().is_some(),
+            "no trigger within 10s: the watcher never rebuilt after the failed initial watch"
+        );
+    }
 }
+

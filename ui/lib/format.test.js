@@ -6,6 +6,7 @@ import {
   truncateMiddle,
   groupDigits,
   formatPairCode,
+  gameLine,
 } from "./format.js";
 
 const NOW = 1_785_600_000;
@@ -76,4 +77,22 @@ test("formatPairCode upper-cases and hyphenates as you type", () => {
 
 test("formatPairCode drops junk and caps the length", () => {
   assert.equal(formatPairCode("ab cd!12 34xyz"), "ABCD-1234");
+});
+
+test("gameLine: retail says only where it is", () => {
+  assert.equal(gameLine({ folder: "_retail_", game: "retail" }, 1000), "Retail · _retail_");
+});
+
+test("gameLine: Forever says what was sent, what came back and anything the player must do", () => {
+  const now = 1_790_000_000;
+  assert.equal(
+    gameLine({ folder: "_classic_beta_", game: "forever", lastSentAt: now - 300, crowdItems: 1974, crowdTs: now - 600,
+      note: "Link Battle.net on goldcap.gg for your scans to count in public prices" }, now),
+    "WoW: Forever · _classic_beta_ · scan sent 5 min ago · 1 974 prices from players, 10 min ago · Link Battle.net on goldcap.gg for your scans to count in public prices",
+  );
+  assert.equal(gameLine({ folder: "_classic_beta_", game: "forever" }, now), "WoW: Forever · _classic_beta_ · no scan sent yet");
+});
+
+test("gameLine: another game is named and left alone", () => {
+  assert.equal(gameLine({ folder: "_ptr_", game: "other" }, 1), "_ptr_ · not used");
 });

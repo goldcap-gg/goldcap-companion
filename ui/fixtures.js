@@ -98,6 +98,10 @@ export const FIXTURES = {
       prices: stage("ok", NOW - 240, "Fetched from goldcap.gg"),
       addon: stage("ok", NOW - 240, "Written to GoldCap_AppData"),
       ledger: stage("ok", NOW - 240, "142 rows sent · queue empty"),
+      games: [
+        { folder: "_classic_beta_", game: "forever", lastSentAt: NOW - 300, crowdItems: 1974, crowdTs: NOW - 600 },
+        { folder: "_retail_", game: "retail" },
+      ],
     },
   },
 

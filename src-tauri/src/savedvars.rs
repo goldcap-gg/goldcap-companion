@@ -155,6 +155,44 @@ pub struct ItemNameReport {
     pub expansion_id: Option<i64>,
 }
 
+/// `GoldCapDB.client`: which game client wrote this file. Stamped by the addon on every
+/// load (Core/Game.lua). A file written before the stamp existed has none and is read as
+/// retail, exactly as before.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClientPassport {
+    pub interface: i64,
+    pub build: String,
+}
+
+/// Retail's interface numbers are six digits; every other WoW client is below
+/// (Classic Era 11508, Anniversary 20505, MoP Classic 50500, Forever 16001).
+pub const RETAIL_MIN_INTERFACE: i64 = 100_000;
+
+impl ClientPassport {
+    pub fn is_retail(&self) -> bool {
+        self.interface >= RETAIL_MIN_INTERFACE
+    }
+    pub fn header_value(&self) -> String {
+        format!("{}/{}", self.interface, self.build)
+    }
+}
+
+/// Matches the API's `^\d{1,7}$` on the interface half of the header.
+fn is_valid_passport_interface(interface: i64) -> bool {
+    (1..=9_999_999).contains(&interface)
+}
+
+/// Matches the API's `^\d+(\.\d+){0,5}$` on the build half of the header: 1 to 6
+/// dot-separated groups, each non-empty and all ASCII digits. No regex crate needed.
+pub(crate) fn is_valid_passport_build(build: &str) -> bool {
+    let groups: Vec<&str> = build.split('.').collect();
+    !groups.is_empty()
+        && groups.len() <= 6
+        && groups
+            .iter()
+            .all(|g| !g.is_empty() && g.bytes().all(|b| b.is_ascii_digit()))
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LedgerData {
     pub entries: Vec<LedgerEntry>,
@@ -162,6 +200,7 @@ pub struct LedgerData {
     pub observations: Vec<LiveObservation>,
     pub item_names: Vec<ItemNameReport>,
     pub owned_lots: Vec<OwnedLot>,
+    pub client: Option<ClientPassport>,
 }
 
 /// Every `WTF/Account/<ACCOUNT>/SavedVariables/GoldCap.lua` on disk. One per
@@ -179,14 +218,14 @@ pub fn saved_variables_paths(wow_retail_path: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-fn opt_string(t: &Table, key: &str) -> Option<String> {
+pub(crate) fn opt_string(t: &Table, key: &str) -> Option<String> {
     match t.get::<Value>(key) {
         Ok(Value::String(s)) => s.to_str().ok().map(|s| s.to_string()),
         _ => None,
     }
 }
 
-fn opt_int(t: &Table, key: &str) -> Option<i64> {
+pub(crate) fn opt_int(t: &Table, key: &str) -> Option<i64> {
     match t.get::<Value>(key) {
         Ok(Value::Integer(i)) => Some(i),
         Ok(Value::Number(n)) => Some(n as i64),
@@ -206,7 +245,7 @@ fn opt_exact_int(t: &Table, key: &str) -> Option<i64> {
     }
 }
 
-fn flag(t: &Table, key: &str) -> bool {
+pub(crate) fn flag(t: &Table, key: &str) -> bool {
     matches!(t.get::<Value>(key), Ok(Value::Boolean(true)))
 }
 
@@ -316,6 +355,22 @@ pub fn parse_saved_variables(lua_source: &str) -> Result<LedgerData, String> {
     };
 
     let mut data = LedgerData::default();
+
+    if let Ok(Value::Table(client)) = db.get::<Value>("client") {
+        // Anything unreadable is "no passport", never an error: a damaged stamp must not
+        // cost the player their ledger upload. The shape accepted here must match what the
+        // API accepts (interface `^\d{1,7}$`, build `^\d+(\.\d+){0,5}$`): a passport the
+        // server would reject as malformed is worse than no passport at all — a bad stamp
+        // like `build = "12.1.0-ptr"` would 400 and stall every upload from that file.
+        if let (Some(interface), Some(build)) =
+            (opt_int(&client, "interface"), opt_string(&client, "build"))
+        {
+            let build = build.trim().to_string();
+            if is_valid_passport_interface(interface) && is_valid_passport_build(&build) {
+                data.client = Some(ClientPassport { interface, build });
+            }
+        }
+    }
 
     if let Ok(Value::Table(ledger)) = db.get::<Value>("ledger") {
         for row in ledger.sequence_values::<Table>().flatten() {
@@ -1127,5 +1182,48 @@ GoldCapDB = { ["ledger"] = {
         assert!(v.get("totalQty").is_none());
         assert!(v.get("region").is_none());
         assert_eq!(v["levels"][0]["unit"], 1000);
+    }
+
+    #[test]
+    fn a_file_without_a_client_table_has_no_passport() {
+        let data = parse_saved_variables("GoldCapDB = { [\"settings\"] = {} }").unwrap();
+        assert_eq!(data.client, None);
+    }
+
+    #[test]
+    fn the_client_table_becomes_a_passport() {
+        let src = r#"GoldCapDB = { client = { interface = 16001, build = "1.60.1.69977", regionId = 90 } }"#;
+        let data = parse_saved_variables(src).unwrap();
+        let passport = data.client.expect("passport");
+        assert_eq!(passport.interface, 16001);
+        assert_eq!(passport.build, "1.60.1.69977");
+        assert!(!passport.is_retail());
+        assert_eq!(passport.header_value(), "16001/1.60.1.69977");
+    }
+
+    #[test]
+    fn a_retail_passport_is_retail() {
+        let src = r#"GoldCapDB = { client = { interface = 120100, build = "12.1.0.69933" } }"#;
+        let passport = parse_saved_variables(src).unwrap().client.unwrap();
+        assert!(passport.is_retail());
+    }
+
+    #[test]
+    fn a_junk_client_table_reads_as_no_passport_and_keeps_the_rest() {
+        for src in [
+            r#"GoldCapDB = { client = { interface = "x", build = "1.0" }, ledger = {} }"#,
+            r#"GoldCapDB = { client = { interface = 16001 }, ledger = {} }"#,
+            r#"GoldCapDB = { client = { interface = -1, build = "1.0" }, ledger = {} }"#,
+            r#"GoldCapDB = { client = { interface = 16001, build = "" }, ledger = {} }"#,
+            r#"GoldCapDB = { client = "16001", ledger = {} }"#,
+            // A stamp the API would reject as malformed must not become a passport
+            // either: it would 400 forever and stall every upload from this file.
+            r#"GoldCapDB = { client = { interface = 16001, build = "12.1.0-ptr" }, ledger = {} }"#,
+            r#"GoldCapDB = { client = { interface = 16001, build = "1..2" }, ledger = {} }"#,
+            r#"GoldCapDB = { client = { interface = 10000000, build = "1.0" }, ledger = {} }"#,
+        ] {
+            let data = parse_saved_variables(src).unwrap();
+            assert_eq!(data.client, None, "{src}");
+        }
     }
 }

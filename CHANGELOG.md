@@ -4,6 +4,17 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
+## 1.14.0 (2026-09-28)
+
+- WoW: Forever: the Companion now finds your Forever install next to retail.
+  After each /reload it sends your Forever auction house scan to goldcap.gg,
+  and it brings back the Forever prices every player's scans add up to, so the
+  addon's tooltips and Deals board use them. Pair the Companion to share your
+  scans; prices count in public only from accounts with Battle.net linked on
+  goldcap.gg. Needs the matching addon release.
+- The Status screen lists the game folders the Companion found and, for
+  WoW: Forever, when your last scan was sent and how many prices came back.
+
 ## 1.13.0 (2026-09-24)
 
 - The Companion now hands the addon the prices of your alert groups — every

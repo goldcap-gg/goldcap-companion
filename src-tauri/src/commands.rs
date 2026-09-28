@@ -135,7 +135,11 @@ pub fn get_status(state: State<AppState>) -> crate::status::StatusSnapshot {
         .unwrap_or_else(|p| p.into_inner())
         .clone();
     let health = crate::health::inspect(Path::new(&config.wow_retail_path));
-    crate::status::build(&config, &status, &health, crate::luafile::now_unix())
+    let mut snapshot = crate::status::build(&config, &status, &health, crate::luafile::now_unix());
+    if let Some(dir) = state.config_path.parent() {
+        snapshot.games = crate::forever::ForeverState::load_from(&dir.join(crate::forever::STATE_FILE_NAME)).games;
+    }
+    snapshot
 }
 
 #[tauri::command]
