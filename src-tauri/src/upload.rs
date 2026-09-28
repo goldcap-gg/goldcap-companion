@@ -338,11 +338,11 @@ pub async fn claim_code(
         .json(&serde_json::json!({ "code": code, "label": label }))
         .send()
         .await
-        .map_err(|e| format!("request failed: {e}"))?;
+        .map_err(|e| format!("request failed: {}", crate::sync::describe_err(&e, crate::sync::CLIENT_TIMEOUT)))?;
     if !res.status().is_success() {
         return Err("that code is not valid — get a fresh one on goldcap.gg/account".into());
     }
-    let body: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    let body: serde_json::Value = res.json().await.map_err(|e| crate::sync::describe_err(&e, crate::sync::CLIENT_TIMEOUT))?;
     body.get("token")
         .and_then(|t| t.as_str())
         .map(|t| t.to_string())
@@ -363,7 +363,7 @@ pub async fn upload_batch(
         .json(&serde_json::json!({ "entries": entries, "gold": gold }))
         .send()
         .await
-        .map_err(|e| format!("request failed: {e}"))?;
+        .map_err(|e| format!("request failed: {}", crate::sync::describe_err(&e, crate::sync::CLIENT_TIMEOUT)))?;
     if !res.status().is_success() {
         return Err(format!("unexpected status {}", res.status()));
     }
@@ -551,7 +551,7 @@ pub async fn upload_observations_once(
                     break; // retry this file's remainder next tick
                 }
                 Err(e) => {
-                    logger.error(&format!("live observations failed: {e}"));
+                    logger.error(&format!("live observations failed: {}", crate::sync::describe_err(&e, crate::sync::CLIENT_TIMEOUT)));
                     break; // retry this file's remainder next tick
                 }
             }
@@ -620,7 +620,7 @@ pub async fn upload_item_names_once(
                     break;
                 }
                 Err(e) => {
-                    logger.error(&format!("item names failed: {e}"));
+                    logger.error(&format!("item names failed: {}", crate::sync::describe_err(&e, crate::sync::CLIENT_TIMEOUT)));
                     break;
                 }
             }
@@ -690,7 +690,7 @@ pub async fn upload_owned_lots_once(
                     break; // retry this file's remainder next tick
                 }
                 Err(e) => {
-                    logger.error(&format!("owned lots upload failed: {e}"));
+                    logger.error(&format!("owned lots upload failed: {}", crate::sync::describe_err(&e, crate::sync::CLIENT_TIMEOUT)));
                     break; // retry this file's remainder next tick
                 }
             }

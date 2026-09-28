@@ -21,7 +21,7 @@ pub const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_AGE_SECS: i64 = 3 * 3600;
 
 /// The payload is ~1.2 MB and built on the site's first request after an ingest tick,
-/// so it gets three times the import string's 20 s.
+/// so it gets the same 60 s as the import string.
 const TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -131,16 +131,21 @@ async fn fetch_from(
     region: &str,
     etag: Option<&str>,
 ) -> Result<Fetched, String> {
-    fetch_capped(client.get(url).query(&[("region", region)]).timeout(TIMEOUT), etag).await
+    fetch_capped(client.get(url).query(&[("region", region)]), TIMEOUT, etag).await
 }
 
 /// Sends `request` (with `If-None-Match` when an ETag is kept) and reads the answer under the
-/// MAX_BODY_BYTES running cap. Shared with forever.rs's GCF1 fetch.
-pub(crate) async fn fetch_capped(mut request: reqwest::RequestBuilder, etag: Option<&str>) -> Result<Fetched, String> {
+/// MAX_BODY_BYTES running cap, all within `timeout`. Shared with forever.rs's GCF1 fetch.
+pub(crate) async fn fetch_capped(
+    request: reqwest::RequestBuilder,
+    timeout: Duration,
+    etag: Option<&str>,
+) -> Result<Fetched, String> {
+    let mut request = request.timeout(timeout);
     if let Some(tag) = etag {
         request = request.header(reqwest::header::IF_NONE_MATCH, tag);
     }
-    let mut resp = request.send().await.map_err(|e| e.to_string())?;
+    let mut resp = request.send().await.map_err(|e| crate::sync::describe_err(&e, timeout))?;
     match resp.status().as_u16() {
         304 => return Ok(Fetched::NotModified),
         200 => {}
@@ -160,7 +165,7 @@ pub(crate) async fn fetch_capped(mut request: reqwest::RequestBuilder, etag: Opt
     // Read under a running cap, not with `text()`: a hop that answers chunked declares no
     // length for the check above, and `text()` would buffer whatever it sent for 60 s.
     let mut bytes = Vec::new();
-    while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+    while let Some(chunk) = resp.chunk().await.map_err(|e| crate::sync::describe_err(&e, timeout))? {
         if bytes.len() + chunk.len() > MAX_BODY_BYTES {
             return Err("region data too large".to_string());
         }

@@ -161,11 +161,14 @@ pub async fn list_region_realms(region: String) -> Result<Vec<RegionRealm>, Stri
         .query(&[("region", region.as_str())])
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::sync::describe_err(&e, crate::sync::CLIENT_TIMEOUT))?;
     if !resp.status().is_success() {
         return Err(format!("realm list failed: HTTP {}", resp.status().as_u16()));
     }
-    let body = resp.json::<Response>().await.map_err(|e| e.to_string())?;
+    let body = resp
+        .json::<Response>()
+        .await
+        .map_err(|e| crate::sync::describe_err(&e, crate::sync::CLIENT_TIMEOUT))?;
     Ok(body
         .realms
         .into_iter()

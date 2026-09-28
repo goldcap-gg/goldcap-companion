@@ -249,7 +249,7 @@ pub async fn upload_fold(client: &reqwest::Client, base: &str, token: &str, up: 
         .await;
     let res = match sent {
         Ok(r) => r,
-        Err(e) => return UploadOutcome::Retry(e.to_string()),
+        Err(e) => return UploadOutcome::Retry(crate::sync::describe_err(&e, crate::sync::CLIENT_TIMEOUT)),
     };
     let code = res.status().as_u16();
     let body: serde_json::Value = res.json().await.unwrap_or(serde_json::Value::Null);
@@ -409,9 +409,9 @@ pub async fn refresh_crowd_at(
     let etag = previous.as_ref().and_then(|k| k.etag.clone());
     let request = client
         .get(format!("{base}/v1/forever/addon-data"))
-        .query(&[("market", slug)])
-        .timeout(std::time::Duration::from_secs(60));
-    let fetched = crate::region::fetch_capped(request, etag.as_deref()).await;
+        .query(&[("market", slug)]);
+    let fetched =
+        crate::region::fetch_capped(request, std::time::Duration::from_secs(60), etag.as_deref()).await;
     let kept = match fetched {
         Ok(crate::region::Fetched::Fresh { body, etag }) => match summarize_gcf1(&body, slug) {
             Ok(summary) => Some(KeptCrowd { slug: slug.to_string(), body, etag, summary }),

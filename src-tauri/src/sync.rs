@@ -10,7 +10,7 @@ use std::fmt;
 use std::path::Path;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use tokio::sync::{mpsc, watch};
 
 const IMPORT_STRING_URL: &str = "https://api.goldcap.gg/v1/addon/import-string";
@@ -134,41 +134,184 @@ fn humanize_age(at: SystemTime) -> String {
     }
 }
 
+/// Total time the shared client gives a request that does not set its own limit.
+pub(crate) const CLIENT_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long the shared client waits to open a connection: a dead network fails in this
+/// long, not in the request's whole time budget.
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// The import string's total time, the same as the region and Forever legs get: the site
+/// can take tens of seconds to build a realm's string after an ingest tick.
+pub(crate) const IMPORT_TIMEOUT: Duration = Duration::from_secs(60);
+/// Waits before the first and the second retry of the import string. Two entries = at most
+/// two retries, three attempts in all.
+const RETRY_BACKOFF: [Duration; 2] = [Duration::from_secs(3), Duration::from_secs(10)];
+/// A server's `Retry-After` is honoured up to this long.
+const RETRY_AFTER_CAP: Duration = Duration::from_secs(30);
+
 pub fn build_client() -> reqwest::Client {
     reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(20))
+        .timeout(CLIENT_TIMEOUT)
+        .connect_timeout(CONNECT_TIMEOUT)
         .user_agent(concat!("goldcap-companion/", env!("CARGO_PKG_VERSION")))
         .build()
-        .expect("reqwest client with only timeout/user-agent set should always build")
+        .expect("reqwest client with only timeouts/user-agent set should always build")
+}
+
+/// What to show for a failed request. `reqwest`'s own text for a request error drops the
+/// cause, so a timeout, a DNS failure, a refused connection and a TLS error all read
+/// "error sending request for url (...)". `limit` is the total time the request was given
+/// (the message names it when that ran out).
+pub(crate) fn describe_err(e: &reqwest::Error, limit: Duration) -> String {
+    if e.is_connect() {
+        let cause = if e.is_timeout() {
+            format!("timed out after {} s", CONNECT_TIMEOUT.as_secs())
+        } else {
+            source_chain(e)
+        };
+        return format!("could not connect: {cause}");
+    }
+    if e.is_timeout() {
+        return format!("timed out after {} s", limit.as_secs());
+    }
+    let mut own = e.to_string();
+    if let Some(url) = e.url() {
+        // The address is in the log line's context already; it only makes the text long.
+        own = own.replace(&format!(" for url ({url})"), "");
+    }
+    let chain = source_chain(e);
+    if chain.is_empty() {
+        own
+    } else {
+        format!("{own}: {chain}")
+    }
+}
+
+/// The messages of `e`'s `source()` chain (not `e` itself) joined by ": ", each one only
+/// when the one before did not already say it.
+fn source_chain(e: &dyn std::error::Error) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut next = e.source();
+    while let Some(err) = next {
+        let text = err.to_string();
+        if !parts.last().is_some_and(|p| p.contains(&text)) {
+            parts.push(text);
+        }
+        next = err.source();
+    }
+    parts.join(": ")
+}
+
+/// What went wrong with one attempt, as far as the retry policy cares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Failure {
+    /// The request never got an answer: timed out or could not connect.
+    Transport,
+    Status { code: u16, retry_after: Option<Duration> },
+}
+
+/// How long to wait before the next attempt, or `None` to give up. `retries_done` is how
+/// many retries have already been made. Only a transport failure (timeout, no connection),
+/// a 5xx and a 429 are worth another try; every other status -- notably the API's 404
+/// `realm_not_found` / `no_data` -- would answer the same again.
+fn retry_delay(backoff: &[Duration], retries_done: usize, failure: Failure) -> Option<Duration> {
+    let base = *backoff.get(retries_done)?;
+    match failure {
+        Failure::Transport => Some(base),
+        Failure::Status { code, retry_after } if code >= 500 || code == 429 => {
+            Some(retry_after.map_or(base, |d| d.min(RETRY_AFTER_CAP)))
+        }
+        Failure::Status { .. } => None,
+    }
 }
 
 /// Fetches the import string for `region`/`realm`. Only a 2xx response
 /// whose body starts with the GCS1 magic prefix counts as success — a
 /// non-200 (including the API's own `realm_not_found`/`no_data` 404 bodies)
 /// or an unexpected body is a `SyncError`, never written to disk.
+///
+/// A slow or briefly failing site is retried: up to two more attempts, after 3 s and
+/// then 10 s, on a timeout, a failed connection, a 5xx or a 429 (a `Retry-After` in
+/// seconds replaces the wait, up to 30 s). Worst case is three full attempts of
+/// `IMPORT_TIMEOUT` plus the two waits -- 3 x 60 + 3 + 10 = 193 s -- or 3 x 60 + 30 + 30 =
+/// 240 s when the site keeps sending the longest `Retry-After`.
 pub async fn fetch_import_string(
     client: &reqwest::Client,
     region: &str,
     realm: &str,
 ) -> Result<String, SyncError> {
+    fetch_import_string_at(client, IMPORT_STRING_URL, region, realm, IMPORT_TIMEOUT, &RETRY_BACKOFF)
+        .await
+}
+
+async fn fetch_import_string_at(
+    client: &reqwest::Client,
+    url: &str,
+    region: &str,
+    realm: &str,
+    timeout: Duration,
+    backoff: &[Duration],
+) -> Result<String, SyncError> {
+    let mut retries = 0;
+    loop {
+        let (err, failure) =
+            match attempt_import_string(client, url, region, realm, timeout).await {
+                Ok(body) => return Ok(body),
+                Err(failed) => failed,
+            };
+        match failure.and_then(|f| retry_delay(backoff, retries, f)) {
+            Some(wait) => {
+                tokio::time::sleep(wait).await;
+                retries += 1;
+            }
+            None => {
+                return Err(match err {
+                    SyncError::Request(msg) if retries > 0 => {
+                        SyncError::Request(format!("{msg} (tried {} times)", retries + 1))
+                    }
+                    other => other,
+                })
+            }
+        }
+    }
+}
+
+/// One request and its body read. The `Failure` is set for the errors the retry policy may
+/// look at; `None` means this is not something a retry can change.
+async fn attempt_import_string(
+    client: &reqwest::Client,
+    url: &str,
+    region: &str,
+    realm: &str,
+    timeout: Duration,
+) -> Result<String, (SyncError, Option<Failure>)> {
+    let request_failed = |e: reqwest::Error| {
+        let failure = (e.is_timeout() || e.is_connect()).then_some(Failure::Transport);
+        (SyncError::Request(describe_err(&e, timeout)), failure)
+    };
+
     let resp = client
-        .get(IMPORT_STRING_URL)
+        .get(url)
         .query(&[("region", region), ("realm", realm)])
+        .timeout(timeout)
         .send()
         .await
-        .map_err(|e| SyncError::Request(e.to_string()))?;
+        .map_err(request_failed)?;
 
     let status = resp.status();
     if !status.is_success() {
-        return Err(SyncError::BadStatus(status.as_u16()));
+        let retry_after = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(Duration::from_secs);
+        let code = status.as_u16();
+        return Err((SyncError::BadStatus(code), Some(Failure::Status { code, retry_after })));
     }
 
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| SyncError::Request(e.to_string()))?;
+    let body = resp.text().await.map_err(request_failed)?;
     if !luafile::is_valid_gcs1_body(&body) {
-        return Err(SyncError::InvalidBody);
+        return Err((SyncError::InvalidBody, None));
     }
     Ok(body)
 }
@@ -235,9 +378,13 @@ pub async fn resolve_realm_slug(
         .query(&[("region", region), ("name", name)])
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| describe_err(&e, CLIENT_TIMEOUT))?;
     let slug = match resp.status().as_u16() {
-        200 => resp.json::<Resolved>().await.map_err(|e| e.to_string())?.slug,
+        200 => resp
+            .json::<Resolved>()
+            .await
+            .map_err(|e| describe_err(&e, CLIENT_TIMEOUT))?
+            .slug,
         404 => return Err(format!("realm \"{name}\" not found on {region}")),
         code => return Err(format!("resolve failed: HTTP {code}")),
     };
@@ -799,5 +946,191 @@ mod tests {
 
         assert!(matches!(written, Err(SyncError::Write(_))), "{written:?}");
         std::fs::remove_file(&file).ok();
+    }
+
+    // ---- request errors and the import string's retries ----
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const GOOD_BODY: &str = "GCS1;eu;dentarg;1;abc";
+
+    fn http(status: &str, extra: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    /// A local server that answers its Nth connection with `script[N]` (the last entry
+    /// repeats). `None` = read the request and never answer. Hands back the URL and the
+    /// number of connections seen so far.
+    fn serve_script(script: Vec<Option<String>>) -> (String, Arc<AtomicUsize>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1/addon/import-string", listener.local_addr().unwrap());
+        let seen = Arc::new(AtomicUsize::new(0));
+        let counter = seen.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let n = counter.fetch_add(1, Ordering::SeqCst);
+                let answer = script[n.min(script.len() - 1)].clone();
+                std::thread::spawn(move || {
+                    let mut request = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => request.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    match answer {
+                        Some(text) => {
+                            let _ = stream.write_all(text.as_bytes());
+                        }
+                        None => std::thread::sleep(Duration::from_secs(5)),
+                    }
+                });
+            }
+        });
+        (url, seen)
+    }
+
+    async fn request_error(url: &str, timeout: Duration) -> reqwest::Error {
+        build_client().get(url).timeout(timeout).send().await.unwrap_err()
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_request_says_so_and_names_the_limit() {
+        let (url, _) = serve_script(vec![None]);
+        let e = request_error(&url, Duration::from_secs(1)).await;
+        assert!(e.is_timeout());
+        assert_eq!(describe_err(&e, Duration::from_secs(1)), "timed out after 1 s");
+    }
+
+    #[tokio::test]
+    async fn a_refused_connection_says_it_could_not_connect_and_why() {
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let e = request_error(&format!("http://127.0.0.1:{port}/x"), Duration::from_secs(5)).await;
+        let text = describe_err(&e, Duration::from_secs(5));
+        assert!(text.starts_with("could not connect: "), "{text}");
+        assert!(!text.contains("error sending request"), "{text}");
+        assert!(!text.contains("127.0.0.1"), "the address is not repeated: {text}");
+        assert!(text.len() > "could not connect: ".len() + 5, "{text}");
+    }
+
+    #[tokio::test]
+    async fn any_other_error_keeps_its_own_words_and_its_cause_without_the_address() {
+        let (url, _) = serve_script(vec![Some(http("200 OK", "", "not json"))]);
+        let resp = build_client().get(&url).send().await.unwrap();
+        let e = resp.json::<serde_json::Value>().await.unwrap_err();
+        assert!(!e.is_timeout() && !e.is_connect());
+        let text = describe_err(&e, Duration::from_secs(20));
+        assert!(text.starts_with("error decoding response body: "), "{text}");
+        assert!(!text.contains("http://"), "{text}");
+    }
+
+    const BACKOFF: [Duration; 2] = [Duration::from_secs(3), Duration::from_secs(10)];
+
+    fn status(code: u16, retry_after: Option<u64>) -> Failure {
+        Failure::Status { code, retry_after: retry_after.map(Duration::from_secs) }
+    }
+
+    #[test]
+    fn a_transport_failure_is_retried_twice_after_three_then_ten_seconds() {
+        assert_eq!(retry_delay(&BACKOFF, 0, Failure::Transport), Some(Duration::from_secs(3)));
+        assert_eq!(retry_delay(&BACKOFF, 1, Failure::Transport), Some(Duration::from_secs(10)));
+        assert_eq!(retry_delay(&BACKOFF, 2, Failure::Transport), None);
+    }
+
+    #[test]
+    fn a_5xx_and_a_429_are_retried_but_no_other_status_is() {
+        for code in [500, 502, 503, 504, 429] {
+            assert_eq!(retry_delay(&BACKOFF, 0, status(code, None)), Some(Duration::from_secs(3)), "{code}");
+            assert_eq!(retry_delay(&BACKOFF, 2, status(code, None)), None, "{code}");
+        }
+        for code in [400, 401, 403, 404, 410, 422, 304] {
+            assert_eq!(retry_delay(&BACKOFF, 0, status(code, None)), None, "{code}");
+            assert_eq!(retry_delay(&BACKOFF, 0, status(code, Some(1))), None, "{code}");
+        }
+    }
+
+    #[test]
+    fn retry_after_replaces_the_wait_but_never_past_thirty_seconds() {
+        assert_eq!(retry_delay(&BACKOFF, 0, status(429, Some(7))), Some(Duration::from_secs(7)));
+        assert_eq!(retry_delay(&BACKOFF, 1, status(503, Some(120))), Some(Duration::from_secs(30)));
+        assert_eq!(retry_delay(&BACKOFF, 0, status(503, Some(0))), Some(Duration::ZERO));
+    }
+
+    const FAST: [Duration; 2] = [Duration::from_millis(5), Duration::from_millis(5)];
+
+    async fn fetch(url: &str, timeout: Duration) -> Result<String, SyncError> {
+        fetch_import_string_at(&build_client(), url, "eu", "dentarg", timeout, &FAST).await
+    }
+
+    #[tokio::test]
+    async fn a_404_is_not_retried() {
+        let (url, seen) = serve_script(vec![Some(http("404 Not Found", "", r#"{"error":"realm_not_found"}"#))]);
+        let out = fetch(&url, Duration::from_secs(5)).await;
+        assert!(matches!(out, Err(SyncError::BadStatus(404))), "{out:?}");
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_503_then_a_good_answer_comes_through() {
+        let (url, seen) = serve_script(vec![
+            Some(http("503 Service Unavailable", "", "")),
+            Some(http("200 OK", "", GOOD_BODY)),
+        ]);
+        assert_eq!(fetch(&url, Duration::from_secs(5)).await.unwrap(), GOOD_BODY);
+        assert_eq!(seen.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_429_with_retry_after_is_honoured_then_retried() {
+        let (url, seen) = serve_script(vec![
+            Some(http("429 Too Many Requests", "Retry-After: 0\r\n", "")),
+            Some(http("200 OK", "", GOOD_BODY)),
+        ]);
+        assert_eq!(fetch(&url, Duration::from_secs(5)).await.unwrap(), GOOD_BODY);
+        assert_eq!(seen.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_timeout_is_retried() {
+        let (url, seen) = serve_script(vec![None, Some(http("200 OK", "", GOOD_BODY))]);
+        assert_eq!(fetch(&url, Duration::from_millis(300)).await.unwrap(), GOOD_BODY);
+        assert_eq!(seen.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_site_that_keeps_failing_gets_three_attempts_and_no_more() {
+        let (url, seen) = serve_script(vec![Some(http("500 Internal Server Error", "", ""))]);
+        let out = fetch(&url, Duration::from_secs(5)).await;
+        assert!(matches!(out, Err(SyncError::BadStatus(500))), "{out:?}");
+        assert_eq!(seen.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn a_dead_connection_reports_the_cause_and_the_attempts() {
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let out = fetch(&format!("http://127.0.0.1:{port}/x"), Duration::from_secs(5)).await;
+        let Err(SyncError::Request(msg)) = out else { panic!("{out:?}") };
+        assert!(msg.starts_with("could not connect: "), "{msg}");
+        assert!(msg.ends_with("(tried 3 times)"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn a_body_that_is_not_an_import_string_is_not_retried() {
+        let (url, seen) = serve_script(vec![Some(http("200 OK", "", "<html>"))]);
+        let out = fetch(&url, Duration::from_secs(5)).await;
+        assert!(matches!(out, Err(SyncError::InvalidBody)), "{out:?}");
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
     }
 }
