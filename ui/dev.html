@@ -55,9 +55,9 @@
         // duplicates the rule (it calls setup_complete), but a fixture stub has no Rust
         // behind it to ask.
         const isComplete = (c) =>
-          Boolean(c.wowRootPath?.trim()) &&
           (c.retailEnabled || c.foreverEnabled) &&
-          (!c.retailEnabled || c.realmAuto || Boolean(c.realmSlug?.trim()));
+          (!c.retailEnabled || (Boolean(c.wowRetailPath?.trim()) && (c.realmAuto || Boolean(c.realmSlug?.trim())))) &&
+          (!c.foreverEnabled || Boolean(c.foreverRootPath?.trim()));
         return {
           getConfig: () => delay(f.config),
           saveConfig: (config) => { Object.assign(f.config, config); return delay(); },
@@ -66,8 +66,13 @@
           setupComplete: () => delay(isComplete(f.config)),
           detectWowPath: () => delay(f.detectedPath ?? ""),
           pickWowPath: () => delay(f.detectedPath ?? ""),
-          detectWowRoot: () => delay(f.wowRoot ?? ""),
-          pickWowRoot: () => delay(f.wowRoot ?? ""),
+          detectInstalls: () =>
+            delay({
+              retailPath: f.detectedPath ?? "",
+              foreverRootPath: f.foreverRoot ?? "",
+              classicEraFound: f.classicEraFound ?? false,
+            }),
+          pickForeverRoot: () => delay(f.foreverRoot ?? ""),
           detectGames: () => delay(f.detectedGames ?? []),
           detectGame: () => delay(f.game ?? { region: "eu", realmNames: [] }),
           resolveRealm: (region, name) =>

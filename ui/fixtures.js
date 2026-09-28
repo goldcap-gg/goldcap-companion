@@ -1,5 +1,5 @@
 // Every state the Status and Wizard screens can be in, as the shapes get_status/get_config/
-// detect_games actually return. This file is the manual check-list: if a state is not here, it
+// detect_installs actually return. This file is the manual check-list: if a state is not here, it
 // has not been looked at.
 
 const NOW = Math.floor(Date.now() / 1000);
@@ -8,7 +8,7 @@ const configured = {
   region: "eu",
   realmSlug: "dentarg",
   wowRetailPath: "C:\\Program Files (x86)\\World of Warcraft\\_retail_",
-  wowRootPath: "C:\\Program Files (x86)\\World of Warcraft",
+  foreverRootPath: "",
   retailEnabled: true,
   foreverEnabled: false,
   intervalMinutes: 30,
@@ -19,16 +19,11 @@ const configured = {
 
 const stage = (state, at, detail, error = null) => ({ state, at, detail, error });
 
-// detect_games' shape: folder name, kind ("retail" | "forever" | "classicEra" | "other"), and
-// whether the player-facing GoldCap addon is installed under it.
-const detected = (folder, kind, addonInstalled = true) => ({ folder, kind, addonInstalled });
-
 export const FIXTURES = {
   "unconfigured (wizard)": {
-    config: { ...configured, realmSlug: "", wowRetailPath: "", wowRootPath: "", retailEnabled: false, foreverEnabled: false, companionToken: "" },
+    config: { ...configured, realmSlug: "", wowRetailPath: "", retailEnabled: false, foreverEnabled: false, companionToken: "" },
     detectedPath: "C:\\Program Files (x86)\\World of Warcraft\\_retail_",
-    wowRoot: "C:\\Program Files (x86)\\World of Warcraft",
-    detectedGames: [detected("_retail_", "retail")],
+    foreverRoot: "",
     game: { region: "eu", realmNames: ["Tarren Mill", "Ravencrest"] },
     status: {
       configured: false, paired: false, retailEnabled: false, foreverEnabled: false, region: "eu", realmSlug: "",
@@ -40,10 +35,9 @@ export const FIXTURES = {
   },
 
   "wizard: no install found": {
-    config: { ...configured, realmSlug: "", wowRetailPath: "", wowRootPath: "", retailEnabled: false, foreverEnabled: false, companionToken: "" },
+    config: { ...configured, realmSlug: "", wowRetailPath: "", retailEnabled: false, foreverEnabled: false, companionToken: "" },
     detectedPath: "",
-    wowRoot: "",
-    detectedGames: [],
+    foreverRoot: "",
     game: { region: "eu", realmNames: [] },
     status: {
       configured: false, paired: false, retailEnabled: false, foreverEnabled: false, region: "eu", realmSlug: "",
@@ -55,10 +49,9 @@ export const FIXTURES = {
   },
 
   "wizard: install but no realms": {
-    config: { ...configured, realmSlug: "", wowRetailPath: "", wowRootPath: "", retailEnabled: false, foreverEnabled: false, companionToken: "" },
+    config: { ...configured, realmSlug: "", wowRetailPath: "", retailEnabled: false, foreverEnabled: false, companionToken: "" },
     detectedPath: "C:\\Program Files (x86)\\World of Warcraft\\_retail_",
-    wowRoot: "C:\\Program Files (x86)\\World of Warcraft",
-    detectedGames: [detected("_retail_", "retail")],
+    foreverRoot: "",
     game: { region: "eu", realmNames: [] },
     status: {
       configured: false, paired: false, retailEnabled: false, foreverEnabled: false, region: "eu", realmSlug: "",
@@ -70,19 +63,19 @@ export const FIXTURES = {
   },
 
   // The default production first run, not an edge case: Config::load_or_init
-  // auto-detects wowRetailPath/wowRootPath and persists them before the wizard
-  // ever opens, so a wholly-empty config is actually the rare case. This one
-  // also pairs a config the user never finished — companionToken already set,
-  // interval and startup already changed from their defaults, Retail already
-  // turned on — before an earlier session hit "Later" (or just quit) with the
-  // realm still unresolved. The wizard reopening on realmSlug being empty must
-  // not wipe any of that.
+  // auto-detects wowRetailPath/foreverRootPath and persists them before the
+  // wizard ever opens, so a wholly-empty config is actually the rare case.
+  // This one also pairs a config the user never finished — companionToken
+  // already set, interval and startup already changed from their defaults,
+  // Retail already turned on — before an earlier session hit "Later" (or
+  // just quit) with the realm still unresolved. The wizard reopening on
+  // realmSlug being empty must not wipe any of that.
   "wizard: upgrade with a token": {
     config: {
       region: "eu",
       realmSlug: "",
       wowRetailPath: "C:\\Program Files (x86)\\World of Warcraft\\_retail_",
-      wowRootPath: "C:\\Program Files (x86)\\World of Warcraft",
+      foreverRootPath: "",
       retailEnabled: true,
       foreverEnabled: false,
       intervalMinutes: 45,
@@ -91,8 +84,7 @@ export const FIXTURES = {
       companionToken: "tok",
     },
     detectedPath: "C:\\Program Files (x86)\\World of Warcraft\\_retail_",
-    wowRoot: "C:\\Program Files (x86)\\World of Warcraft",
-    detectedGames: [detected("_retail_", "retail")],
+    foreverRoot: "",
     game: { region: "eu", realmNames: ["Tarren Mill", "Ravencrest"] },
     status: {
       configured: false, paired: true, retailEnabled: true, foreverEnabled: false, region: "eu", realmSlug: "",
@@ -110,7 +102,7 @@ export const FIXTURES = {
       region: "eu",
       realmSlug: "",
       wowRetailPath: "",
-      wowRootPath: "",
+      foreverRootPath: "",
       retailEnabled: false,
       foreverEnabled: false,
       intervalMinutes: 30,
@@ -119,8 +111,7 @@ export const FIXTURES = {
       companionToken: "",
     },
     detectedPath: "",
-    wowRoot: "C:\\Program Files (x86)\\World of Warcraft",
-    detectedGames: [detected("_classic_beta_", "forever", false)],
+    foreverRoot: "C:\\Program Files (x86)\\World of Warcraft",
     game: { region: "eu", realmNames: [] },
     status: {
       configured: false, paired: false, retailEnabled: false, foreverEnabled: false, region: "eu", realmSlug: "",
@@ -131,17 +122,41 @@ export const FIXTURES = {
     },
   },
 
+  // Retail and Forever were found on two entirely different drives — the case this whole
+  // feature exists for. The wizard's Games step must offer both independently, each with its own
+  // path, even though neither folder is anywhere near the other.
+  "wizard: two drives, first run": {
+    config: {
+      region: "eu",
+      realmSlug: "",
+      wowRetailPath: "",
+      foreverRootPath: "",
+      retailEnabled: false,
+      foreverEnabled: false,
+      intervalMinutes: 30,
+      launchAtStartup: true,
+      autoUpdate: true,
+      companionToken: "",
+    },
+    detectedPath: "C:\\Program Files (x86)\\World of Warcraft\\_retail_",
+    foreverRoot: "D:\\Games\\World of Warcraft",
+    game: { region: "eu", realmNames: ["Tarren Mill"] },
+    status: {
+      configured: false, paired: false, retailEnabled: false, foreverEnabled: false, region: "eu", realmSlug: "",
+      syncing: false, nextTickAt: null, intervalMinutes: 30, version: "1.15.0",
+      prices: stage("notConnected", null, "Waiting for setup"),
+      addon: stage("notConnected", null, "Waiting for setup"),
+      ledger: stage("notConnected", null, "Waiting for setup"),
+    },
+  },
+
   // Both a Retail and a Forever client sit under the same WoW folder, plus a
   // Classic Era install the wizard shows but cannot turn on.
   "wizard: both games, plus an unsupported one": {
-    config: { ...configured, realmSlug: "", wowRetailPath: "", wowRootPath: "", retailEnabled: false, foreverEnabled: false, companionToken: "" },
+    config: { ...configured, realmSlug: "", wowRetailPath: "", retailEnabled: false, foreverEnabled: false, companionToken: "" },
     detectedPath: "C:\\Program Files (x86)\\World of Warcraft\\_retail_",
-    wowRoot: "C:\\Program Files (x86)\\World of Warcraft",
-    detectedGames: [
-      detected("_retail_", "retail"),
-      detected("_classic_beta_", "forever", false),
-      detected("_classic_era_", "classicEra", false),
-    ],
+    foreverRoot: "C:\\Program Files (x86)\\World of Warcraft",
+    classicEraFound: true,
     game: { region: "eu", realmNames: ["Tarren Mill"] },
     status: {
       configured: false, paired: false, retailEnabled: false, foreverEnabled: false, region: "eu", realmSlug: "",
@@ -153,7 +168,7 @@ export const FIXTURES = {
   },
 
   "everything works": {
-    config: { ...configured, foreverEnabled: true },
+    config: { ...configured, foreverEnabled: true, foreverRootPath: "C:\\Program Files (x86)\\World of Warcraft" },
     // Settings → "Check for updates" finds this one; in every other fixture
     // the check answers that this is the latest version.
     update: { version: "1.15.1", kind: "pending", action: "Install and restart" },
@@ -183,7 +198,7 @@ export const FIXTURES = {
       region: "eu",
       realmSlug: "",
       wowRetailPath: "",
-      wowRootPath: "C:\\Program Files (x86)\\World of Warcraft",
+      foreverRootPath: "C:\\Program Files (x86)\\World of Warcraft",
       retailEnabled: false,
       foreverEnabled: true,
       intervalMinutes: 30,
@@ -214,7 +229,7 @@ export const FIXTURES = {
       region: "eu",
       realmSlug: "",
       wowRetailPath: "",
-      wowRootPath: "C:\\Program Files (x86)\\World of Warcraft",
+      foreverRootPath: "C:\\Program Files (x86)\\World of Warcraft",
       retailEnabled: false,
       foreverEnabled: true,
       intervalMinutes: 30,
