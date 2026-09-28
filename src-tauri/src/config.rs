@@ -296,11 +296,250 @@ pub fn normalize_retail_dir(candidate: &Path) -> Option<PathBuf> {
     }
 }
 
+// ---- Battle.net-derived candidates: the pure parts ------------------------------------------
+//
+// The registry's exact four keys and the fixed drive-letter list only ever find a product
+// actually named "World of Warcraft" in the one folder shape GoldCap already expected. A
+// Beta/PTR/Forever client is a different Battle.net product with its own uninstall entry and
+// its own folder name (a player can call it anything), so `wow_base_candidates` widens the
+// search: every uninstall registry entry that looks like a Warcraft product, plus whatever
+// Battle.net's own install database and config file already know. Each source's decision logic
+// is pure and unit-tested here; only the actual registry/file reads (below) touch the OS.
+
+/// True when an uninstall registry entry's `DisplayName`/`Publisher` describes a World of
+/// Warcraft product — retail, Beta, PTR, Classic, or Forever — rather than something unrelated
+/// Blizzard or another publisher ships under the same uninstall key tree.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn matches_wow_uninstall_entry(display_name: Option<&str>, publisher: Option<&str>) -> bool {
+    let name = display_name.unwrap_or("").to_ascii_lowercase();
+    if name.contains("world of warcraft") {
+        return true;
+    }
+    let is_blizzard = publisher
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .contains("blizzard entertainment");
+    is_blizzard && name.contains("warcraft")
+}
+
+/// Splits a Windows-style path (which may mix `\` and `/`) into (parent, last segment) without
+/// going through `std::path::Path` — its separator handling is platform-native, so a `\`
+/// wouldn't split on this dev machine (macOS) the way it does at runtime on Windows, and these
+/// helpers are unit-tested here rather than only on a Windows CI runner. Trailing separators are
+/// ignored; no separator at all yields an empty parent.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn windows_path_split(path: &str) -> (String, String) {
+    let trimmed = path.trim_end_matches(['\\', '/']);
+    match trimmed.rfind(['\\', '/']) {
+        Some(idx) => (trimmed[..idx].to_string(), trimmed[idx + 1..].to_string()),
+        None => (String::new(), trimmed.to_string()),
+    }
+}
+
+/// The directory a matched uninstall entry points at: `InstallLocation` when present, else
+/// `InstallSource`, else the directory portion of `UninstallString` (a command line — the
+/// uninstaller executable's own directory, not the raw string). `None` when the entry carries
+/// nothing usable.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn install_location_from_entry(
+    install_location: Option<&str>,
+    install_source: Option<&str>,
+    uninstall_string: Option<&str>,
+) -> Option<String> {
+    if let Some(loc) = install_location.map(str::trim).filter(|s| !s.is_empty()) {
+        return Some(loc.to_string());
+    }
+    if let Some(src) = install_source.map(str::trim).filter(|s| !s.is_empty()) {
+        return Some(src.to_string());
+    }
+    let raw = uninstall_string.map(str::trim).filter(|s| !s.is_empty())?;
+    let exe_path = if let Some(rest) = raw.strip_prefix('"') {
+        rest.split('"').next().unwrap_or(rest)
+    } else {
+        raw.split_whitespace().next().unwrap_or(raw)
+    };
+    let (parent, _) = windows_path_split(exe_path);
+    (!parent.is_empty()).then_some(parent)
+}
+
+/// A minimal protobuf wire-format reader for exactly what `product.db` needs: length-delimited
+/// fields (wire type 2 — strings and embedded messages), the only type the fields below read.
+/// Varint, 64-bit and 32-bit fields are skipped correctly (so the cursor stays in sync) but not
+/// decoded, since nothing here needs them. Written from the wire-format spec plus the field
+/// numbers documented in WowUp's `product-db.ts`/`warcraft-platform.service.ts` (file paths and
+/// commit noted in the report) — no code copied from that project, which is GPL-3.0 licensed;
+/// only the field layout (a fact about the file format, not an expression) is reused.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+mod protobuf {
+    /// A base-128 varint starting at `data[*pos]`. Advances `*pos` past it; `None` on a
+    /// truncated or unreasonably long (>10 bytes, more than a `u64` can ever need) varint.
+    pub fn read_varint(data: &[u8], pos: &mut usize) -> Option<u64> {
+        let mut result: u64 = 0;
+        let mut shift = 0u32;
+        loop {
+            if *pos >= data.len() || shift >= 70 {
+                return None;
+            }
+            let byte = data[*pos];
+            *pos += 1;
+            result |= ((byte & 0x7F) as u64) << shift;
+            if byte & 0x80 == 0 {
+                return Some(result);
+            }
+            shift += 7;
+        }
+    }
+
+    /// Every (field_number, payload) pair for a length-delimited field at the top level of
+    /// `data`. Stops at the first malformed tag/length and returns whatever was already found —
+    /// the input is an arbitrary file read off disk, never something to panic over.
+    pub fn length_delimited_fields(data: &[u8]) -> Vec<(u64, &[u8])> {
+        let mut out = Vec::new();
+        let mut pos = 0;
+        while pos < data.len() {
+            let Some(tag) = read_varint(data, &mut pos) else { break };
+            let field_number = tag >> 3;
+            match tag & 0x7 {
+                0 => {
+                    if read_varint(data, &mut pos).is_none() {
+                        break;
+                    }
+                }
+                1 => {
+                    if pos + 8 > data.len() {
+                        break;
+                    }
+                    pos += 8;
+                }
+                2 => {
+                    let Some(len) = read_varint(data, &mut pos) else { break };
+                    let len = len as usize;
+                    if pos + len > data.len() {
+                        break;
+                    }
+                    out.push((field_number, &data[pos..pos + len]));
+                    pos += len;
+                }
+                5 => {
+                    if pos + 4 > data.len() {
+                        break;
+                    }
+                    pos += 4;
+                }
+                _ => break, // unknown wire type — bail rather than desync the rest of the buffer
+            }
+        }
+        out
+    }
+}
+
+/// One `Product` entry from `product.db`. Field numbers: `ProductDb.products` = field 1
+/// (repeated, embedded `Product`); `Product.client` = field 3 (embedded `Client`),
+/// `Product.family` = field 6 (string, e.g. `"wow"`); `Client.location` = field 1 (string, the
+/// full path to that client's game folder), `Client.name` = field 13 (string, the folder name
+/// itself, e.g. `"_retail_"`/`"_classic_beta_"`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub struct ProductDbInstall {
+    pub family: String,
+    pub client_name: String,
+    pub client_location: String,
+}
+
+/// Decodes every `Product` in a `product.db` buffer. An install with no `Client.location` is
+/// dropped — nothing usable to offer as a candidate.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn parse_product_db(data: &[u8]) -> Vec<ProductDbInstall> {
+    let mut out = Vec::new();
+    for (field, product_bytes) in protobuf::length_delimited_fields(data) {
+        if field != 1 {
+            continue;
+        }
+        let mut install = ProductDbInstall::default();
+        for (pfield, payload) in protobuf::length_delimited_fields(product_bytes) {
+            match pfield {
+                6 => install.family = String::from_utf8_lossy(payload).into_owned(),
+                3 => {
+                    for (cfield, cpayload) in protobuf::length_delimited_fields(payload) {
+                        match cfield {
+                            1 => install.client_location = String::from_utf8_lossy(cpayload).into_owned(),
+                            13 => install.client_name = String::from_utf8_lossy(cpayload).into_owned(),
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !install.client_location.is_empty() {
+            out.push(install);
+        }
+    }
+    out
+}
+
+/// `product.db` installs turned into WoW-root candidates: `family == "wow"` only (Diablo,
+/// Overwatch, etc. share the same database), each client's own location, plus — when that
+/// location's last segment is itself a game folder (`_retail_`, `_classic_beta_`, any `_name_`,
+/// which `Client.location` always is in practice) — that segment's parent too. Existence and
+/// "does it actually contain a game folder" are left to the same downstream checks every other
+/// `wow_base_candidates` entry already goes through (`normalize_retail_dir`,
+/// `games::detect_games`) rather than duplicated here.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn product_db_root_candidates(installs: &[ProductDbInstall]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for install in installs {
+        if !install.family.eq_ignore_ascii_case("wow") {
+            continue;
+        }
+        let (parent, last_segment) = windows_path_split(&install.client_location);
+        if crate::games::is_game_folder(&last_segment) && !parent.is_empty() {
+            out.push(PathBuf::from(parent));
+        }
+        out.push(PathBuf::from(&install.client_location));
+    }
+    out
+}
+
+/// `Client.Install.DefaultInstallPath` from Battle.net's own `Battle.net.config` JSON, if
+/// present and non-empty.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn default_install_path_from_battlenet_config(json: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    value
+        .get("Client")?
+        .get("Install")?
+        .get("DefaultInstallPath")?
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// De-duplicates a candidate list while keeping first-seen order. `case_insensitive` is a
+/// parameter rather than a `cfg` so the same logic is testable everywhere — the caller passes
+/// `cfg!(target_os = "windows")`.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn dedupe_candidates(candidates: Vec<PathBuf>, case_insensitive: bool) -> Vec<PathBuf> {
+    let mut seen: Vec<String> = Vec::new();
+    let mut out = Vec::new();
+    for c in candidates {
+        let raw = c.to_string_lossy().into_owned();
+        let key = if case_insensitive { raw.to_ascii_lowercase() } else { raw };
+        if !seen.contains(&key) {
+            seen.push(key);
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Where a WoW install's base folder may be: on Windows the registry keys Blizzard/Battle.net
-/// write, then common locations across every drive letter; on macOS the standard
-/// /Applications path. Shared by `detect_wow_retail_path` and games.rs's Forever root detection
-/// — each walks this same list independently, since Retail and Forever can sit on different
-/// drives entirely.
+/// write, every uninstall entry that looks like a Warcraft product, Battle.net's own install
+/// database and config file, then common locations across every drive letter; on macOS the
+/// standard /Applications path (and the per-user ~/Applications one). Shared by
+/// `detect_wow_retail_path` and games.rs's Forever root detection — each walks this same list
+/// independently, since Retail and Forever can sit on different drives entirely.
 #[cfg(target_os = "windows")]
 pub fn wow_base_candidates() -> Vec<PathBuf> {
     use winreg::enums::HKEY_LOCAL_MACHINE;
@@ -338,6 +577,17 @@ pub fn wow_base_candidates() -> Vec<PathBuf> {
         }
     }
 
+    // Every uninstall entry, HKLM and HKCU, 32- and 64-bit view, whose DisplayName/Publisher
+    // says Warcraft — this is what finds a Beta/PTR/Forever client, which is its own Battle.net
+    // product with its own uninstall entry under an arbitrary folder name.
+    candidates.extend(windows_uninstall_candidates());
+
+    // Battle.net's own install database and config file.
+    candidates.extend(windows_product_db_candidates());
+    if let Some(p) = windows_battlenet_config_candidate() {
+        candidates.push(p);
+    }
+
     // Fallback: common locations across every drive letter. is_dir() on a
     // nonexistent drive fails fast without any UI prompt.
     for letter in b'C'..=b'Z' {
@@ -353,12 +603,87 @@ pub fn wow_base_candidates() -> Vec<PathBuf> {
         }
     }
 
-    candidates
+    dedupe_candidates(candidates, true)
+}
+
+/// The Windows-only OS read behind the uninstall-entry candidates in `wow_base_candidates`: walks
+/// both uninstall key trees (`WOW6432Node` and native) under both `HKEY_LOCAL_MACHINE` and
+/// `HKEY_CURRENT_USER`, and hands each subkey's `DisplayName`/`Publisher`/`InstallLocation`/
+/// `InstallSource`/`UninstallString` to the pure `matches_wow_uninstall_entry`/
+/// `install_location_from_entry` above. Thin on purpose — the decision logic is what's tested.
+#[cfg(target_os = "windows")]
+fn windows_uninstall_candidates() -> Vec<PathBuf> {
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    use winreg::RegKey;
+
+    let mut out = Vec::new();
+    for (hive, root_key) in [
+        (HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (HKEY_CURRENT_USER, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+    ] {
+        let Ok(uninstall) = RegKey::predef(hive).open_subkey(root_key) else {
+            continue;
+        };
+        for name in uninstall.enum_keys().flatten() {
+            let Ok(entry) = uninstall.open_subkey(&name) else {
+                continue;
+            };
+            let display_name = entry.get_value::<String, _>("DisplayName").ok();
+            let publisher = entry.get_value::<String, _>("Publisher").ok();
+            if !matches_wow_uninstall_entry(display_name.as_deref(), publisher.as_deref()) {
+                continue;
+            }
+            let install_location = entry.get_value::<String, _>("InstallLocation").ok();
+            let install_source = entry.get_value::<String, _>("InstallSource").ok();
+            let uninstall_string = entry.get_value::<String, _>("UninstallString").ok();
+            if let Some(dir) = install_location_from_entry(
+                install_location.as_deref(),
+                install_source.as_deref(),
+                uninstall_string.as_deref(),
+            ) {
+                out.push(PathBuf::from(dir));
+            }
+        }
+    }
+    out
+}
+
+/// Reads `%ProgramData%\Battle.net\Agent\product.db` and turns it into root candidates via the
+/// pure `parse_product_db`/`product_db_root_candidates` above. Missing/unreadable file is just no
+/// candidates, same as every other best-effort source here.
+#[cfg(target_os = "windows")]
+fn windows_product_db_candidates() -> Vec<PathBuf> {
+    let Ok(program_data) = std::env::var("ProgramData") else {
+        return Vec::new();
+    };
+    let path = PathBuf::from(program_data).join("Battle.net").join("Agent").join("product.db");
+    let Ok(bytes) = fs::read(&path) else {
+        return Vec::new();
+    };
+    product_db_root_candidates(&parse_product_db(&bytes))
+}
+
+/// Reads `%APPDATA%\Battle.net\Battle.net.config` and, when it names a default install path,
+/// returns `<that>\World of Warcraft` — the base folder Battle.net itself would install a new
+/// product under.
+#[cfg(target_os = "windows")]
+fn windows_battlenet_config_candidate() -> Option<PathBuf> {
+    let appdata = std::env::var("APPDATA").ok()?;
+    let path = PathBuf::from(appdata).join("Battle.net").join("Battle.net.config");
+    let text = fs::read_to_string(&path).ok()?;
+    let install_path = default_install_path_from_battlenet_config(&text)?;
+    Some(PathBuf::from(install_path).join("World of Warcraft"))
 }
 
 #[cfg(target_os = "macos")]
 pub fn wow_base_candidates() -> Vec<PathBuf> {
-    vec![PathBuf::from("/Applications/World of Warcraft")]
+    let mut candidates = vec![PathBuf::from("/Applications/World of Warcraft")];
+    if let Ok(home) = std::env::var("HOME") {
+        candidates.push(PathBuf::from(home).join("Applications").join("World of Warcraft"));
+    }
+    candidates
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
@@ -800,5 +1125,251 @@ mod tests {
     fn a_retail_path_not_shaped_like_retail_derives_no_root() {
         let cfg = migrated(r#"{"wowRetailPath": "/tmp/not-retail"}"#);
         assert_eq!(cfg.forever_root_path, "");
+    }
+
+    // ---- Battle.net-derived candidates -------------------------------------
+
+    #[test]
+    fn matches_wow_uninstall_entry_by_display_name() {
+        assert!(matches_wow_uninstall_entry(Some("World of Warcraft"), None));
+        assert!(matches_wow_uninstall_entry(Some("World of Warcraft Beta"), Some("Blizzard Entertainment")));
+        assert!(matches_wow_uninstall_entry(Some("World of Warcraft PTR"), None));
+        assert!(matches_wow_uninstall_entry(Some("WORLD OF WARCRAFT"), None), "case-insensitive");
+    }
+
+    #[test]
+    fn matches_wow_uninstall_entry_by_blizzard_publisher_plus_warcraft_name() {
+        // A Forever/renamed client whose display name doesn't say "World of Warcraft" verbatim
+        // but is still clearly a Warcraft product from Blizzard.
+        assert!(matches_wow_uninstall_entry(
+            Some("Warcraft: Forever"),
+            Some("Blizzard Entertainment, Inc.")
+        ));
+    }
+
+    #[test]
+    fn matches_wow_uninstall_entry_rejects_unrelated_or_non_blizzard_entries() {
+        assert!(!matches_wow_uninstall_entry(Some("Diablo IV"), Some("Blizzard Entertainment")));
+        assert!(!matches_wow_uninstall_entry(Some("Warcraft Mod Manager"), Some("Some Other Publisher")));
+        assert!(!matches_wow_uninstall_entry(None, None));
+    }
+
+    #[test]
+    fn install_location_from_entry_prefers_install_location() {
+        assert_eq!(
+            install_location_from_entry(Some(r"D:\Games\WoW"), Some(r"E:\ignored"), None),
+            Some(r"D:\Games\WoW".to_string())
+        );
+    }
+
+    #[test]
+    fn install_location_from_entry_falls_back_to_install_source_then_uninstall_string() {
+        assert_eq!(
+            install_location_from_entry(None, Some(r"E:\Source\WoW"), None),
+            Some(r"E:\Source\WoW".to_string())
+        );
+        assert_eq!(
+            install_location_from_entry(
+                None,
+                None,
+                Some(r#""D:\Games\WoW\Uninstaller.exe" /S"#)
+            ),
+            Some(r"D:\Games\WoW".to_string())
+        );
+        assert_eq!(
+            install_location_from_entry(None, None, Some(r"D:\Games\WoW\Uninstaller.exe")),
+            Some(r"D:\Games\WoW".to_string())
+        );
+    }
+
+    #[test]
+    fn install_location_from_entry_none_when_nothing_usable() {
+        assert_eq!(install_location_from_entry(None, None, None), None);
+        assert_eq!(install_location_from_entry(Some("  "), None, None), None);
+    }
+
+    // ---- protobuf reader ----------------------------------------------------
+
+    fn encode_varint(mut v: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let mut byte = (v & 0x7F) as u8;
+            v >>= 7;
+            if v != 0 {
+                byte |= 0x80;
+            }
+            out.push(byte);
+            if v == 0 {
+                break;
+            }
+        }
+        out
+    }
+
+    /// Encodes one length-delimited (wire type 2) field: a string or an already-encoded embedded
+    /// message. Field numbers used in these tests (1, 3, 6, 13) all fit a one-byte tag.
+    fn encode_field(field_number: u64, payload: &[u8]) -> Vec<u8> {
+        let mut out = encode_varint((field_number << 3) | 2);
+        out.extend(encode_varint(payload.len() as u64));
+        out.extend_from_slice(payload);
+        out
+    }
+
+    fn encode_client(location: &str, name: &str) -> Vec<u8> {
+        let mut out = encode_field(1, location.as_bytes());
+        out.extend(encode_field(13, name.as_bytes()));
+        out
+    }
+
+    fn encode_product(family: &str, client: &[u8]) -> Vec<u8> {
+        let mut out = encode_field(3, client);
+        out.extend(encode_field(6, family.as_bytes()));
+        out
+    }
+
+    #[test]
+    fn read_varint_decodes_single_and_multi_byte_values() {
+        let mut pos = 0;
+        assert_eq!(protobuf::read_varint(&[0x01], &mut pos), Some(1));
+        assert_eq!(pos, 1);
+
+        let mut pos = 0;
+        // 300 = 0b1_0010_1100 -> low 7 bits 0101100 with continuation, then 0000010
+        assert_eq!(protobuf::read_varint(&[0xAC, 0x02], &mut pos), Some(300));
+        assert_eq!(pos, 2);
+    }
+
+    #[test]
+    fn read_varint_none_on_truncated_input() {
+        let mut pos = 0;
+        assert_eq!(protobuf::read_varint(&[0x80], &mut pos), None);
+        assert_eq!(protobuf::read_varint(&[], &mut pos), None);
+    }
+
+    #[test]
+    fn length_delimited_fields_reads_tag_and_payload_and_skips_varints() {
+        let mut data = encode_field(1, b"hello");
+        // A varint (wire type 0) field 2 = 42, which must be skipped without desyncing.
+        data.extend(encode_varint(2 << 3)); // field 2, wire type 0 (varint)
+        data.extend(encode_varint(42));
+        data.extend(encode_field(3, b"world"));
+
+        let fields = protobuf::length_delimited_fields(&data);
+        assert_eq!(fields, vec![(1, b"hello".as_slice()), (3, b"world".as_slice())]);
+    }
+
+    #[test]
+    fn length_delimited_fields_stops_cleanly_on_truncated_length() {
+        // A field-2 tag claiming a payload longer than what remains.
+        let mut data = encode_varint((5 << 3) | 2);
+        data.extend(encode_varint(50));
+        data.extend_from_slice(b"short");
+        assert_eq!(protobuf::length_delimited_fields(&data), Vec::<(u64, &[u8])>::new());
+    }
+
+    #[test]
+    fn parse_product_db_decodes_family_and_client_from_a_hand_built_buffer() {
+        let client = encode_client(r"D:\Games\World of Warcraft\_classic_beta_", "_classic_beta_");
+        let product = encode_product("wow", &client);
+        let mut db = encode_field(1, &product);
+
+        // A second, non-wow product (e.g. Diablo IV) must be decoded but filtered out downstream
+        // by product_db_root_candidates, not dropped here.
+        let other_client = encode_client(r"D:\Games\Diablo IV", "");
+        let other_product = encode_product("d4", &other_client);
+        db.extend(encode_field(1, &other_product));
+
+        let installs = parse_product_db(&db);
+        assert_eq!(
+            installs,
+            vec![
+                ProductDbInstall {
+                    family: "wow".into(),
+                    client_name: "_classic_beta_".into(),
+                    client_location: r"D:\Games\World of Warcraft\_classic_beta_".into(),
+                },
+                ProductDbInstall {
+                    family: "d4".into(),
+                    client_name: "".into(),
+                    client_location: r"D:\Games\Diablo IV".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_product_db_empty_on_garbage_bytes() {
+        let garbage: Vec<u8> = vec![0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
+        assert_eq!(parse_product_db(&garbage), Vec::<ProductDbInstall>::new());
+    }
+
+    #[test]
+    fn product_db_root_candidates_keeps_only_wow_family_and_adds_the_parent_of_a_game_folder() {
+        let installs = vec![
+            ProductDbInstall {
+                family: "wow".into(),
+                client_name: "_classic_beta_".into(),
+                client_location: r"D:\Games\World of Warcraft\_classic_beta_".into(),
+            },
+            ProductDbInstall {
+                family: "WoW".into(), // case-insensitive family match
+                client_name: "_retail_".into(),
+                client_location: r"C:\Program Files (x86)\World of Warcraft\_retail_".into(),
+            },
+            ProductDbInstall {
+                family: "d4".into(),
+                client_name: "".into(),
+                client_location: r"D:\Games\Diablo IV".into(),
+            },
+        ];
+        let out = product_db_root_candidates(&installs);
+        assert_eq!(
+            out,
+            vec![
+                PathBuf::from(r"D:\Games\World of Warcraft"),
+                PathBuf::from(r"D:\Games\World of Warcraft\_classic_beta_"),
+                PathBuf::from(r"C:\Program Files (x86)\World of Warcraft"),
+                PathBuf::from(r"C:\Program Files (x86)\World of Warcraft\_retail_"),
+            ]
+        );
+    }
+
+    #[test]
+    fn default_install_path_from_battlenet_config_reads_the_nested_key() {
+        let json = r#"{"Client": {"Install": {"DefaultInstallPath": "D:\\Games", "Other": 1}}}"#;
+        assert_eq!(
+            default_install_path_from_battlenet_config(json),
+            Some(r"D:\Games".to_string())
+        );
+    }
+
+    #[test]
+    fn default_install_path_from_battlenet_config_none_when_absent_or_malformed() {
+        assert_eq!(default_install_path_from_battlenet_config("{}"), None);
+        assert_eq!(default_install_path_from_battlenet_config("not json"), None);
+        assert_eq!(
+            default_install_path_from_battlenet_config(r#"{"Client": {"Install": {}}}"#),
+            None
+        );
+        assert_eq!(
+            default_install_path_from_battlenet_config(
+                r#"{"Client": {"Install": {"DefaultInstallPath": "  "}}}"#
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn dedupe_candidates_is_case_insensitive_on_request_and_keeps_first_seen_order() {
+        let candidates = vec![
+            PathBuf::from(r"D:\Games\WoW"),
+            PathBuf::from(r"C:\Other"),
+            PathBuf::from(r"d:\games\wow"),
+        ];
+        let deduped = dedupe_candidates(candidates.clone(), true);
+        assert_eq!(deduped, vec![PathBuf::from(r"D:\Games\WoW"), PathBuf::from(r"C:\Other")]);
+
+        let kept = dedupe_candidates(candidates, false);
+        assert_eq!(kept.len(), 3, "case-sensitive mode treats differing case as distinct");
     }
 }
