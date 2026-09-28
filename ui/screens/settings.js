@@ -35,10 +35,13 @@ export function render(el, ctx) {
   // paintAccount's closures so any rebuild of the Account group (or disposal
   // of the whole screen) can cancel a pending one — see buildAccount below.
   let unpairArmTimer = null;
-  // Shared across buildWowFolder/buildGames/buildRetailRealm: whichever of
-  // the three last changed the root, a game toggle, or the region needs to
-  // re-populate the Retail realm group's realm list the same way.
+  // Shared across buildGames/buildRetailRealm: whichever of the two last changed Retail's
+  // folder, the Retail toggle, or the region needs to re-populate the Retail realm group's
+  // realm list the same way.
   let loadRealms = async () => {};
+  // Whether a Classic Era install was seen under either game's folder, refreshed alongside the
+  // Games group's own detection — see refreshDetectedInstalls.
+  let classicEraFound = false;
 
   const top = document.createElement("div");
   top.className = "topbar glass topbar-sticky";
@@ -117,173 +120,134 @@ export function render(el, ctx) {
     return wrap;
   }
 
-  // ---- WoW folder ------------------------------------------------------
+  // ---- games ---------------------------------------------------------
+  //
+  // Each game gets its own folder row — checkbox, path, and its own
+  // Change…/Choose folder… — the same shape the wizard's Games step offers,
+  // reachable again here for a player who wants to add, drop, or repoint a
+  // game later without reinstalling. Retail and Forever are found,
+  // configured, and picked independently, since they may not share a drive.
 
-  function buildWowFolder() {
-    const folder = group("WoW folder");
+  let paintGames = () => {};
+
+  async function refreshDetectedInstalls() {
+    try {
+      const detected = await ctx.api.detectInstalls();
+      classicEraFound = Boolean(detected.classicEraFound);
+    } catch {
+      classicEraFound = false;
+    }
+  }
+
+  // One row's worth of DOM plus its own paint()/persist wiring — built once per game per screen
+  // entry (retail's folder box never rebuilds), unlike the Retail realm group which really is
+  // structural (see paintAccount's own note on the same idiom).
+  function folderRow(container, opts) {
+    const { title, sub, enabledKey, pathKeyOf, onChange, afterChange } = opts;
+
+    const row = document.createElement("div");
+    row.className = "stack";
+
+    const top = document.createElement("label");
+    top.className = "checkbox-row";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    const text = document.createElement("span");
+    text.className = "spacer";
+    text.textContent = title;
+    const subEl = document.createElement("span");
+    subEl.className = "muted";
+    subEl.textContent = sub;
+    top.append(box, text, subEl);
 
     const pathRow = document.createElement("div");
     pathRow.className = "row";
-
-    // A real (readonly) input rather than a <span> — it is the one control
-    // that mirrors config.wowRootPath, so it is what "WoW folder" can
-    // meaningfully label. Change/Detect are the row's other controls and
-    // carry their own names.
-    const pathInput = document.createElement("input");
-    pathInput.type = "text";
-    pathInput.className = "mono path-text";
-    pathInput.readOnly = true;
-
-    const rowSpacer = document.createElement("span");
-    rowSpacer.className = "spacer";
-
+    const pathText = document.createElement("span");
+    pathText.className = "mono muted path-text";
+    const pathSpacer = document.createElement("span");
+    pathSpacer.className = "spacer";
     const change = document.createElement("button");
     change.className = "btn btn-sm";
     change.type = "button";
-    change.textContent = "Change…";
-    change.setAttribute("aria-label", "Change WoW folder");
+    pathRow.append(pathText, pathSpacer, change);
 
-    const detect = document.createElement("button");
-    detect.className = "btn btn-sm";
-    detect.type = "button";
-    detect.textContent = "Detect";
-    detect.setAttribute("aria-label", "Detect WoW folder automatically");
+    row.append(top, pathRow);
+    container.append(row);
 
-    pathRow.append(pathInput, rowSpacer, change, detect);
-    folder.append(fieldBlock("settings-wow-root", "WoW folder", pathInput, pathRow));
-
-    const rootHint = document.createElement("p");
-    rootHint.className = "hint";
-    rootHint.textContent = "The folder that holds _retail_ and the Forever client, not the game folder inside it.";
-    folder.append(rootHint);
-
-    function paintPath() {
-      pathInput.value = truncateMiddle(config.wowRootPath || "not set", 34);
-      pathInput.title = config.wowRootPath || "";
+    function paint() {
+      const path = pathKeyOf(config);
+      box.checked = Boolean(config[enabledKey]);
+      box.disabled = !path;
+      pathText.textContent = path ? truncateMiddle(path, 34) : "Not found";
+      pathText.title = path || "";
+      change.textContent = path ? "Change…" : "Choose folder…";
     }
 
-    // Re-reads which games live under the (possibly new) root and, since
-    // wow_retail_path is now derived server-side from wow_root_path
-    // (config::retail_dir_from_root), re-fetches the whole config so the
-    // Retail realm group's loadRealms below reads the freshly-derived path
-    // rather than persist()'s own optimistic patch, which never touches
-    // wowRetailPath at all.
-    async function afterRootChange() {
-      try {
-        config = await ctx.api.getConfig();
-      } catch {
-        /* keep the optimistically-patched config; the next getConfig will catch up */
-      }
+    box.addEventListener("change", async () => {
+      await persist({ [enabledKey]: box.checked });
       if (disposed) return;
-      paintPath();
-      paintGames();
-      await refreshDetectedGames();
-      if (disposed) return;
-      paintRetailVisibility();
-      loadRealms(config.wowRetailPath, config.region);
-    }
+      paint();
+      afterChange();
+    });
 
     change.addEventListener("click", async () => {
       try {
-        const picked = await ctx.api.pickWowRoot();
-        if (disposed || !picked) return;
-        const ok = await persist({ wowRootPath: picked });
+        // onChange already returns the full patch (the new path plus turning the game on —
+        // picking a folder is exactly the signal that the player wants that game synced).
+        const patch = await onChange();
+        if (disposed || !patch) return;
+        const ok = await persist(patch);
         if (disposed || !ok) return;
-        await afterRootChange();
+        paint();
+        afterChange();
       } catch (e) {
         if (disposed) return;
         ctx.toast(String(e), true);
       }
     });
 
-    detect.addEventListener("click", async () => {
-      try {
-        const found = await ctx.api.detectWowRoot();
-        if (disposed) return;
-        if (!found) {
-          ctx.toast("No install found", true);
-          return;
-        }
-        const ok = await persist({ wowRootPath: found });
-        if (disposed || !ok) return;
-        await afterRootChange();
-      } catch (e) {
-        if (disposed) return;
-        ctx.toast(String(e), true);
-      }
-    });
-
-    paintPath();
-  }
-
-  // ---- games -------------------------------------------------------------
-
-  // Which games GoldCap keeps in sync — the same choice the wizard's first
-  // step offers, reachable again here for a player who wants to add or drop
-  // a game later without reinstalling.
-  let detectedGames = [];
-  let paintGames = () => {};
-
-  async function refreshDetectedGames() {
-    if (!config.wowRootPath) {
-      detectedGames = [];
-      return;
-    }
-    try {
-      detectedGames = await ctx.api.detectGames(config.wowRootPath);
-    } catch {
-      detectedGames = [];
-    }
+    return paint;
   }
 
   function buildGames() {
     const games = group("Games");
 
-    const forever = document.createElement("label");
-    forever.className = "checkbox-row";
-    const foreverBox = document.createElement("input");
-    foreverBox.type = "checkbox";
-    const foreverText = document.createElement("span");
-    foreverText.className = "spacer";
-    foreverText.textContent = "WoW: Forever";
-    const foreverSub = document.createElement("span");
-    foreverSub.className = "muted";
-    foreverSub.textContent = "uploads scans";
-    forever.append(foreverBox, foreverText, foreverSub);
-
-    const retail = document.createElement("label");
-    retail.className = "checkbox-row";
-    const retailBox = document.createElement("input");
-    retailBox.type = "checkbox";
-    const retailText = document.createElement("span");
-    retailText.className = "spacer";
-    retailText.textContent = "Retail";
-    const retailSub = document.createElement("span");
-    retailSub.className = "muted";
-    retailSub.textContent = "realm prices";
-    retail.append(retailBox, retailText, retailSub);
-
-    games.append(forever, retail);
-
-    foreverBox.addEventListener("change", async () => {
-      await persist({ foreverEnabled: foreverBox.checked });
-      if (disposed) return;
-      paintGames();
+    const paintForever = folderRow(games, {
+      title: "WoW: Forever",
+      sub: "uploads scans",
+      enabledKey: "foreverEnabled",
+      pathKeyOf: (c) => c.foreverRootPath,
+      onChange: async () => {
+        const picked = await ctx.api.pickForeverRoot();
+        return picked ? { foreverRootPath: picked, foreverEnabled: true } : null;
+      },
+      afterChange: () => {},
     });
-    retailBox.addEventListener("change", async () => {
-      await persist({ retailEnabled: retailBox.checked });
-      if (disposed) return;
-      paintGames();
-      paintRetailVisibility();
-      if (retailBox.checked) loadRealms(config.wowRetailPath, config.region);
+
+    const paintRetail = folderRow(games, {
+      title: "Retail",
+      sub: "realm prices",
+      enabledKey: "retailEnabled",
+      pathKeyOf: (c) => c.wowRetailPath,
+      onChange: async () => {
+        const picked = await ctx.api.pickWowPath();
+        return picked ? { wowRetailPath: picked, retailEnabled: true } : null;
+      },
+      afterChange: () => {
+        paintRetailVisibility();
+        if (config.retailEnabled) loadRealms(config.wowRetailPath, config.region);
+      },
     });
+
+    const classicEra = document.createElement("p");
+    classicEra.className = "hint";
+    classicEra.textContent = "Classic Era was found too — not supported by GoldCap.";
+    games.append(classicEra);
 
     paintGames = () => {
-      foreverBox.checked = Boolean(config.foreverEnabled);
-      retailBox.checked = Boolean(config.retailEnabled);
-      const found = (kind) => detectedGames.some((g) => g.kind === kind);
-      foreverSub.textContent = found("forever") ? "uploads scans · found" : "uploads scans";
-      retailSub.textContent = found("retail") ? "realm prices · found" : "realm prices";
+      paintForever();
+      paintRetail();
+      classicEra.hidden = !classicEraFound;
     };
     paintGames();
   }
@@ -430,8 +394,8 @@ export function render(el, ctx) {
     paintRealm();
     // Populated once per screen entry, not per repaint — nothing below this
     // point rebuilds the Retail realm group, so this is the only call site
-    // besides the ones in buildWowFolder/buildGames that persist a new
-    // root or toggle Retail on.
+    // besides buildGames' Retail row that persists a new path or toggles
+    // Retail on.
     loadRealms(config.wowRetailPath, config.region);
   }
 
@@ -747,9 +711,8 @@ export function render(el, ctx) {
     .then(async (c) => {
       if (disposed) return;
       config = c;
-      await refreshDetectedGames();
+      await refreshDetectedInstalls();
       if (disposed) return;
-      buildWowFolder();
       buildGames();
       buildRetailRealm();
       buildSync();
