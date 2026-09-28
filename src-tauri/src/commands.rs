@@ -242,7 +242,7 @@ pub async fn pair_with_code(
         .or_else(|_| std::env::var("HOSTNAME"))
         .unwrap_or_else(|_| "companion".to_string());
 
-    let client = reqwest::Client::new();
+    let client = crate::sync::build_client();
     let token = crate::upload::claim_code(&client, &trimmed, &label).await?;
 
     let mut config = state.config.lock().unwrap_or_else(|p| p.into_inner()).clone();
