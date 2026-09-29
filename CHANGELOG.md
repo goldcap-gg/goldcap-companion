@@ -4,7 +4,7 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
-## 1.15.0 (unreleased)
+## 1.15.0 (2026-09-29)
 
 - First run now asks which WoW you play. A WoW: Forever player can finish
   setup and start syncing without ever pointing the Companion at a retail
@@ -13,6 +13,8 @@ data.
   any time, with its own folder and its own "Change…" for each — Retail and
   WoW: Forever no longer have to share one folder, so they work correctly
   even installed on two different drives.
+- Setup now also looks where Battle.net says WoW is installed, so it finds
+  WoW on another drive or in a folder of your own choosing.
 - The Status screen shows a card per game you have turned on — a Forever
   card with your last scan and the crowd prices that came back, a Retail
   card with today's three stages — instead of one fixed layout for everyone.
