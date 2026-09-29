@@ -4,7 +4,7 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
-## 1.16.0 (unreleased)
+## 1.16.0 (2026-09-29)
 
 - WoW: Forever: after a scan is sent, the Forever card on the Status screen
   shows how many prices it updated on your auction house, and how many of
