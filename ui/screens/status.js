@@ -1,4 +1,4 @@
-import { relativeTime, countdown, groupDigits, foreverScanLine, foreverCrowdLine, foreverMarketLine } from "../lib/format.js";
+import { relativeTime, countdown, groupDigits, foreverScanLine, foreverCrowdLine, foreverMarketLine, foreverImpactLines } from "../lib/format.js";
 import { brandMarkSvg } from "../lib/brandMark.js";
 
 const POLL_MS = 5000;
@@ -114,6 +114,23 @@ function stageRow(key, stage, ctx, canPair) {
   return { row, detailEl: detail };
 }
 
+function impactBlock({ big, label, sub }) {
+  const box = document.createElement("div");
+  box.className = "impact";
+  const line = (tag, className, text) => {
+    const el = document.createElement(tag);
+    el.className = className;
+    el.textContent = text;
+    box.append(el);
+  };
+  if (big) {
+    line("span", "impact-big mono", big);
+    line("span", "impact-label", label);
+  }
+  if (sub) line("p", "stage-detail", sub);
+  return box;
+}
+
 // One Forever install's card: market (realm · faction), the scan and crowd-prices lines, any
 // note the site sent back, and the fixed reminder about when a scan actually reaches disk.
 // Returns the card alongside its two age-bearing paragraphs so paintTime can re-date them every
@@ -141,6 +158,11 @@ function foreverCard(g) {
   const scan = document.createElement("p");
   scan.className = "stage-detail";
   card.append(scan);
+
+  // What that scan changed on its market, when goldcap.gg counted it. Not time-derived, so it
+  // is built once here; an answer without numbers leaves the card exactly as it was.
+  const impact = foreverImpactLines(g);
+  if (impact) card.append(impactBlock(impact));
 
   const crowd = document.createElement("p");
   crowd.className = "stage-detail";
