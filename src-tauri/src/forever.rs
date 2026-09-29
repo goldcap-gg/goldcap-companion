@@ -249,7 +249,7 @@ pub async fn upload_fold(client: &reqwest::Client, base: &str, token: &str, up: 
         .await;
     let res = match sent {
         Ok(r) => r,
-        Err(e) => return UploadOutcome::Retry(e.to_string()),
+        Err(e) => return UploadOutcome::Retry(crate::sync::describe_err(&e, crate::sync::CLIENT_TIMEOUT)),
     };
     let code = res.status().as_u16();
     let body: serde_json::Value = res.json().await.unwrap_or(serde_json::Value::Null);
@@ -277,11 +277,26 @@ pub async fn upload_fold(client: &reqwest::Client, base: &str, token: &str, up: 
 #[serde(rename_all = "camelCase", default)]
 pub struct InstallState {
     pub market: Option<String>,
+    /// The realm and faction the last *accepted or duplicate* fold named — same rule as
+    /// `market` (fix round 1 M7): a quarantined or rejected answer can carry a stale fold's
+    /// realm and must not overwrite what a good fold last said. For the Status screen's
+    /// Forever card ("realm · faction"), computed here rather than parsed back out of `market`
+    /// (a URL slug) in JS.
+    pub realm: Option<String>,
+    pub faction: Option<String>,
     pub last_scan_at: Option<i64>,
     pub last_sent_at: Option<i64>,
+    /// How many items the last *sent* fold carried — the Status screen's "scan uploaded <age> ·
+    /// <items> items" line. Set alongside `last_sent_at`, so the two always describe the same
+    /// fold.
+    pub sent_items: Option<u32>,
     pub note: Option<String>,
     pub crowd_items: Option<u32>,
     pub crowd_ts: Option<i64>,
+    /// When this install's `AppData.lua` last actually carried a `foreverString` — distinct
+    /// from `crowd_ts` (the site's own snapshot time for that payload): this is local write
+    /// time, what "crowd prices written to the addon <age>" on the Status screen means.
+    pub crowd_written_at: Option<i64>,
     /// The last upload attempt got a 401: the token is no longer good, so `AppData.lua` must
     /// say `foreverUpload = false` until a fresh upload actually succeeds — the addon's "shared
     /// on your next /reload" line must not lie about a revoked token (fix round 1 M8).
@@ -394,9 +409,9 @@ pub async fn refresh_crowd_at(
     let etag = previous.as_ref().and_then(|k| k.etag.clone());
     let request = client
         .get(format!("{base}/v1/forever/addon-data"))
-        .query(&[("market", slug)])
-        .timeout(std::time::Duration::from_secs(60));
-    let fetched = crate::region::fetch_capped(request, etag.as_deref()).await;
+        .query(&[("market", slug)]);
+    let fetched =
+        crate::region::fetch_capped(request, std::time::Duration::from_secs(60), etag.as_deref()).await;
     let kept = match fetched {
         Ok(crate::region::Fetched::Fresh { body, etag }) => match summarize_gcf1(&body, slug) {
             Ok(summary) => Some(KeptCrowd { slug: slug.to_string(), body, etag, summary }),
@@ -437,7 +452,7 @@ pub async fn sync_forever_at(
     store: &std::sync::Mutex<std::collections::HashMap<String, KeptCrowd>>,
     now: i64,
 ) -> ForeverState {
-    match crate::games::wow_root(config) {
+    match crate::games::forever_root(config) {
         Some(root) => sync_forever_at_root(client, base, &root, config, logger, state_path, store, now).await,
         None => ForeverState::load_from(state_path),
     }
@@ -560,8 +575,11 @@ pub async fn sync_forever_at_root(
                     entry.last_sent_at = Some(now);
                     entry.note = note;
                     entry.unauthorized = false;
+                    entry.sent_items = Some(up.fold.items.len() as u32);
                     if market.is_some() {
                         entry.market = market;
+                        entry.realm = Some(up.fold.realm.clone());
+                        entry.faction = up.fold.faction.clone();
                     }
                 }
                 UploadOutcome::Unauthorized => {
@@ -583,14 +601,20 @@ pub async fn sync_forever_at_root(
         // A revoked token that 401s every tick must not keep promising "shared on your next
         // /reload" — the addon only prints that while `foreverUpload == true` (fix round 1 M8).
         let can_upload = !token.is_empty() && !entry.unauthorized;
-        if let Err(e) = crate::luafile::write_forever_app_data(
+        let has_crowd = crowd.is_some();
+        match crate::luafile::write_forever_app_data(
             &crate::luafile::addon_dir(&game.dir),
             interface,
             crowd.as_ref().map(|(body, _)| body.as_str()),
             can_upload,
             now,
         ) {
-            logger.error(&format!("forever prices for {}: could not write ({e})", game.folder));
+            Ok(()) => {
+                if has_crowd {
+                    state.installs.entry(key.clone()).or_default().crowd_written_at = Some(now);
+                }
+            }
+            Err(e) => logger.error(&format!("forever prices for {}: could not write ({e})", game.folder)),
         }
     }
 
@@ -982,6 +1006,7 @@ mod tests {
         let before = files_under(&root);
         let config = crate::config::Config {
             wow_retail_path: root.join("_retail_").to_string_lossy().into_owned(),
+            forever_root_path: root.to_string_lossy().into_owned(),
             companion_token: "tok".into(),
             ..crate::config::Config::default()
         };
@@ -1005,6 +1030,7 @@ mod tests {
         let sv = put(&root, "_classic_beta_", REAL);
         let config = crate::config::Config {
             wow_retail_path: root.join("_retail_").to_string_lossy().into_owned(),
+            forever_root_path: root.to_string_lossy().into_owned(),
             companion_token: "tok".into(),
             ..crate::config::Config::default()
         };
@@ -1023,6 +1049,87 @@ mod tests {
         // The same fold on the next tick is not sent again (no server is listening now).
         let again = sync_forever_at(&crate::sync::build_client(), "http://127.0.0.1:9", &config, &logger, &state_path, &store, 1_790_464_900).await;
         assert_eq!(again.installs.values().next().unwrap().market.as_deref(), Some("m"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // The two-drives case: Retail lives under one WoW folder, Forever's client under a
+    // completely separate one (its own `forever_root_path`, standing in for e.g. `D:\Games\World
+    // of Warcraft`). sync_forever must scan Forever's own root, never Retail's — a config that
+    // only set wow_retail_path (no forever_root_path) must not fall back through it.
+    #[tokio::test]
+    async fn sync_forever_uses_the_forever_root_when_retail_lives_on_a_different_drive() {
+        let retail_drive = machine("two-drives-retail");
+        let forever_drive = machine("two-drives-forever");
+        put(&retail_drive, "_retail_", r#"GoldCapDB = { client = { interface = 120100, build = "12.1.0.69933" }, ledger = {} }"#);
+        let sv = put(&forever_drive, "_classic_beta_", REAL);
+
+        let config = crate::config::Config {
+            wow_retail_path: retail_drive.join("_retail_").to_string_lossy().into_owned(),
+            forever_root_path: forever_drive.to_string_lossy().into_owned(),
+            companion_token: "tok".into(),
+            ..crate::config::Config::default()
+        };
+        let logger = crate::logging::Logger::new(&forever_drive.join("logs")).unwrap();
+        let store = std::sync::Mutex::new(std::collections::HashMap::new());
+        let (base, seen) = serve_once(answer("200 OK", r#"{"status":"accepted","market":"m","items":1974,"dropped":0}"#));
+        let state_path = forever_drive.join("state").join(STATE_FILE_NAME);
+        let state = sync_forever_at(&crate::sync::build_client(), &base, &config, &logger, &state_path, &store, 1_790_464_500).await;
+
+        assert!(seen.recv().unwrap().to_ascii_lowercase().starts_with("post /v1/forever/scans"));
+        assert_eq!(state.sent.get(&sv.to_string_lossy().into_owned()), Some(&1_790_464_249));
+        // Nothing was ever written under the retail drive — it was never scanned at all.
+        assert!(!retail_drive.join("_retail_/Interface/AddOns/GoldCap_AppData").exists());
+
+        std::fs::remove_dir_all(&retail_drive).ok();
+        std::fs::remove_dir_all(&forever_drive).ok();
+    }
+
+    // The Status screen's Forever card reads realm/faction/item count straight off the
+    // snapshot rather than re-parsing the market slug in JS — this is where those get filled in.
+    #[tokio::test]
+    async fn an_accepted_fold_records_realm_faction_and_item_count_for_the_status_card() {
+        let root = machine("realm-faction");
+        put(&root, "_classic_beta_", REAL);
+        let config = crate::config::Config { companion_token: "tok".into(), ..crate::config::Config::default() };
+        let logger = crate::logging::Logger::new(&root.join("logs")).unwrap();
+        let store = std::sync::Mutex::new(std::collections::HashMap::new());
+        let (base, _seen) = serve_once(answer("200 OK", r#"{"status":"accepted","market":"m","items":1974,"dropped":0}"#));
+        let state = sync_forever_at_root(&crate::sync::build_client(), &base, &root, &config, &logger, &root.join("s.json"), &store, 1).await;
+        let entry = state.installs.values().next().unwrap();
+        assert_eq!(entry.realm.as_deref(), Some("Classic Beta PvE 2"));
+        assert_eq!(entry.faction.as_deref(), Some("Horde"));
+        assert_eq!(entry.sent_items, Some(1974));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // fix round 1 M7's rule extended to realm/faction: a quarantined answer must not overwrite
+    // a good fold's realm with a stale one's.
+    #[tokio::test]
+    async fn a_quarantined_fold_does_not_overwrite_the_realm_or_faction() {
+        let up = parse_forever_upload(REAL).unwrap().unwrap();
+        let (base, _seen) = serve_once(answer("200 OK", r#"{"status":"quarantined","market":"m","items":1,"dropped":0,"reason":"unlinked"}"#));
+        let UploadOutcome::Done { market, .. } = upload_fold(&crate::sync::build_client(), &base, "tok", &up).await else { panic!() };
+        assert_eq!(market, None, "quarantined never sets a market, so nothing overwrites realm/faction either");
+    }
+
+    // "written to the addon" is local write time, distinct from crowd_ts (the site's own
+    // snapshot age) — this is what the Status screen's "crowd prices written ... <age>" reads.
+    #[tokio::test]
+    async fn crowd_written_at_is_set_when_the_addon_file_actually_carries_prices() {
+        let root = machine("crowd-written");
+        put(&root, "_classic_beta_", REAL);
+        let config = crate::config::Config { companion_token: "tok".into(), ..crate::config::Config::default() };
+        let logger = crate::logging::Logger::new(&root.join("logs")).unwrap();
+        let store = std::sync::Mutex::new(std::collections::HashMap::new());
+
+        // First tick: the scan upload succeeds and returns a market, but no crowd payload is
+        // ever requested from a server the test never serves a second answer from — the
+        // sequential serve_once server only answers the scan POST, so refresh_crowd_at's GET
+        // fails and nothing is kept: crowd_written_at must stay unset.
+        let (base, _seen) = serve_once(answer("200 OK", r#"{"status":"accepted","market":"m","items":1,"dropped":0}"#));
+        let state = sync_forever_at_root(&crate::sync::build_client(), &base, &root, &config, &logger, &root.join("s.json"), &store, 1).await;
+        let entry = state.installs.values().next().unwrap();
+        assert_eq!(entry.crowd_written_at, None, "no crowd payload was ever fetched");
         std::fs::remove_dir_all(&root).ok();
     }
 

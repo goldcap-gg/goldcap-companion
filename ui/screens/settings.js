@@ -35,6 +35,13 @@ export function render(el, ctx) {
   // paintAccount's closures so any rebuild of the Account group (or disposal
   // of the whole screen) can cancel a pending one — see buildAccount below.
   let unpairArmTimer = null;
+  // Shared across buildGames/buildRetailRealm: whichever of the two last changed Retail's
+  // folder, the Retail toggle, or the region needs to re-populate the Retail realm group's
+  // realm list the same way.
+  let loadRealms = async () => {};
+  // Whether a Classic Era install was seen under either game's folder, refreshed alongside the
+  // Games group's own detection — see refreshDetectedInstalls.
+  let classicEraFound = false;
 
   const top = document.createElement("div");
   top.className = "topbar glass topbar-sticky";
@@ -113,81 +120,149 @@ export function render(el, ctx) {
     return wrap;
   }
 
-  // ---- game ----------------------------------------------------------
+  // ---- games ---------------------------------------------------------
+  //
+  // Each game gets its own folder row — checkbox, path, and its own
+  // Change…/Choose folder… — the same shape the wizard's Games step offers,
+  // reachable again here for a player who wants to add, drop, or repoint a
+  // game later without reinstalling. Retail and Forever are found,
+  // configured, and picked independently, since they may not share a drive.
 
-  function buildGame() {
-    const game = group("Game");
+  let paintGames = () => {};
+
+  async function refreshDetectedInstalls() {
+    try {
+      const detected = await ctx.api.detectInstalls();
+      classicEraFound = Boolean(detected.classicEraFound);
+    } catch {
+      classicEraFound = false;
+    }
+  }
+
+  // One row's worth of DOM plus its own paint()/persist wiring — built once per game per screen
+  // entry (retail's folder box never rebuilds), unlike the Retail realm group which really is
+  // structural (see paintAccount's own note on the same idiom).
+  function folderRow(container, opts) {
+    const { title, sub, enabledKey, pathKeyOf, onChange, afterChange } = opts;
+
+    const row = document.createElement("div");
+    row.className = "stack";
+
+    const top = document.createElement("label");
+    top.className = "checkbox-row";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    const text = document.createElement("span");
+    text.className = "spacer";
+    text.textContent = title;
+    const subEl = document.createElement("span");
+    subEl.className = "muted";
+    subEl.textContent = sub;
+    top.append(box, text, subEl);
 
     const pathRow = document.createElement("div");
     pathRow.className = "row";
-
-    // A real (readonly) input rather than a <span> — it is the one control
-    // that mirrors config.wowRetailPath, exactly as the slug field mirrors
-    // config.realmSlug below, so it is what "WoW retail folder" can
-    // meaningfully label. Change/Detect are the row's other controls and
-    // carry their own names.
-    const pathInput = document.createElement("input");
-    pathInput.type = "text";
-    pathInput.className = "mono path-text";
-    pathInput.readOnly = true;
-
-    const rowSpacer = document.createElement("span");
-    rowSpacer.className = "spacer";
-
+    const pathText = document.createElement("span");
+    pathText.className = "mono muted path-text";
+    const pathSpacer = document.createElement("span");
+    pathSpacer.className = "spacer";
     const change = document.createElement("button");
     change.className = "btn btn-sm";
     change.type = "button";
-    change.textContent = "Change…";
-    change.setAttribute("aria-label", "Change WoW retail folder");
+    pathRow.append(pathText, pathSpacer, change);
 
-    const detect = document.createElement("button");
-    detect.className = "btn btn-sm";
-    detect.type = "button";
-    detect.textContent = "Detect";
-    detect.setAttribute("aria-label", "Detect WoW retail folder automatically");
+    row.append(top, pathRow);
+    container.append(row);
 
-    pathRow.append(pathInput, rowSpacer, change, detect);
-    game.append(fieldBlock("settings-wow-path", "WoW retail folder", pathInput, pathRow));
-
-    function paintPath() {
-      pathInput.value = truncateMiddle(config.wowRetailPath || "not set", 34);
-      pathInput.title = config.wowRetailPath || "";
+    function paint() {
+      const path = pathKeyOf(config);
+      box.checked = Boolean(config[enabledKey]);
+      box.disabled = !path;
+      pathText.textContent = path ? truncateMiddle(path, 34) : "Not found";
+      pathText.title = path || "";
+      change.textContent = path ? "Change…" : "Choose folder…";
     }
+
+    box.addEventListener("change", async () => {
+      await persist({ [enabledKey]: box.checked });
+      if (disposed) return;
+      paint();
+      afterChange();
+    });
 
     change.addEventListener("click", async () => {
       try {
-        const picked = await ctx.api.pickWowPath();
-        if (disposed || !picked) return;
-        const ok = await persist({ wowRetailPath: picked });
-        if (disposed) return;
-        paintPath();
-        // Only worth re-reading the game's realm list when the path that
-        // was actually saved changed — a rejected save leaves config (and
-        // so the path detectGame would read) exactly where it was.
-        if (ok) loadRealms(config.wowRetailPath, config.region);
+        // onChange already returns the full patch (the new path plus turning the game on —
+        // picking a folder is exactly the signal that the player wants that game synced).
+        const patch = await onChange();
+        if (disposed || !patch) return;
+        const ok = await persist(patch);
+        if (disposed || !ok) return;
+        paint();
+        afterChange();
       } catch (e) {
         if (disposed) return;
         ctx.toast(String(e), true);
       }
     });
 
-    detect.addEventListener("click", async () => {
-      try {
-        const found = await ctx.api.detectWowPath();
-        if (disposed) return;
-        if (!found) {
-          ctx.toast("No install found", true);
-          return;
-        }
-        const ok = await persist({ wowRetailPath: found });
-        if (disposed) return;
-        paintPath();
-        if (ok) loadRealms(config.wowRetailPath, config.region);
-      } catch (e) {
-        if (disposed) return;
-        ctx.toast(String(e), true);
-      }
+    return paint;
+  }
+
+  function buildGames() {
+    const games = group("Games");
+
+    const paintForever = folderRow(games, {
+      title: "WoW: Forever",
+      sub: "uploads scans",
+      enabledKey: "foreverEnabled",
+      pathKeyOf: (c) => c.foreverRootPath,
+      onChange: async () => {
+        const picked = await ctx.api.pickForeverRoot();
+        return picked ? { foreverRootPath: picked, foreverEnabled: true } : null;
+      },
+      afterChange: () => {},
     });
+
+    const paintRetail = folderRow(games, {
+      title: "Retail",
+      sub: "realm prices",
+      enabledKey: "retailEnabled",
+      pathKeyOf: (c) => c.wowRetailPath,
+      onChange: async () => {
+        const picked = await ctx.api.pickWowPath();
+        return picked ? { wowRetailPath: picked, retailEnabled: true } : null;
+      },
+      afterChange: () => {
+        paintRetailVisibility();
+        if (config.retailEnabled) loadRealms(config.wowRetailPath, config.region);
+      },
+    });
+
+    const classicEra = document.createElement("p");
+    classicEra.className = "hint";
+    classicEra.textContent = "Classic Era was found too — not supported by GoldCap.";
+    games.append(classicEra);
+
+    paintGames = () => {
+      paintForever();
+      paintRetail();
+      classicEra.hidden = !classicEraFound;
+    };
+    paintGames();
+  }
+
+  // ---- retail realm --------------------------------------------------
+
+  let paintRetailVisibility = () => {};
+
+  function buildRetailRealm() {
+    const retail = group("Retail realm");
+    // Shown only while Retail is on — Forever needs no realm at all, and a
+    // player who turned Retail off has nothing here to configure.
+    paintRetailVisibility = () => {
+      retail.hidden = !config.retailEnabled;
+    };
 
     const region = document.createElement("select");
     region.className = "field";
@@ -195,7 +270,7 @@ export function render(el, ctx) {
     region.add(new Option("US", "us"));
     region.add(new Option("KR", "kr"));
     region.add(new Option("TW", "tw"));
-    game.append(fieldBlock("settings-region", "Region", region));
+    retail.append(fieldBlock("settings-region", "Region", region));
 
     function paintRegion() {
       region.value = config.region;
@@ -231,7 +306,7 @@ export function render(el, ctx) {
 
     const realmBlock = fieldBlock("settings-realm", "Realm", realm);
     realmBlock.append(realmHint);
-    game.append(realmBlock);
+    retail.append(realmBlock);
 
     const AUTO = "\u0000auto";
 
@@ -264,7 +339,7 @@ export function render(el, ctx) {
     // landing after a newer one and repopulating a list that has since
     // moved on to another region or install.
     let realmRequest = 0;
-    async function loadRealms(path, regionValue) {
+    loadRealms = async (path, regionValue) => {
       const gen = ++realmRequest;
       realm.replaceChildren(new Option("Auto — my last played realm", AUTO));
 
@@ -312,14 +387,15 @@ export function render(el, ctx) {
         realm.append(group);
       }
       paintRealm();
-    }
+    };
 
-    paintPath();
+    paintRetailVisibility();
     paintRegion();
     paintRealm();
     // Populated once per screen entry, not per repaint — nothing below this
-    // point rebuilds the Game group, so this is the only call site besides
-    // the two above that persist a new path.
+    // point rebuilds the Retail realm group, so this is the only call site
+    // besides buildGames' Retail row that persists a new path or toggles
+    // Retail on.
     loadRealms(config.wowRetailPath, config.region);
   }
 
@@ -632,10 +708,13 @@ export function render(el, ctx) {
 
   ctx.api
     .getConfig()
-    .then((c) => {
+    .then(async (c) => {
       if (disposed) return;
       config = c;
-      buildGame();
+      await refreshDetectedInstalls();
+      if (disposed) return;
+      buildGames();
+      buildRetailRealm();
       buildSync();
       buildAccount();
     })

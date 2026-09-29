@@ -35,6 +35,11 @@ pub struct StageState {
 pub struct StatusSnapshot {
     pub configured: bool,
     pub paired: bool,
+    /// Which games this config has turned on — the Status screen shows one card per game that
+    /// is both enabled AND (for Retail) actually configured; a disabled game gets no card at
+    /// all rather than a broken-looking one.
+    pub retail_enabled: bool,
+    pub forever_enabled: bool,
     pub region: String,
     pub realm_slug: String,
     pub syncing: bool,
@@ -68,7 +73,13 @@ pub fn build(
     let configured = config.is_complete();
     let paired = !config.companion_token.trim().is_empty();
 
-    let prices = if !configured {
+    // A player who turned Retail off entirely reads as "quiet off", never as a broken stage —
+    // the Status screen skips these rows outright when `retailEnabled` is false, but the
+    // snapshot itself must already say something harmless in case anything ever reads them
+    // without checking that flag first (fixtures, a future screen).
+    let prices = if !config.retail_enabled {
+        stage(StageHealth::NotConnected, None, "Retail is off", None)
+    } else if !configured {
         stage(StageHealth::NotConnected, None, "Waiting for setup", None)
     } else if status.last_error_stage == Some(SyncErrorStage::Prices) {
         // A broken link is still a link that worked at some point — keep
@@ -86,7 +97,9 @@ pub fn build(
         stage(StageHealth::NotConnected, None, "No sync yet", None)
     };
 
-    let addon = if !configured {
+    let addon = if !config.retail_enabled {
+        stage(StageHealth::NotConnected, None, "Retail is off", None)
+    } else if !configured {
         stage(StageHealth::NotConnected, None, "Waiting for setup", None)
     } else if !health.addon_installed {
         stage(
@@ -119,7 +132,9 @@ pub fn build(
         stage(StageHealth::NotConnected, None, "No price file written yet", None)
     };
 
-    let ledger = if !configured {
+    let ledger = if !config.retail_enabled {
+        stage(StageHealth::NotConnected, None, "Retail is off", None)
+    } else if !configured {
         stage(StageHealth::NotConnected, None, "Waiting for setup", None)
     } else if !paired {
         stage(
@@ -159,6 +174,8 @@ pub fn build(
     StatusSnapshot {
         configured,
         paired,
+        retail_enabled: config.retail_enabled,
+        forever_enabled: config.forever_enabled,
         region: config.region.to_string(),
         realm_slug: config.realm_slug.clone(),
         syncing: status.syncing,
@@ -189,6 +206,8 @@ mod tests {
             region: Region::Eu,
             realm_slug: "dentarg".into(),
             wow_retail_path: "/tmp/wow/_retail_".into(),
+            forever_root_path: "/tmp/wow".into(),
+            retail_enabled: true,
             ..Config::default()
         }
     }
@@ -407,5 +426,29 @@ mod tests {
         let snap = build(&configured(), &SyncStatus::default(), &healthy(), NOW);
         assert_eq!(snap.market_items, None);
         assert_eq!(snap.market_ts, None);
+    }
+
+    #[test]
+    fn the_enabled_flags_reach_the_snapshot() {
+        let mut config = configured();
+        config.forever_enabled = true;
+        let snap = build(&config, &SyncStatus::default(), &healthy(), NOW);
+        assert!(snap.retail_enabled);
+        assert!(snap.forever_enabled);
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(json.contains("\"retailEnabled\":true"), "{json}");
+        assert!(json.contains("\"foreverEnabled\":true"), "{json}");
+    }
+
+    // Retail off reads as quiet, not broken — a Forever-only player must never see "The GoldCap
+    // addon is not installed" just because they never pointed the companion at a retail folder.
+    #[test]
+    fn retail_disabled_reports_every_retail_stage_as_off_not_broken() {
+        let config = Config { retail_enabled: false, forever_enabled: true, ..Config::default() };
+        let snap = build(&config, &SyncStatus::default(), &GameHealth::default(), NOW);
+        assert_eq!(snap.prices.state, StageHealth::NotConnected);
+        assert_eq!(snap.addon.state, StageHealth::NotConnected);
+        assert_eq!(snap.ledger.state, StageHealth::NotConnected);
+        assert!(snap.prices.detail.contains("off"));
     }
 }

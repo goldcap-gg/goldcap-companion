@@ -522,11 +522,13 @@ pub async fn fetch_runs(client: &reqwest::Client, token: &str) -> Result<WireRun
         .bearer_auth(token)
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::sync::describe_err(&e, crate::sync::CLIENT_TIMEOUT))?;
     if !res.status().is_success() {
         return Err(format!("http {}", res.status()));
     }
-    res.json::<WireRuns>().await.map_err(|e| e.to_string())
+    res.json::<WireRuns>()
+        .await
+        .map_err(|e| crate::sync::describe_err(&e, crate::sync::CLIENT_TIMEOUT))
 }
 
 /// Runs contracts this build understands. v1 is the phase-1 shape; v2 adds

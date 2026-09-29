@@ -8,8 +8,20 @@ export const getConfig = () => invoke("get_config");
 export const saveConfig = (config) => invoke("save_config", { config });
 export const getStatus = () => invoke("get_status");
 export const syncNow = () => invoke("sync_now");
+/** The one setup-complete rule, computed in Rust — see config.rs's `is_complete`. */
+export const setupComplete = () => invoke("setup_complete");
+/** Retail's exact `_retail_` folder — auto-detect and the folder picker. */
 export const detectWowPath = () => invoke("detect_wow_path");
 export const pickWowPath = () => invoke("pick_wow_path");
+/**
+ * Retail's path and Forever's own root, found independently (they may sit on different drives) —
+ * plus whether a Classic Era install was seen under either one.
+ */
+export const detectInstalls = () => invoke("detect_installs");
+/** Forever's own root folder (holds its game folder, e.g. `_classic_beta_`), picked by hand. */
+export const pickForeverRoot = () => invoke("pick_forever_root");
+/** Which games exist under one already-known root. */
+export const detectGames = (root) => invoke("detect_games", { root });
 export const detectGame = (wowRetailPath) => invoke("detect_game", { wowRetailPath });
 export const resolveRealm = (region, name) => invoke("resolve_realm", { region, name });
 /** Every realm in a region, so the settings screen can offer the list. */

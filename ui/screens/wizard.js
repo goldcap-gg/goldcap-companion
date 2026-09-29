@@ -1,13 +1,12 @@
 import { truncateMiddle, formatPairCode } from "../lib/format.js";
 
-// The install path, region and realm all come out of the game's own files —
-// see detect() below — so the stepped flow is only ever entered for
-// whichever part detection could not answer. Steps 0 (Game) and 1 (Realm)
-// are unchanged from the three-step wizard; step 2 (Connect) is both the
-// pairing screen and, once detection lands, the very first thing the user
-// sees. "Later" stays a full-weight sibling of "Pair" — leaving the ledger
-// unconnected is a legitimate choice.
-const STEPS = ["Game", "Realm", "Connect"];
+// The install path and, when the game folders resolve to exactly one, the
+// realm all come out of the game's own files — see detect() below. Step 0
+// (Games) is where a player says which games GoldCap should keep in sync;
+// step 1 (Setup) only ever shows the pieces the games actually turned on
+// need (a realm picker for Retail, nothing at all for Forever); step 2
+// (Connect) is the pairing screen, same as before this feature existed.
+const STEPS = ["Games", "Setup", "Connect"];
 
 export function render(el, ctx) {
   el.classList.add("screen-wizard");
@@ -22,112 +21,26 @@ export function render(el, ctx) {
     region: "eu",
     realmSlug: "",
     wowRetailPath: "",
+    foreverRootPath: "",
+    retailEnabled: false,
+    foreverEnabled: false,
     intervalMinutes: 30,
     launchAtStartup: false,
     companionToken: "",
   };
+  // Whether a Classic Era install was seen under either game's folder — shown disabled, not
+  // omitted, so a player who has it knows GoldCap saw it and left it alone on purpose.
+  let classicEraFound = false;
   let realmNames = [];
-  let step = 2;
-
-  // Whether the stepped flow (Game/Realm) has ever been entered this visit.
-  // The progress bar has nothing to show a part-way-through position for
-  // until it has — a pure-detection run never sees it at all.
-  let enteredStepped = false;
-
-  // Set by the "change" button right before it calls go(1) directly,
-  // skipping Game — read and cleared by stepRealm() itself the instant it
-  // starts running (see below), so it can never leak into a later, ordinary
-  // Game → Realm visit. Only ever true for the one Realm instance it was
-  // set for.
-  let realmEnteredFromConnect = false;
-
-  // The draft as of the last successful saveConfig — i.e. what Connect is
-  // actually showing and what the sync loop is actually using. Only written
-  // right after a save succeeds (detect()'s success path, and Realm's Next
-  // handler below). Realm's Back button, when it returns straight to
-  // Connect, restores this before showing it — a pick the user backed out
-  // of without confirming via Next must not appear as if it had been.
-  let savedDraft = null;
+  let step = 0;
 
   const progress = document.createElement("div");
   progress.className = "progress";
-  progress.hidden = true;
   for (const name of STEPS) {
     const seg = document.createElement("span");
     seg.className = "progress-seg";
     seg.title = name;
     progress.append(seg);
-  }
-
-  // The Connect screen's confirmation card. It is a persistent element (not
-  // rebuilt per step, unlike bodyEl) because detect() paints it before any
-  // step even exists — visible from the very first frame, in a quiet
-  // "looking" state, and settles into the real verdict in place. That is
-  // what keeps the detecting phase from flashing: there is only ever one
-  // card, its content changes, the layout around it does not.
-  const confirm = document.createElement("div");
-  confirm.className = "card verdict connect-confirm";
-  confirm.hidden = true;
-  confirm.tabIndex = -1;
-  const confirmHead = document.createElement("div");
-  confirmHead.className = "row";
-  const confirmDot = document.createElement("span");
-  confirmDot.className = "dot dot-ok";
-  const confirmLine = document.createElement("p");
-  confirmHead.append(confirmDot, confirmLine);
-  const confirmSub = document.createElement("p");
-  confirmSub.className = "muted connect-confirm-sub";
-  const change = document.createElement("button");
-  change.className = "link connect-change";
-  change.type = "button";
-  change.textContent = "change";
-  // "change" is only ever offered once the path resolved (paintConfirm
-  // hides it otherwise), so a wrong realm is by far the common reason to
-  // click it — walking through Game first would ask the user to confirm a
-  // path that was never in question. Skip straight to Realm whenever the
-  // path is already usable, using the exact condition Game's own Next uses
-  // to enable itself; only fall back to Game when the path itself needs
-  // fixing. stepRealm() reads and immediately clears
-  // realmEnteredFromConnect (see below) so its own Back button knows which
-  // screen it left.
-  change.addEventListener("click", () => {
-    const skipGame = draft.wowRetailPath.trim() !== "";
-    realmEnteredFromConnect = skipGame;
-    go(skipGame ? 1 : 0);
-  });
-  confirm.append(confirmHead, confirmSub, change);
-
-  // What the placeholder line says while detect() is still working. One
-  // label for the whole probe would be a lie for most of its duration: the
-  // install is usually found in the first moment, and everything after that
-  // is reading the game's files and asking the site to resolve a realm name.
-  // When a step does stall, the visible text is what says which one — the
-  // alternative is an owner reconstructing it from memory afterwards.
-  const PROBE_INSTALL = "Looking for World of Warcraft…";
-  const PROBE_FILES = "Reading the game's own files…";
-  const PROBE_REALM = "Working out your realm…";
-  let probeLine = PROBE_INSTALL;
-
-  function setProbe(line) {
-    probeLine = line;
-    paintConfirm();
-  }
-
-  // Reflects `draft` onto the confirmation card. "Ready" is exactly the
-  // condition that lets a config be saved (both path and slug present) —
-  // before that it renders as the quiet placeholder line instead, with no
-  // dot, no sub-line and no way to "change" a value that was never shown.
-  function paintConfirm() {
-    const ready = draft.realmSlug.trim() !== "" && draft.wowRetailPath.trim() !== "";
-    confirm.classList.toggle("verdict-ok", ready);
-    confirmDot.hidden = !ready;
-    change.hidden = !ready;
-    confirmLine.classList.toggle("mono", ready);
-    confirmLine.classList.toggle("muted", !ready);
-    confirmLine.textContent = ready
-      ? `${draft.realmSlug} · ${draft.region.toUpperCase()}`
-      : probeLine;
-    confirmSub.textContent = ready ? "Prices are already on their way to your addon." : "";
   }
 
   const head = document.createElement("div");
@@ -141,7 +54,6 @@ export function render(el, ctx) {
 
   el.append(
     progress,
-    confirm,
     head,
     bodyEl,
     Object.assign(document.createElement("div"), { className: "spacer" }),
@@ -153,7 +65,6 @@ export function render(el, ctx) {
       seg.classList.toggle("done", i < step);
       seg.classList.toggle("current", i === step);
     });
-    progress.hidden = !enteredStepped;
   }
 
   // Set by setHead on every step, then focused by go() once the step has
@@ -175,19 +86,14 @@ export function render(el, ctx) {
     headingEl = h;
   }
 
-  // Bumped on every navigation, including detect()'s own. detect() is a
-  // single chain of sequential awaits with nothing else on screen to click
-  // during it, so in practice nothing can outrace it today — but the same
-  // discipline stepRealm's resolves already use is cheap to apply here too,
-  // and it means a future escape hatch out of the detecting phase can't
-  // reintroduce the class of bug this guards against.
+  // Bumped on every navigation, including detect()'s own — guards against a
+  // detect() still in flight (auto-detect, detectInstalls) landing after the
+  // user has already moved on some other way.
   let requestGen = 0;
 
   function go(next) {
     requestGen++;
-    if (next === 0 || next === 1) enteredStepped = true;
     step = next;
-    confirm.hidden = next !== 2;
     bodyEl.classList.remove("step-in");
     render_step();
     paintProgress();
@@ -198,360 +104,414 @@ export function render(el, ctx) {
     requestAnimationFrame(() => bodyEl.classList.add("step-in"));
   }
 
-  // ---- detecting: runs on entry, before any step exists ------------------
+  // ---- detecting: runs once on entry, before any step exists -------------
   //
-  // Everything the stepped flow would otherwise ask the user to confirm is
-  // read straight out of the game's own files. Silent throughout — a failed
-  // probe here is not an error the user needs to read, it just means the
-  // corresponding step still exists to ask the question by hand.
+  // Everything the Games step needs to offer a choice — Retail's path and
+  // Forever's own root, found independently since the two games can live on
+  // entirely different drives — is read straight out of the filesystem.
+  // Silent throughout: a failed probe here just means the step still exists
+  // to ask the question by hand (an empty path, "Not found").
   async function detect() {
-    confirm.hidden = false;
-    confirm.focus();
-    // Reset, not just repaint: detect() re-runs when the user comes back
-    // through "change", and a stale label from the last pass would name a
-    // step this one has not reached.
-    setProbe(PROBE_INSTALL);
-
     const gen = ++requestGen;
 
     let config = null;
     try {
       config = await ctx.api.getConfig();
     } catch {
-      // Fall through to auto-detect below, same as an empty saved config.
+      // Fall through with the fallback draft above, same as an empty saved config.
     }
     if (gen !== requestGen) return;
 
-    // Seed everything the wizard never asks about — interval, launch-at-
-    // startup, and any pairing token already on disk — from what is
-    // actually saved, before detection (or the stepped flow it falls back
-    // to) touches anything. Only wowRetailPath, region and realmSlug are
-    // ever overwritten below, and only once something has actually
-    // determined them. Without this, a config from a previous run that this
-    // pass reopens for — say, a realm that could not be detected — would
-    // have every one of these silently reset the moment it saves: a paired
-    // token wiped, launch-at-startup flipped on, back to a 30-minute
-    // interval.
+    // Seed everything the wizard never asks about directly — interval,
+    // launch-at-startup, any pairing token already on disk — from what is
+    // actually saved, before anything below touches either game's path/the
+    // game toggles/region/realmSlug. Without this, a config from a previous
+    // visit that this pass reopens for (say, Retail chosen but no realm
+    // resolved yet before the player hit "Later") would have every one of
+    // these silently reset the moment it saves.
     if (config) {
       draft.intervalMinutes = config.intervalMinutes;
       draft.launchAtStartup = config.launchAtStartup;
       draft.companionToken = config.companionToken;
       draft.region = config.region;
       draft.realmSlug = config.realmSlug;
+      draft.wowRetailPath = config.wowRetailPath;
+      draft.foreverRootPath = config.foreverRootPath;
+      draft.retailEnabled = config.retailEnabled;
+      draft.foreverEnabled = config.foreverEnabled;
     }
 
-    let path = (config?.wowRetailPath || "").trim();
-    if (!path) {
-      try {
-        path = (await ctx.api.detectWowPath()) || "";
-      } catch {
-        path = "";
-      }
+    // Retail and Forever are searched independently — a saved path for one wins over whatever
+    // auto-detect finds, but an unset one is filled in from the scan.
+    let detected = { retailPath: "", foreverRootPath: "", classicEraFound: false };
+    try {
+      detected = await ctx.api.detectInstalls();
+    } catch {
+      /* the step still works by hand */
     }
     if (gen !== requestGen) return;
+    if (!draft.wowRetailPath) draft.wowRetailPath = detected.retailPath || "";
+    if (!draft.foreverRootPath) draft.foreverRootPath = detected.foreverRootPath || "";
+    classicEraFound = Boolean(detected.classicEraFound);
 
-    if (!path) {
-      go(0);
-      return;
-    }
-    draft.wowRetailPath = path;
-    setProbe(PROBE_FILES);
-
-    let game;
-    try {
-      game = await ctx.api.detectGame(path);
-    } catch {
-      game = { region: null, realmNames: [] };
-    }
-    if (gen !== requestGen) return;
-
-    if (game.region === "eu" || game.region === "us") draft.region = game.region;
-    realmNames = game.realmNames ?? [];
-    // Auto-confirming is only honest when the game leaves no room for doubt.
-    // One realm is a fact; several is a guess dressed as one — the list is
-    // ordered by folder mtime, so "most recently played" is the best it can
-    // say, and a wrong guess here is not a nuisance: the config saves and the
-    // sync loop uploads under a realm the player never chose, before they see
-    // the line naming it. None at all is a failure for this purpose too, even
-    // though detectGame did not throw. Realm handles both — it preselects the
-    // newest name, so a player with several pays one click, and the
-    // manual-slug fallback lives there for the empty case.
-    if (realmNames.length !== 1) {
-      go(1);
-      return;
+    // A config that never decided either game (a brand-new install, or an old config migrated
+    // with neither turned on) gets the checkboxes defaulted to whatever was actually found. A
+    // config that already decided (a returning "Later" visit) keeps its own choice even if a
+    // game folder has since disappeared, so a player is never silently un-enrolled by an install
+    // being temporarily unavailable.
+    if (!draft.retailEnabled && !draft.foreverEnabled) {
+      draft.retailEnabled = Boolean(draft.wowRetailPath);
+      draft.foreverEnabled = Boolean(draft.foreverRootPath);
     }
 
-    setProbe(PROBE_REALM);
-
-    try {
-      const r = await ctx.api.resolveRealm(draft.region, realmNames[0]);
-      if (gen !== requestGen) return;
-      draft.realmSlug = r.slug;
-    } catch {
-      if (gen !== requestGen) return;
-      go(1);
-      return;
-    }
-
-    try {
-      await ctx.api.saveConfig({ ...draft });
-    } catch {
-      if (gen !== requestGen) return;
-      // Everything needed to save is already resolved and sitting in
-      // draft; Realm's own Next button will retry the same save.
-      go(1);
-      return;
-    }
-    if (gen !== requestGen) return;
-
-    savedDraft = { ...draft };
-    go(2);
+    go(0);
   }
 
-  // ---- step 0: the game --------------------------------------------------
+  // A checkbox row for one game, with its OWN path and its OWN Change…/Choose folder… button —
+  // Retail and Forever are found, configured, and picked independently, since they may not even
+  // share a drive.
+  function gameFolderRow(opts) {
+    const { title, subtitle, path, checked, disabled, onToggle, onChange } = opts;
 
-  async function stepGame() {
-    setHead("Find World of Warcraft", "The companion writes prices into your addon folder.");
+    const row = document.createElement("div");
+    row.className = "checkbox-row card stack";
+
+    const top = document.createElement("label");
+    top.className = "row";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = checked;
+    box.disabled = disabled;
+    box.addEventListener("change", () => onToggle(box.checked));
+    const body = document.createElement("div");
+    body.className = "stage-body";
+    const t = document.createElement("span");
+    t.className = "stage-title";
+    t.textContent = title;
+    const sub = document.createElement("span");
+    sub.className = "muted";
+    sub.textContent = subtitle;
+    body.append(t, sub);
+    top.append(box, body);
+
+    const pathRow = document.createElement("div");
+    pathRow.className = "row";
+    const pathLabel = document.createElement("span");
+    pathLabel.className = "mono muted";
+    pathLabel.textContent = path ? truncateMiddle(path, 38) : "Not found";
+    pathLabel.title = path;
+    const pathSpacer = document.createElement("span");
+    pathSpacer.className = "spacer";
+    const change = document.createElement("button");
+    change.className = "btn btn-sm";
+    change.type = "button";
+    change.textContent = path ? "Change…" : "Choose folder…";
+    change.addEventListener("click", async () => {
+      try {
+        await onChange();
+      } catch (e) {
+        ctx.toast(String(e), true);
+      }
+    });
+    pathRow.append(pathLabel, pathSpacer, change);
+
+    row.append(top, pathRow);
+    return row;
+  }
+
+  // Classic Era: shown, not omitted, specifically disabled so a player who
+  // has it installed knows GoldCap saw it and left it alone on purpose.
+  function unsupportedGameRow(title, subtitle) {
+    const row = document.createElement("div");
+    row.className = "checkbox-row card muted";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.disabled = true;
+    box.setAttribute("aria-label", title);
+    const body = document.createElement("div");
+    body.className = "stage-body";
+    const t = document.createElement("span");
+    t.textContent = title;
+    const sub = document.createElement("span");
+    sub.className = "muted";
+    sub.textContent = subtitle;
+    body.append(t, sub);
+    row.append(box, body);
+    return row;
+  }
+
+  // ---- step 0: which games ------------------------------------------------
+
+  function stepGames() {
+    setHead("Which WoW do you play?", "Each game gets its own folder — pick the ones GoldCap should keep in sync.");
     bodyEl.replaceChildren();
 
-    const verdict = document.createElement("div");
-    verdict.className = "card verdict";
-    const pathEl = document.createElement("p");
-    pathEl.className = "mono verdict-path";
-    verdict.append(pathEl);
+    const list = document.createElement("div");
+    list.className = "stack";
 
-    const choose = document.createElement("button");
-    choose.className = "btn";
-    choose.type = "button";
-    choose.textContent = "Choose folder…";
+    const hint = document.createElement("p");
+    hint.className = "muted wizard-hint";
+    hint.textContent = "Only WoW: Forever? Leave Retail off — nothing else to set up.";
 
     const next = document.createElement("button");
     next.className = "btn btn-primary";
     next.type = "button";
     next.textContent = "Next →";
 
-    function paintPath() {
-      const found = draft.wowRetailPath.trim() !== "";
-      verdict.classList.toggle("verdict-ok", found);
-      pathEl.textContent = found
-        ? truncateMiddle(draft.wowRetailPath, 46)
-        : "No install found — point at your World of Warcraft folder.";
-      pathEl.title = draft.wowRetailPath;
-      next.disabled = !found;
+    function paintNext() {
+      next.disabled =
+        (!draft.retailEnabled && !draft.foreverEnabled) ||
+        (draft.retailEnabled && !draft.wowRetailPath) ||
+        (draft.foreverEnabled && !draft.foreverRootPath);
     }
 
-    // Auto-detect below keeps running after the first paint. If the user
-    // clicks "Choose folder…" before it resolves, their explicit pick must
-    // win — a late auto-detect result must never clobber it.
-    let userPicked = false;
+    function paintGames() {
+      list.replaceChildren();
 
-    choose.addEventListener("click", async () => {
-      try {
-        const picked = await ctx.api.pickWowPath();
-        if (picked) {
-          userPicked = true;
-          draft.wowRetailPath = picked;
-          paintPath();
-        }
-      } catch (e) {
-        ctx.toast(String(e), true);
+      list.append(
+        gameFolderRow({
+          title: "WoW: Forever",
+          subtitle: "Uploads your scans, brings back crowd prices",
+          path: draft.foreverRootPath,
+          checked: draft.foreverEnabled,
+          disabled: !draft.foreverRootPath,
+          onToggle: (checked) => {
+            draft.foreverEnabled = checked;
+            paintNext();
+          },
+          onChange: async () => {
+            const picked = await ctx.api.pickForeverRoot();
+            if (!picked) return;
+            draft.foreverRootPath = picked;
+            draft.foreverEnabled = true;
+            paintGames();
+          },
+        }),
+      );
+
+      list.append(
+        gameFolderRow({
+          title: "Retail",
+          subtitle: "Realm prices, ledger",
+          path: draft.wowRetailPath,
+          checked: draft.retailEnabled,
+          disabled: !draft.wowRetailPath,
+          onToggle: (checked) => {
+            draft.retailEnabled = checked;
+            paintNext();
+          },
+          onChange: async () => {
+            const picked = await ctx.api.pickWowPath();
+            if (!picked) return;
+            draft.wowRetailPath = picked;
+            draft.retailEnabled = true;
+            paintGames();
+          },
+        }),
+      );
+
+      if (classicEraFound) {
+        list.append(unsupportedGameRow("Classic Era", "Found, not supported by GoldCap"));
       }
-    });
+      // The choice it describes only exists when both games were found.
+      hint.hidden = !(draft.wowRetailPath && draft.foreverRootPath);
+
+      paintNext();
+    }
 
     next.addEventListener("click", () => go(1));
 
-    bodyEl.append(verdict, choose);
+    bodyEl.append(list, hint);
     nav.replaceChildren(Object.assign(document.createElement("div"), { className: "spacer" }), next);
 
-    paintPath();
-    if (!draft.wowRetailPath) {
-      try {
-        const detected = await ctx.api.detectWowPath();
-        // Re-check both flags after the await: the user may have picked
-        // their own folder (or this same call may have raced past a second
-        // entry into the step) while detection was in flight.
-        if (!userPicked && !draft.wowRetailPath) {
-          draft.wowRetailPath = detected || "";
-          paintPath();
-        }
-      } catch {
-        // A failed auto-detect is not an error the user needs to read; the
-        // "no install found" copy already says what to do.
-      }
-    }
+    paintGames();
   }
 
-  // ---- step 1: the realm -------------------------------------------------
+  // ---- step 1: your games, set up -----------------------------------------
 
-  async function stepRealm() {
-    setHead("Pick your realm", "Read out of the game's own files.");
+  function stepSetup() {
+    setHead("Your games, set up", "");
     bodyEl.replaceChildren();
-
-    // Captured once, immediately, so this instance's own Back button knows
-    // where it should go — and so the flag can never carry over into some
-    // later, unrelated entry into this step (a normal Game → Next visit
-    // never sets it, so it is already false by the time that happens; this
-    // reset just makes it impossible to get that ordering wrong).
-    const enteredFromConnect = realmEnteredFromConnect;
-    realmEnteredFromConnect = false;
-
-    const regionLabel = document.createElement("label");
-    regionLabel.className = "label";
-    regionLabel.textContent = "Region";
-    regionLabel.htmlFor = "wizard-region";
-    const region = document.createElement("select");
-    region.className = "field";
-    region.id = "wizard-region";
-    region.add(new Option("EU", "eu"));
-    region.add(new Option("US", "us"));
-    region.add(new Option("KR", "kr"));
-    region.add(new Option("TW", "tw"));
-    region.value = draft.region;
-
-    const realmLabel = document.createElement("label");
-    realmLabel.className = "label";
-    realmLabel.textContent = "Realm";
-    realmLabel.htmlFor = "wizard-realm";
-    const realm = document.createElement("select");
-    realm.className = "field";
-    realm.id = "wizard-realm";
-
-    const resolved = document.createElement("p");
-    resolved.className = "mono resolved";
-
-    const manual = document.createElement("input");
-    manual.id = "wizard-realm-slug";
-    manual.className = "field mono";
-    manual.placeholder = "realm slug, e.g. dentarg";
-    manual.setAttribute("aria-label", "Realm slug");
-    manual.hidden = true;
-
-    const manualToggle = document.createElement("button");
-    manualToggle.className = "link";
-    manualToggle.type = "button";
-    manualToggle.textContent = "enter the slug manually";
 
     const back = document.createElement("button");
     back.className = "btn btn-ghost";
     back.type = "button";
     back.textContent = "← Back";
+    back.addEventListener("click", () => go(0));
 
     const next = document.createElement("button");
     next.className = "btn btn-primary";
     next.type = "button";
-    next.textContent = "Next →";
+    next.textContent = "Connect to goldcap.gg →";
 
-    function paintResolved() {
-      const ok = draft.realmSlug.trim() !== "";
-      resolved.textContent = ok ? `→ ${draft.realmSlug}` : "";
-      next.disabled = !ok;
+    function paintNext() {
+      next.disabled = draft.retailEnabled && draft.realmSlug.trim() === "";
     }
+    next.disabled = true;
 
-    // Bumped by anything that supersedes an in-flight lookup: picking a
-    // different realm or region, switching to manual entry, or leaving the
-    // step via Back/Next. A resolve (or the detectGame load below) that was
-    // already in flight checks its own captured value against the current
-    // one before writing anything, so a late response can never overwrite
-    // what the user has done since.
-    let realmRequest = 0;
+    if (draft.retailEnabled) {
+      const card = document.createElement("div");
+      card.className = "card stack";
 
-    async function resolveSelected() {
-      const name = realm.value;
-      if (!name) return;
-      const request = ++realmRequest;
-      try {
-        const r = await ctx.api.resolveRealm(region.value, name);
-        if (request !== realmRequest) return;
-        draft.realmSlug = r.slug;
-      } catch (e) {
-        if (request !== realmRequest) return;
-        draft.realmSlug = "";
-        ctx.toast(String(e), true);
+      const head = document.createElement("div");
+      head.className = "row";
+      const title = document.createElement("span");
+      title.className = "stage-title";
+      title.textContent = "Retail";
+      const headSpacer = document.createElement("span");
+      headSpacer.className = "spacer";
+      const per = document.createElement("span");
+      per.className = "muted";
+      per.textContent = "prices come per realm";
+      head.append(title, headSpacer, per);
+
+      const regionLabel = document.createElement("label");
+      regionLabel.className = "label";
+      regionLabel.textContent = "Region";
+      regionLabel.htmlFor = "wizard-region";
+      const region = document.createElement("select");
+      region.className = "field";
+      region.id = "wizard-region";
+      region.add(new Option("EU", "eu"));
+      region.add(new Option("US", "us"));
+      region.add(new Option("KR", "kr"));
+      region.add(new Option("TW", "tw"));
+      region.value = draft.region;
+
+      const realmLabel = document.createElement("label");
+      realmLabel.className = "label";
+      realmLabel.textContent = "Realm";
+      realmLabel.htmlFor = "wizard-realm";
+      const realm = document.createElement("select");
+      realm.className = "field";
+      realm.id = "wizard-realm";
+
+      const resolved = document.createElement("p");
+      resolved.className = "mono resolved";
+
+      const manual = document.createElement("input");
+      manual.id = "wizard-realm-slug";
+      manual.className = "field mono";
+      manual.placeholder = "realm slug, e.g. dentarg";
+      manual.setAttribute("aria-label", "Realm slug");
+      manual.hidden = true;
+
+      const manualToggle = document.createElement("button");
+      manualToggle.className = "link";
+      manualToggle.type = "button";
+      manualToggle.textContent = "enter the slug manually";
+
+      function paintResolved() {
+        const ok = draft.realmSlug.trim() !== "";
+        resolved.textContent = ok ? `→ ${draft.realmSlug}` : "";
+        paintNext();
       }
-      paintResolved();
-    }
 
-    async function loadRealms() {
-      const request = ++realmRequest;
-      realm.replaceChildren(new Option("— pick a realm —", ""));
-      try {
-        const game = await ctx.api.detectGame(draft.wowRetailPath);
-        if (request !== realmRequest) return;
-        if (game.region === "eu" || game.region === "us") {
-          draft.region = game.region;
-          region.value = game.region;
+      // Bumped by anything that supersedes an in-flight lookup — the same
+      // discipline the old realm step used, so a slow resolve can never
+      // land after the user has picked something else and overwrite it.
+      let realmRequest = 0;
+
+      async function resolveSelected() {
+        const name = realm.value;
+        if (!name) return;
+        const request = ++realmRequest;
+        try {
+          const r = await ctx.api.resolveRealm(region.value, name);
+          if (request !== realmRequest) return;
+          draft.realmSlug = r.slug;
+        } catch (e) {
+          if (request !== realmRequest) return;
+          draft.realmSlug = "";
+          ctx.toast(String(e), true);
         }
-        realmNames = game.realmNames ?? [];
-      } catch {
-        if (request !== realmRequest) return;
-        realmNames = [];
-      }
-      for (const name of realmNames) realm.add(new Option(name, name));
-      if (realmNames.length > 0 && !draft.realmSlug) {
-        realm.value = realmNames[0];
-        await resolveSelected();
-      } else {
         paintResolved();
       }
-      if (realmNames.length === 0) {
+
+      async function loadRealms() {
+        const request = ++realmRequest;
+        realm.replaceChildren(new Option("— pick a realm —", ""));
+        try {
+          const game = await ctx.api.detectGame(draft.wowRetailPath);
+          if (request !== realmRequest) return;
+          if (game.region === "eu" || game.region === "us") {
+            draft.region = game.region;
+            region.value = game.region;
+          }
+          realmNames = game.realmNames ?? [];
+        } catch {
+          if (request !== realmRequest) return;
+          realmNames = [];
+        }
+        for (const name of realmNames) realm.add(new Option(name, name));
+        if (realmNames.length > 0 && !draft.realmSlug) {
+          realm.value = realmNames[0];
+          await resolveSelected();
+        } else {
+          paintResolved();
+        }
+        if (realmNames.length === 0) {
+          manual.hidden = false;
+          manualToggle.hidden = true;
+        }
+      }
+
+      region.addEventListener("change", () => {
+        draft.region = region.value;
+        resolveSelected();
+      });
+      realm.addEventListener("change", resolveSelected);
+      manual.addEventListener("input", () => {
+        realmRequest++;
+        draft.realmSlug = manual.value.trim();
+        paintResolved();
+      });
+      manualToggle.addEventListener("click", () => {
         manual.hidden = false;
         manualToggle.hidden = true;
-      }
+        manual.focus();
+      });
+
+      card.append(head, regionLabel, region, realmLabel, realm, resolved, manualToggle, manual);
+      bodyEl.append(card);
+      loadRealms();
     }
 
-    region.addEventListener("change", () => {
-      draft.region = region.value;
-      resolveSelected();
-    });
-    realm.addEventListener("change", resolveSelected);
-    manual.addEventListener("input", () => {
-      // The user has taken manual control — a resolve started before this
-      // point must not land afterward and stomp what they typed.
-      realmRequest++;
-      draft.realmSlug = manual.value.trim();
-      paintResolved();
-    });
-    manualToggle.addEventListener("click", () => {
-      manual.hidden = false;
-      manualToggle.hidden = true;
-      manual.focus();
-    });
-    back.addEventListener("click", () => {
-      realmRequest++;
-      // A normal Game → Realm visit goes back to Game, same as always. But
-      // when "change" skipped Game entirely because the path didn't need
-      // fixing, Game was never part of this trip — sending Back there would
-      // strand the user on a step with no Back button of its own (Game only
-      // ever had a Next), one hop further from Connect than where they
-      // started. Returning to Connect instead keeps Back a way out of
-      // whatever screen the user is actually looking at, in every case.
-      if (enteredFromConnect) {
-        // Whatever was picked on this screen was never confirmed via Next —
-        // Back cancels it. Restore the last actually-saved values first, so
-        // Connect shows (and syncNow uses) what is really persisted rather
-        // than a pick the user backed out of.
-        if (savedDraft) Object.assign(draft, savedDraft);
-        go(2);
-      } else {
-        go(0);
-      }
-    });
+    if (draft.foreverEnabled) {
+      const card = document.createElement("div");
+      card.className = "card stack";
+      const head = document.createElement("div");
+      head.className = "row";
+      const title = document.createElement("span");
+      title.className = "stage-title";
+      title.textContent = "WoW: Forever";
+      const headSpacer = document.createElement("span");
+      headSpacer.className = "spacer";
+      const ready = document.createElement("span");
+      ready.className = "muted";
+      ready.textContent = "ready";
+      head.append(title, headSpacer, ready);
+      const body = document.createElement("p");
+      body.textContent =
+        "Nothing to pick. Each scan says which server and faction it is from, and its prices go to that market.";
+      card.append(head, body);
+      bodyEl.append(card);
+    }
+
     next.addEventListener("click", async () => {
+      next.disabled = true;
       try {
         await ctx.api.saveConfig({ ...draft });
       } catch (e) {
         ctx.toast(String(e), true);
+        paintNext();
         return;
       }
-      savedDraft = { ...draft };
-      realmRequest++;
       go(2);
     });
 
-    bodyEl.append(regionLabel, region, realmLabel, realm, resolved, manualToggle, manual);
     nav.replaceChildren(back, Object.assign(document.createElement("div"), { className: "spacer" }), next);
-
-    await loadRealms();
+    paintNext();
   }
 
   // ---- step 2: connect ----------------------------------------------------
@@ -559,13 +519,16 @@ export function render(el, ctx) {
   function stepConnect() {
     setHead("Connect to goldcap.gg?", "So your sales show up as profit on the site.");
     bodyEl.replaceChildren();
-    paintConfirm();
 
-    // Whichever way this step was reached, draft is already complete and
-    // saved (detect() saves before calling go(2); Realm's Next above saves
-    // before calling it too) — but the sync itself waits for finish()
-    // below, once the user actually leaves (Pair or Later), rather than
-    // firing again here the instant this step merely renders.
+    // Whichever way this step was reached, draft is already saved (Setup's
+    // Next above saves before calling go(2)) — the sync itself waits for
+    // finish() below, once the user actually leaves (Pair or Later).
+
+    const back = document.createElement("button");
+    back.className = "btn btn-ghost";
+    back.type = "button";
+    back.textContent = "← Back";
+    back.addEventListener("click", () => go(1));
 
     const open = document.createElement("button");
     open.className = "btn";
@@ -639,12 +602,12 @@ export function render(el, ctx) {
     later.addEventListener("click", finish);
 
     bodyEl.append(open, label, code, hint);
-    nav.replaceChildren(later, Object.assign(document.createElement("div"), { className: "spacer" }), pair);
+    nav.replaceChildren(back, later, Object.assign(document.createElement("div"), { className: "spacer" }), pair);
   }
 
   function render_step() {
-    if (step === 0) stepGame();
-    else if (step === 1) stepRealm();
+    if (step === 0) stepGames();
+    else if (step === 1) stepSetup();
     else stepConnect();
   }
 

@@ -10,7 +10,7 @@ use std::fmt;
 use std::path::Path;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use tokio::sync::{mpsc, watch};
 
 const IMPORT_STRING_URL: &str = "https://api.goldcap.gg/v1/addon/import-string";
@@ -134,41 +134,221 @@ fn humanize_age(at: SystemTime) -> String {
     }
 }
 
+/// Total time the shared client gives a request that does not set its own limit.
+pub(crate) const CLIENT_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long the shared client waits to open a connection: a dead network fails in this
+/// long, not in the request's whole time budget.
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// The import string's total time, the same as the region and Forever legs get: the site
+/// can take tens of seconds to build a realm's string after an ingest tick.
+pub(crate) const IMPORT_TIMEOUT: Duration = Duration::from_secs(60);
+/// Waits before the first and the second retry of the import string. Two entries = at most
+/// two retries, three attempts in all (a timeout allows only one of them, see `retry_delay`).
+const RETRY_BACKOFF: [Duration; 2] = [Duration::from_secs(3), Duration::from_secs(10)];
+/// A server's `Retry-After` is honoured up to this long.
+const RETRY_AFTER_CAP: Duration = Duration::from_secs(30);
+
 pub fn build_client() -> reqwest::Client {
     reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(20))
+        .timeout(CLIENT_TIMEOUT)
+        .connect_timeout(CONNECT_TIMEOUT)
         .user_agent(concat!("goldcap-companion/", env!("CARGO_PKG_VERSION")))
         .build()
-        .expect("reqwest client with only timeout/user-agent set should always build")
+        .expect("reqwest client with only timeouts/user-agent set should always build")
+}
+
+/// What to show for a failed request. `reqwest`'s own text for a request error drops the
+/// cause, so a timeout, a DNS failure, a refused connection and a TLS error all read
+/// "error sending request for url (...)". `limit` is the total time the request was given
+/// (the message names it when that ran out).
+pub(crate) fn describe_err(e: &reqwest::Error, limit: Duration) -> String {
+    if e.is_connect() {
+        let cause = if e.is_timeout() {
+            format!("timed out after {} s", CONNECT_TIMEOUT.as_secs())
+        } else {
+            source_chain(e)
+        };
+        return format!("could not connect: {cause}");
+    }
+    if e.is_timeout() {
+        return format!("timed out after {} s", limit.as_secs());
+    }
+    let mut own = e.to_string();
+    if let Some(url) = e.url() {
+        // The address is in the log line's context already; it only makes the text long.
+        own = own.replace(&format!(" for url ({url})"), "");
+    }
+    let chain = source_chain(e);
+    if chain.is_empty() {
+        own
+    } else {
+        format!("{own}: {chain}")
+    }
+}
+
+/// The messages of `e`'s `source()` chain (not `e` itself) joined by ": ", each one only
+/// when the one before did not already say it.
+fn source_chain(e: &dyn std::error::Error) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut next = e.source();
+    while let Some(err) = next {
+        let text = err.to_string();
+        if !parts.last().is_some_and(|p| p.contains(&text)) {
+            parts.push(text);
+        }
+        next = err.source();
+    }
+    parts.join(": ")
+}
+
+/// What went wrong with one attempt, as far as the retry policy cares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Failure {
+    /// The connection could not be opened (refused, unreachable, DNS, TLS, or the
+    /// connect timeout). Fails fast, in at most `CONNECT_TIMEOUT`.
+    Connect,
+    /// The connection was made but the answer did not come in the request's whole time
+    /// budget. Each one costs a full budget, so it is retried less than the rest.
+    Timeout,
+    Status { code: u16, retry_after: Option<Duration> },
+}
+
+/// How long to wait before the next attempt, or `None` to give up. `retries_done` is how
+/// many retries have already been made; `timed_out_at` is what `retries_done` was when
+/// the first attempt timed out, counting the attempt being judged (`None`: none has).
+///
+/// A failed connection, a 5xx and a 429 are worth two retries; every other status --
+/// notably the API's 404 `realm_not_found` / `no_data` -- would answer the same again.
+/// A timeout is worth only ONE retry, however the attempts before and after it went: once
+/// any attempt has timed out, the retry after it is the last (a site slow enough to time
+/// out once rarely recovers within seconds, and each further wait of a whole budget would
+/// hold up the Forever leg and config changes queued behind this tick).
+fn retry_delay(
+    backoff: &[Duration],
+    retries_done: usize,
+    timed_out_at: Option<usize>,
+    failure: Failure,
+) -> Option<Duration> {
+    if timed_out_at.is_some_and(|at| retries_done > at) {
+        return None;
+    }
+    let base = *backoff.get(retries_done)?;
+    match failure {
+        Failure::Connect | Failure::Timeout => Some(base),
+        Failure::Status { code, retry_after } if code >= 500 || code == 429 => {
+            Some(retry_after.map_or(base, |d| d.min(RETRY_AFTER_CAP)))
+        }
+        Failure::Status { .. } => None,
+    }
 }
 
 /// Fetches the import string for `region`/`realm`. Only a 2xx response
 /// whose body starts with the GCS1 magic prefix counts as success — a
 /// non-200 (including the API's own `realm_not_found`/`no_data` 404 bodies)
 /// or an unexpected body is a `SyncError`, never written to disk.
+///
+/// A slow or briefly failing site is retried: up to two more attempts, after 3 s and
+/// then 10 s, on a failed connection, a 5xx or a 429 (a `Retry-After` in seconds replaces
+/// the wait, up to 30 s) -- but only one more attempt once any attempt has timed out.
+///
+/// Worst case, by what the site does:
+/// - a site that only times out: 60 + 3 + 60 = 123 s (two attempts);
+/// - a dead connection: 3 x 10 (connect timeout) + 3 + 10 = 43 s;
+/// - a site that answers 5xx / 429 just under the limit each time, and never times out:
+///   3 x 60 + 3 + 10 = 193 s, or 3 x 60 + 30 + 30 = 240 s with the longest `Retry-After`
+///   (a fast 5xx costs nothing; the slow ones are the unusual case);
+/// - the worst mix, two slow 5xx / 429 answers with the longest `Retry-After` and then a
+///   timeout: 60 + 30 + 60 + 30 + 60 = 240 s, the same bound -- a timeout never adds a
+///   fourth attempt.
 pub async fn fetch_import_string(
     client: &reqwest::Client,
     region: &str,
     realm: &str,
 ) -> Result<String, SyncError> {
+    fetch_import_string_at(client, IMPORT_STRING_URL, region, realm, IMPORT_TIMEOUT, &RETRY_BACKOFF)
+        .await
+}
+
+async fn fetch_import_string_at(
+    client: &reqwest::Client,
+    url: &str,
+    region: &str,
+    realm: &str,
+    timeout: Duration,
+    backoff: &[Duration],
+) -> Result<String, SyncError> {
+    let mut retries = 0;
+    let mut timed_out_at = None;
+    loop {
+        let (err, failure) =
+            match attempt_import_string(client, url, region, realm, timeout).await {
+                Ok(body) => return Ok(body),
+                Err(failed) => failed,
+            };
+        if failure == Some(Failure::Timeout) {
+            timed_out_at.get_or_insert(retries);
+        }
+        match failure.and_then(|f| retry_delay(backoff, retries, timed_out_at, f)) {
+            Some(wait) => {
+                tokio::time::sleep(wait).await;
+                retries += 1;
+            }
+            None => {
+                return Err(match err {
+                    SyncError::Request(msg) if retries > 0 => {
+                        SyncError::Request(format!("{msg} (tried {} times)", retries + 1))
+                    }
+                    other => other,
+                })
+            }
+        }
+    }
+}
+
+/// One request and its body read. The `Failure` is set for the errors the retry policy may
+/// look at; `None` means this is not something a retry can change.
+async fn attempt_import_string(
+    client: &reqwest::Client,
+    url: &str,
+    region: &str,
+    realm: &str,
+    timeout: Duration,
+) -> Result<String, (SyncError, Option<Failure>)> {
+    let request_failed = |e: reqwest::Error| {
+        // A connect timeout is a failed connection (10 s), not a slow answer (a whole budget).
+        let failure = if e.is_connect() {
+            Some(Failure::Connect)
+        } else if e.is_timeout() {
+            Some(Failure::Timeout)
+        } else {
+            None
+        };
+        (SyncError::Request(describe_err(&e, timeout)), failure)
+    };
+
     let resp = client
-        .get(IMPORT_STRING_URL)
+        .get(url)
         .query(&[("region", region), ("realm", realm)])
+        .timeout(timeout)
         .send()
         .await
-        .map_err(|e| SyncError::Request(e.to_string()))?;
+        .map_err(request_failed)?;
 
     let status = resp.status();
     if !status.is_success() {
-        return Err(SyncError::BadStatus(status.as_u16()));
+        let retry_after = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(Duration::from_secs);
+        let code = status.as_u16();
+        return Err((SyncError::BadStatus(code), Some(Failure::Status { code, retry_after })));
     }
 
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| SyncError::Request(e.to_string()))?;
+    let body = resp.text().await.map_err(request_failed)?;
     if !luafile::is_valid_gcs1_body(&body) {
-        return Err(SyncError::InvalidBody);
+        return Err((SyncError::InvalidBody, None));
     }
     Ok(body)
 }
@@ -235,9 +415,13 @@ pub async fn resolve_realm_slug(
         .query(&[("region", region), ("name", name)])
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| describe_err(&e, CLIENT_TIMEOUT))?;
     let slug = match resp.status().as_u16() {
-        200 => resp.json::<Resolved>().await.map_err(|e| e.to_string())?.slug,
+        200 => resp
+            .json::<Resolved>()
+            .await
+            .map_err(|e| describe_err(&e, CLIENT_TIMEOUT))?
+            .slug,
         404 => return Err(format!("realm \"{name}\" not found on {region}")),
         code => return Err(format!("resolve failed: HTTP {code}")),
     };
@@ -461,6 +645,28 @@ pub async fn sync_once(
     .await;
 }
 
+/// One full tick: the Retail leg (`sync_once` — import string, region data, ledger upload, runs,
+/// retail SavedVariables) only when `retail_enabled`, then the Forever leg (`sync_forever`) only
+/// when `forever_enabled`. A disabled game is skipped outright rather than run and hidden — for
+/// Retail that matters even functionally: an unconfigured `sync_once` would otherwise publish
+/// "not configured" into `SyncStatus`, which the tray label and the Status screen would both
+/// read as a real error rather than a game the player never turned on. Extracted from the loop
+/// below so a disabled game's silence can be tested without spinning up the whole interval timer.
+async fn run_tick(
+    client: &reqwest::Client,
+    config: &Config,
+    status: &Arc<Mutex<SyncStatus>>,
+    logger: &Logger,
+    state_dir: &Path,
+) {
+    if config.retail_enabled {
+        sync_once(client, config, status, logger, state_dir).await;
+    }
+    if config.forever_enabled {
+        crate::forever::sync_forever(client, config, logger, state_dir).await;
+    }
+}
+
 /// The sync loop: on every interval tick (recomputed from `config_rx`'s
 /// current `intervalMinutes` whenever it changes) or "sync now" trigger,
 /// runs one `sync_once`. `on_tick` is called after every attempt so the
@@ -485,16 +691,14 @@ pub async fn run_loop(
             tokio::select! {
                 _ = ticker.tick() => {
                     schedule_next_tick(&status, SystemTime::now() + interval);
-                    sync_once(&client, &config, &status, &logger, &state_dir).await;
-                    crate::forever::sync_forever(&client, &config, &logger, &state_dir).await;
+                    run_tick(&client, &config, &status, &logger, &state_dir).await;
                     on_tick();
                 }
                 maybe = trigger_rx.recv() => {
                     if maybe.is_none() {
                         return; // sender dropped — app is shutting down
                     }
-                    sync_once(&client, &config, &status, &logger, &state_dir).await;
-                    crate::forever::sync_forever(&client, &config, &logger, &state_dir).await;
+                    run_tick(&client, &config, &status, &logger, &state_dir).await;
                     on_tick();
                 }
                 changed = config_rx.changed() => {
@@ -658,6 +862,83 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    // A disabled game must be silent, not report "not configured" as though the player forgot
+    // to finish setup — that would flip the tray label to "error: ..." for someone who simply
+    // turned Retail off to play Forever-only.
+    #[tokio::test]
+    async fn a_disabled_retail_leg_is_never_run() {
+        let client = build_client();
+        let config = Config { retail_enabled: false, forever_enabled: false, ..Config::default() };
+        let status = Arc::new(Mutex::new(SyncStatus::default()));
+        let dir = std::env::temp_dir()
+            .join(format!("goldcap-companion-run-tick-off-{}", std::process::id()));
+        let logger = Logger::new(&dir).unwrap();
+
+        run_tick(&client, &config, &status, &logger, &dir).await;
+
+        let s = status.lock().unwrap();
+        assert!(s.last_error.is_none(), "a disabled game is quiet, not an error");
+        assert!(s.last_attempt_at.is_none(), "sync_once itself must never have run");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // The inverse: an enabled-but-unconfigured Retail leg still reports the error it always
+    // did — turning games on/off must not accidentally swallow a real "not configured" case.
+    #[tokio::test]
+    async fn an_enabled_but_unconfigured_retail_leg_still_reports_its_error() {
+        let client = build_client();
+        let config = Config { retail_enabled: true, forever_enabled: false, ..Config::default() };
+        let status = Arc::new(Mutex::new(SyncStatus::default()));
+        let dir = std::env::temp_dir()
+            .join(format!("goldcap-companion-run-tick-on-{}", std::process::id()));
+        let logger = Logger::new(&dir).unwrap();
+
+        run_tick(&client, &config, &status, &logger, &dir).await;
+
+        let s = status.lock().unwrap();
+        assert!(s.last_error.is_some());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // The Forever leg must not be gated open by a config that only turned Retail on — otherwise
+    // a Retail-only player who never touched Forever would still have it probed every tick.
+    #[tokio::test]
+    async fn a_disabled_forever_leg_never_touches_a_forever_install_that_exists_on_disk() {
+        let client = build_client();
+        let dir = std::env::temp_dir()
+            .join(format!("goldcap-companion-run-tick-forever-off-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let sv = dir
+            .join("_classic_beta_")
+            .join("WTF")
+            .join("Account")
+            .join("A")
+            .join("SavedVariables");
+        std::fs::create_dir_all(&sv).unwrap();
+        std::fs::write(
+            sv.join("GoldCap.lua"),
+            r#"GoldCapDB = { client = { interface = 16001, build = "1.60.1.70009", regionId = 90 } }"#,
+        )
+        .unwrap();
+
+        let config = Config {
+            forever_root_path: dir.to_string_lossy().into_owned(),
+            retail_enabled: false,
+            forever_enabled: false,
+            ..Config::default()
+        };
+        let status = Arc::new(Mutex::new(SyncStatus::default()));
+        let logger = Logger::new(&dir.join("logs")).unwrap();
+
+        run_tick(&client, &config, &status, &logger, &dir).await;
+
+        assert!(
+            !dir.join(crate::forever::STATE_FILE_NAME).exists(),
+            "forever_enabled=false must skip the Forever leg entirely, even with an install present"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn a_written_tick_hands_back_the_region_summary() {
         let dir = std::env::temp_dir().join(format!(
@@ -702,5 +983,254 @@ mod tests {
 
         assert!(matches!(written, Err(SyncError::Write(_))), "{written:?}");
         std::fs::remove_file(&file).ok();
+    }
+
+    // ---- request errors and the import string's retries ----
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const GOOD_BODY: &str = "GCS1;eu;dentarg;1;abc";
+
+    fn http(status: &str, extra: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    /// A local server that answers its Nth connection with `script[N]` (the last entry
+    /// repeats). `None` = read the request and never answer. Hands back the URL and the
+    /// number of connections seen so far.
+    fn serve_script(script: Vec<Option<String>>) -> (String, Arc<AtomicUsize>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1/addon/import-string", listener.local_addr().unwrap());
+        let seen = Arc::new(AtomicUsize::new(0));
+        let counter = seen.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let n = counter.fetch_add(1, Ordering::SeqCst);
+                let answer = script[n.min(script.len() - 1)].clone();
+                std::thread::spawn(move || {
+                    let mut request = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => request.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    match answer {
+                        Some(text) => {
+                            let _ = stream.write_all(text.as_bytes());
+                        }
+                        None => std::thread::sleep(Duration::from_secs(5)),
+                    }
+                });
+            }
+        });
+        (url, seen)
+    }
+
+    async fn request_error(url: &str, timeout: Duration) -> reqwest::Error {
+        build_client().get(url).timeout(timeout).send().await.unwrap_err()
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_request_says_so_and_names_the_limit() {
+        let (url, _) = serve_script(vec![None]);
+        let e = request_error(&url, Duration::from_secs(1)).await;
+        assert!(e.is_timeout());
+        assert_eq!(describe_err(&e, Duration::from_secs(1)), "timed out after 1 s");
+    }
+
+    #[tokio::test]
+    async fn a_refused_connection_says_it_could_not_connect_and_why() {
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let e = request_error(&format!("http://127.0.0.1:{port}/x"), Duration::from_secs(5)).await;
+        let text = describe_err(&e, Duration::from_secs(5));
+        assert!(text.starts_with("could not connect: "), "{text}");
+        assert!(!text.contains("error sending request"), "{text}");
+        assert!(!text.contains("127.0.0.1"), "the address is not repeated: {text}");
+        assert!(text.len() > "could not connect: ".len() + 5, "{text}");
+    }
+
+    #[tokio::test]
+    async fn any_other_error_keeps_its_own_words_and_its_cause_without_the_address() {
+        let (url, _) = serve_script(vec![Some(http("200 OK", "", "not json"))]);
+        let resp = build_client().get(&url).send().await.unwrap();
+        let e = resp.json::<serde_json::Value>().await.unwrap_err();
+        assert!(!e.is_timeout() && !e.is_connect());
+        let text = describe_err(&e, Duration::from_secs(20));
+        assert!(text.starts_with("error decoding response body: "), "{text}");
+        assert!(!text.contains("http://"), "{text}");
+    }
+
+    const BACKOFF: [Duration; 2] = [Duration::from_secs(3), Duration::from_secs(10)];
+
+    fn status(code: u16, retry_after: Option<u64>) -> Failure {
+        Failure::Status { code, retry_after: retry_after.map(Duration::from_secs) }
+    }
+
+    #[test]
+    fn a_failed_connection_is_retried_twice_after_three_then_ten_seconds() {
+        assert_eq!(retry_delay(&BACKOFF, 0, None, Failure::Connect), Some(Duration::from_secs(3)));
+        assert_eq!(retry_delay(&BACKOFF, 1, None, Failure::Connect), Some(Duration::from_secs(10)));
+        assert_eq!(retry_delay(&BACKOFF, 2, None, Failure::Connect), None);
+    }
+
+    #[test]
+    fn a_timeout_is_retried_once_after_three_seconds() {
+        assert_eq!(retry_delay(&BACKOFF, 0, Some(0), Failure::Timeout), Some(Duration::from_secs(3)));
+        assert_eq!(retry_delay(&BACKOFF, 1, Some(0), Failure::Timeout), None);
+    }
+
+    #[test]
+    fn a_timeout_on_a_later_attempt_still_allows_exactly_one_more() {
+        // 5xx first, then a timeout: the retry after the timeout is the last one.
+        assert_eq!(retry_delay(&BACKOFF, 1, Some(1), Failure::Timeout), Some(Duration::from_secs(10)));
+        assert_eq!(retry_delay(&BACKOFF, 2, Some(1), Failure::Timeout), None);
+    }
+
+    #[test]
+    fn once_an_attempt_has_timed_out_no_other_failure_gets_a_second_retry() {
+        // Timeout first (retry 1 made), then a 5xx / 429 / failed connection: stop.
+        for f in [Failure::Connect, status(503, None), status(429, Some(1))] {
+            assert_eq!(retry_delay(&BACKOFF, 1, Some(0), f), None, "{f:?}");
+        }
+        // The same failures before any timeout keep both retries.
+        for f in [Failure::Connect, status(503, None), status(429, Some(1))] {
+            assert!(retry_delay(&BACKOFF, 1, None, f).is_some(), "{f:?}");
+        }
+    }
+
+    #[test]
+    fn a_5xx_and_a_429_are_retried_but_no_other_status_is() {
+        for code in [500, 502, 503, 504, 429] {
+            assert_eq!(retry_delay(&BACKOFF, 0, None, status(code, None)), Some(Duration::from_secs(3)), "{code}");
+            assert_eq!(retry_delay(&BACKOFF, 2, None, status(code, None)), None, "{code}");
+        }
+        for code in [400, 401, 403, 404, 410, 422, 304] {
+            assert_eq!(retry_delay(&BACKOFF, 0, None, status(code, None)), None, "{code}");
+            assert_eq!(retry_delay(&BACKOFF, 0, None, status(code, Some(1))), None, "{code}");
+        }
+    }
+
+    #[test]
+    fn retry_after_replaces_the_wait_but_never_past_thirty_seconds() {
+        assert_eq!(retry_delay(&BACKOFF, 0, None, status(429, Some(7))), Some(Duration::from_secs(7)));
+        assert_eq!(retry_delay(&BACKOFF, 1, None, status(503, Some(120))), Some(Duration::from_secs(30)));
+        assert_eq!(retry_delay(&BACKOFF, 0, None, status(503, Some(0))), Some(Duration::ZERO));
+    }
+
+    const FAST: [Duration; 2] = [Duration::from_millis(5), Duration::from_millis(5)];
+
+    async fn fetch(url: &str, timeout: Duration) -> Result<String, SyncError> {
+        fetch_import_string_at(&build_client(), url, "eu", "dentarg", timeout, &FAST).await
+    }
+
+    #[tokio::test]
+    async fn a_404_is_not_retried() {
+        let (url, seen) = serve_script(vec![Some(http("404 Not Found", "", r#"{"error":"realm_not_found"}"#))]);
+        let out = fetch(&url, Duration::from_secs(5)).await;
+        assert!(matches!(out, Err(SyncError::BadStatus(404))), "{out:?}");
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_503_then_a_good_answer_comes_through() {
+        let (url, seen) = serve_script(vec![
+            Some(http("503 Service Unavailable", "", "")),
+            Some(http("200 OK", "", GOOD_BODY)),
+        ]);
+        assert_eq!(fetch(&url, Duration::from_secs(5)).await.unwrap(), GOOD_BODY);
+        assert_eq!(seen.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_429_with_retry_after_is_honoured_then_retried() {
+        let (url, seen) = serve_script(vec![
+            Some(http("429 Too Many Requests", "Retry-After: 0\r\n", "")),
+            Some(http("200 OK", "", GOOD_BODY)),
+        ]);
+        assert_eq!(fetch(&url, Duration::from_secs(5)).await.unwrap(), GOOD_BODY);
+        assert_eq!(seen.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_timeout_is_retried() {
+        let (url, seen) = serve_script(vec![None, Some(http("200 OK", "", GOOD_BODY))]);
+        assert_eq!(fetch(&url, Duration::from_millis(300)).await.unwrap(), GOOD_BODY);
+        assert_eq!(seen.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_site_that_keeps_timing_out_gets_two_attempts_and_no_more() {
+        let (url, seen) = serve_script(vec![None]);
+        let out = fetch(&url, Duration::from_millis(200)).await;
+        let Err(SyncError::Request(msg)) = out else { panic!("{out:?}") };
+        assert!(msg.starts_with("timed out after "), "{msg}");
+        assert!(msg.ends_with("(tried 2 times)"), "{msg}");
+        assert_eq!(seen.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_timeout_then_a_5xx_is_not_retried_again() {
+        let (url, seen) = serve_script(vec![None, Some(http("503 Service Unavailable", "", ""))]);
+        let out = fetch(&url, Duration::from_millis(200)).await;
+        assert!(matches!(out, Err(SyncError::BadStatus(503))), "{out:?}");
+        assert_eq!(seen.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_5xx_then_a_timeout_gets_one_more_attempt() {
+        let (url, seen) = serve_script(vec![
+            Some(http("503 Service Unavailable", "", "")),
+            None,
+            Some(http("200 OK", "", GOOD_BODY)),
+        ]);
+        assert_eq!(fetch(&url, Duration::from_millis(200)).await.unwrap(), GOOD_BODY);
+        assert_eq!(seen.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn a_5xx_then_two_timeouts_stops_at_three_attempts() {
+        let (url, seen) = serve_script(vec![Some(http("503 Service Unavailable", "", "")), None]);
+        let out = fetch(&url, Duration::from_millis(200)).await;
+        let Err(SyncError::Request(msg)) = out else { panic!("{out:?}") };
+        assert!(msg.ends_with("(tried 3 times)"), "{msg}");
+        assert_eq!(seen.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn a_site_that_keeps_failing_gets_three_attempts_and_no_more() {
+        let (url, seen) = serve_script(vec![Some(http("500 Internal Server Error", "", ""))]);
+        let out = fetch(&url, Duration::from_secs(5)).await;
+        assert!(matches!(out, Err(SyncError::BadStatus(500))), "{out:?}");
+        assert_eq!(seen.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn a_dead_connection_reports_the_cause_and_the_attempts() {
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let out = fetch(&format!("http://127.0.0.1:{port}/x"), Duration::from_secs(5)).await;
+        let Err(SyncError::Request(msg)) = out else { panic!("{out:?}") };
+        assert!(msg.starts_with("could not connect: "), "{msg}");
+        assert!(msg.ends_with("(tried 3 times)"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn a_body_that_is_not_an_import_string_is_not_retried() {
+        let (url, seen) = serve_script(vec![Some(http("200 OK", "", "<html>"))]);
+        let out = fetch(&url, Duration::from_secs(5)).await;
+        assert!(matches!(out, Err(SyncError::InvalidBody)), "{out:?}");
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
     }
 }

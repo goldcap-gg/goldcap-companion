@@ -7,6 +7,9 @@ import {
   groupDigits,
   formatPairCode,
   gameLine,
+  foreverScanLine,
+  foreverCrowdLine,
+  foreverMarketLine,
 } from "./format.js";
 
 const NOW = 1_785_600_000;
@@ -95,4 +98,29 @@ test("gameLine: Forever says what was sent, what came back and anything the play
 
 test("gameLine: another game is named and left alone", () => {
   assert.equal(gameLine({ folder: "_ptr_", game: "other" }, 1), "_ptr_ · not used");
+});
+
+test("foreverScanLine reports the last scan's age and item count", () => {
+  const now = 1_790_000_000;
+  assert.equal(
+    foreverScanLine({ lastSentAt: now - 300, sentItems: 1974 }, now),
+    "Scan uploaded 5 min ago · 1 974 items",
+  );
+  assert.equal(foreverScanLine({ lastSentAt: now - 300 }, now), "Scan uploaded 5 min ago");
+  assert.equal(foreverScanLine({}, now), "No scan uploaded yet");
+});
+
+test("foreverCrowdLine is empty until something has actually been written", () => {
+  const now = 1_790_000_000;
+  assert.equal(foreverCrowdLine({}, now), "");
+  assert.equal(
+    foreverCrowdLine({ crowdWrittenAt: now - 60 }, now),
+    "Crowd prices written to the addon 1 min ago",
+  );
+});
+
+test("foreverMarketLine joins realm and faction, or says nothing yet", () => {
+  assert.equal(foreverMarketLine({ realm: "Classic Beta PvE 2", faction: "Horde" }), "Classic Beta PvE 2 · Horde");
+  assert.equal(foreverMarketLine({ realm: "Classic Beta PvE 2" }), "Classic Beta PvE 2");
+  assert.equal(foreverMarketLine({}), "");
 });

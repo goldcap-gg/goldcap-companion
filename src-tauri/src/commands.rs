@@ -16,6 +16,59 @@ pub fn get_config(state: State<AppState>) -> Config {
         .clone()
 }
 
+/// The one rule for whether setup is finished — `Config::is_complete` — exposed to the UI so
+/// `ui/app.js` defers to it instead of keeping its own copy (which is how a Forever-only player
+/// used to get stuck: the old JS check required a realm and a retail path unconditionally).
+#[tauri::command]
+pub fn setup_complete(state: State<AppState>) -> bool {
+    state
+        .config
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .is_complete()
+}
+
+/// Backs the wizard's "Which WoW do you play?" step: Retail's exact `_retail_` folder and
+/// Forever's own root, found independently (they may sit on entirely different drives), plus
+/// whether a Classic Era install was seen under either one — see `games::detect_installs`.
+#[tauri::command]
+pub fn detect_installs() -> crate::games::GameDetection {
+    crate::games::detect_installs()
+}
+
+/// Settings' "Change…" for the WoW: Forever folder and the wizard's own "Change…"/"Choose
+/// folder…" for it: a native folder picker, accepting any folder that actually holds a WoW game
+/// folder (`_retail_`, `_classic_beta_`, …) — unlike `pick_wow_path`, it does not require
+/// `_retail_` specifically, since Forever's own client folder name isn't fixed.
+#[tauri::command]
+pub async fn pick_forever_root(app: AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let picked =
+        tauri::async_runtime::spawn_blocking(move || app.dialog().file().blocking_pick_folder())
+            .await
+            .map_err(|e| e.to_string())?;
+
+    let Some(folder) = picked else {
+        return Ok(None); // cancelled
+    };
+    let path = folder.into_path().map_err(|e| e.to_string())?;
+    if !crate::games::has_game_folder(&path) {
+        return Err(format!(
+            "No World of Warcraft install found under {} — pick the folder that holds your Forever client",
+            path.display()
+        ));
+    }
+    Ok(Some(path.to_string_lossy().into_owned()))
+}
+
+/// Backs the wizard's and Settings' game lists for one already-known root: which games exist
+/// under it — see `games::detect_games`.
+#[tauri::command]
+pub fn detect_games(root: String) -> Vec<crate::games::DetectedGame> {
+    crate::games::detect_games(Path::new(&root))
+}
+
 /// Backs the Settings screen's "Detect" button — re-runs the same
 /// auto-detect used on first run, without touching the saved config.
 #[tauri::command]
@@ -108,11 +161,14 @@ pub async fn list_region_realms(region: String) -> Result<Vec<RegionRealm>, Stri
         .query(&[("region", region.as_str())])
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::sync::describe_err(&e, crate::sync::CLIENT_TIMEOUT))?;
     if !resp.status().is_success() {
         return Err(format!("realm list failed: HTTP {}", resp.status().as_u16()));
     }
-    let body = resp.json::<Response>().await.map_err(|e| e.to_string())?;
+    let body = resp
+        .json::<Response>()
+        .await
+        .map_err(|e| crate::sync::describe_err(&e, crate::sync::CLIENT_TIMEOUT))?;
     Ok(body
         .realms
         .into_iter()
@@ -152,6 +208,9 @@ pub fn sync_now(state: State<AppState>) -> Result<(), String> {
 /// takes effect without restarting the app.
 #[tauri::command]
 pub fn save_config(app: AppHandle, state: State<AppState>, config: Config) -> Result<(), String> {
+    // wow_retail_path and forever_root_path are each set directly by the UI now (per-game
+    // Change…/Detect — see detect_wow_path/pick_wow_path for Retail and
+    // detect_installs/pick_forever_root for Forever), not derived from a shared root.
     config
         .save_to(&state.config_path)
         .map_err(|e| e.to_string())?;
@@ -183,7 +242,7 @@ pub async fn pair_with_code(
         .or_else(|_| std::env::var("HOSTNAME"))
         .unwrap_or_else(|_| "companion".to_string());
 
-    let client = reqwest::Client::new();
+    let client = crate::sync::build_client();
     let token = crate::upload::claim_code(&client, &trimmed, &label).await?;
 
     let mut config = state.config.lock().unwrap_or_else(|p| p.into_inner()).clone();

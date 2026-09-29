@@ -185,14 +185,14 @@ pub async fn fetch_summary(
         .bearer_auth(token)
         .send()
         .await
-        .map_err(|e| format!("request failed: {e}"))?;
+        .map_err(|e| format!("request failed: {}", crate::sync::describe_err(&e, crate::sync::CLIENT_TIMEOUT)))?;
     let status = resp.status();
     if !status.is_success() {
         return Err(format!("unexpected status {}", status.as_u16()));
     }
     resp.json::<WireSummary>()
         .await
-        .map_err(|e| format!("bad summary body: {e}"))
+        .map_err(|e| format!("bad summary body: {}", crate::sync::describe_err(&e, crate::sync::CLIENT_TIMEOUT)))
 }
 
 /// The write seam `sync_once` calls: `Ok` renders and atomically writes,

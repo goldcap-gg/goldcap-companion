@@ -68,7 +68,7 @@ pub fn account_roots(config: &Config) -> Vec<PathBuf> {
     if !retail.is_empty() {
         roots.push(PathBuf::from(retail).join("WTF").join("Account"));
     }
-    if let Some(root) = crate::games::wow_root(config) {
+    if let Some(root) = crate::games::forever_root(config) {
         let retail_dir = (!retail.is_empty()).then(|| PathBuf::from(retail));
         for g in crate::games::discover(&root, retail_dir.as_deref()) {
             if g.kind == crate::games::GameKind::Forever {
@@ -79,9 +79,19 @@ pub fn account_roots(config: &Config) -> Vec<PathBuf> {
     roots
 }
 
-/// Watches `<wow_retail_path>/WTF/Account` and fires `trigger_tx` (the same
-/// channel as the tray's "Sync now") after a debounced SavedVariables write.
-/// Rebuilds the watcher whenever the config (and thus possibly the WoW path)
+/// The pair of paths that decide which account folders are watched — Retail's and Forever's own
+/// root, independently, since either can change without the other (the two-drives case). Used
+/// only to detect "did anything `account_roots` cares about change", not persisted.
+fn watch_key(config: &Config) -> (String, String) {
+    (
+        config.wow_retail_path.trim().to_string(),
+        config.forever_root_path.trim().to_string(),
+    )
+}
+
+/// Watches `<wow_retail_path>/WTF/Account` and every WoW: Forever install's own account folder,
+/// and fires `trigger_tx` (the same channel as the tray's "Sync now") after a debounced
+/// SavedVariables write. Rebuilds the watcher whenever the config's Retail path OR Forever root
 /// changes. Lives for the whole app run.
 pub async fn run_loop(
     mut config_rx: watch::Receiver<Config>,
@@ -89,7 +99,7 @@ pub async fn run_loop(
     logger: Arc<Logger>,
 ) {
     loop {
-        let wow_path = config_rx.borrow().wow_retail_path.trim().to_string();
+        let key = watch_key(&config_rx.borrow());
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<PathBuf>();
 
         // Held for their Drop: dropping the watchers (on config change) stops
@@ -120,13 +130,13 @@ pub async fn run_loop(
                     if changed.is_err() {
                         return; // config sender dropped — app shutting down
                     }
-                    let new_path = config_rx.borrow().wow_retail_path.trim().to_string();
-                    if new_path == wow_path {
-                        // A settings save that didn't touch the WoW path must
+                    let new_key = watch_key(&config_rx.borrow());
+                    if new_key == key {
+                        // A settings save that didn't touch either game's WoW path must
                         // not tear down the watcher or discard a pending debounce.
                         continue;
                     }
-                    break; // rebuild the watcher against the (new) path
+                    break; // rebuild the watcher against the (new) paths
                 }
                 received = event_rx.recv() => {
                     match received {
@@ -288,7 +298,11 @@ mod tests {
             std::fs::create_dir_all(&sv).unwrap();
             std::fs::write(sv.join("GoldCap.lua"), lua).unwrap();
         }
-        let config = Config { wow_retail_path: root.join("_retail_").to_string_lossy().into_owned(), ..Config::default() };
+        let config = Config {
+            wow_retail_path: root.join("_retail_").to_string_lossy().into_owned(),
+            forever_root_path: root.to_string_lossy().into_owned(),
+            ..Config::default()
+        };
         assert_eq!(
             account_roots(&config),
             vec![root.join("_retail_").join("WTF").join("Account"), root.join("_classic_beta_").join("WTF").join("Account")]
