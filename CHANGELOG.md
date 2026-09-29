@@ -10,8 +10,6 @@ data.
   shows how many prices it updated on your auction house, and how many of
   them nobody else had in the last 24 hours. The first scan on an auction
   house nobody had scanned yet says you opened it.
-- The GoldCap addon (0.17.0 and later) now says the same in chat after your
-  next /reload.
 
 ## 1.15.0 (2026-09-29)
 
