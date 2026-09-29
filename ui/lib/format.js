@@ -70,3 +70,26 @@ export function foreverCrowdLine(g, now) {
 export function foreverMarketLine(g) {
   return [g.realm, g.faction].filter(Boolean).join(" · ");
 }
+
+// The Forever card's "what your scan changed" block, from the site's counts for the last scan
+// sent (`g.impact`, only ever set when goldcap.gg answered with numbers): `{ big, label, sub }`, or
+// null when there are none — an old site, a quarantined scan — so the card shows nothing new.
+// "updated" and "in the last 24 hours" are all the counts can prove: never "confirmed", never "live".
+//   opened a market:   sub only  "You opened <market> — its first N prices are yours."
+//   updated, some ours: big N, label "prices updated on <market>", sub "M of them nobody else had …"
+//   updated, none ours: big N, label only
+//   nothing updated:    sub only  "Your last scan updated no prices on <market>."
+export function foreverImpactLines(g) {
+  const i = g.impact;
+  if (!i) return null;
+  const market = foreverMarketLine(i);
+  if (i.updated === 0) return { big: "", label: "", sub: `Your last scan updated no prices on ${market}.` };
+  if (i.first) {
+    return { big: "", label: "", sub: `You opened ${market} — its first ${groupDigits(i.updated)} prices are yours.` };
+  }
+  return {
+    big: groupDigits(i.updated),
+    label: `prices updated on ${market}`,
+    sub: i.onlyYours > 0 ? `${groupDigits(i.onlyYours)} of them nobody else had in the last 24 hours.` : "",
+  };
+}

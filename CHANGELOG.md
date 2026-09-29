@@ -4,6 +4,13 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
+## 1.16.0 (2026-09-29)
+
+- WoW: Forever: after a scan is sent, the Forever card on the Status screen
+  shows how many prices it updated on your auction house, and how many of
+  them nobody else had in the last 24 hours. The first scan on an auction
+  house nobody had scanned yet says you opened it.
+
 ## 1.15.0 (2026-09-29)
 
 - First run now asks which WoW you play. A WoW: Forever player can finish

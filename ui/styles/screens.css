@@ -170,6 +170,32 @@
   color: var(--fg-muted);
 }
 
+/* The Forever card's "what your scan changed" block: the count first, then what it counts. */
+.impact {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 10px 0;
+  min-width: 0;
+}
+
+.impact-big {
+  font-size: 36px;
+  font-weight: 500;
+  line-height: 1.1;
+  color: var(--pos);
+}
+
+.impact-label {
+  font-size: 15px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.impact .stage-detail {
+  margin: 0;
+}
+
 .stage-error {
   font-size: 12px;
   color: var(--neg);

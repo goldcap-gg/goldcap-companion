@@ -184,11 +184,53 @@ pub fn forever_toc_contents(interface: i64) -> String {
     )
 }
 
-/// `GoldCap_AppData = { foreverString = '…', foreverUpload = true, writtenAt = … }`:
+/// At most this many scan results go to the addon: one per WoW account the install knows, and
+/// an install rarely has more than a couple.
+const MAX_IMPACTS: usize = 4;
+
+/// `foreverImpact = { { at = …, updated = …, onlyYours = …, first = true, realm = '…', faction = '…' } }`
+/// — the results of the players' own scans, newest send first, none older than
+/// `CROWD_MAX_AGE_SECS` by `written_at`. `first` only when true and `faction` only when known.
+/// Empty (nothing written) when no result is fresh. The addon prints the entry whose `at` is
+/// one of its own account's folds.
+fn render_impacts(impacts: &[crate::forever::ScanImpact], written_at: i64) -> Option<String> {
+    let mut fresh: Vec<&crate::forever::ScanImpact> = impacts
+        .iter()
+        .filter(|i| written_at - i.sent_at <= crate::forever::CROWD_MAX_AGE_SECS)
+        .collect();
+    fresh.sort_by(|a, b| b.sent_at.cmp(&a.sent_at));
+    fresh.truncate(MAX_IMPACTS);
+    if fresh.is_empty() {
+        return None;
+    }
+    let entries: Vec<String> = fresh
+        .iter()
+        .map(|i| {
+            let mut e = format!("at = {}, updated = {}, onlyYours = {}", i.at, i.updated, i.only_yours);
+            if i.first {
+                e.push_str(", first = true");
+            }
+            e.push_str(&format!(", realm = '{}'", escape_lua_string(&i.realm)));
+            if let Some(f) = &i.faction {
+                e.push_str(&format!(", faction = '{}'", escape_lua_string(f)));
+            }
+            format!("{{ {e} }}")
+        })
+        .collect();
+    Some(format!("foreverImpact = {{ {} }}", entries.join(", ")))
+}
+
+/// `GoldCap_AppData = { foreverString = '…', foreverUpload = true, foreverImpact = { … }, writtenAt = … }`:
 /// `foreverString` — every player's prices for this install's market (GCF1), when kept;
 /// `foreverUpload` — this companion is paired and sends this install's scans (the addon says
-/// "shared on your next /reload" only then). No retail key is ever written here.
-pub fn render_forever_app_data_lua(forever_string: Option<&str>, uploads: bool, written_at: i64) -> String {
+/// "shared on your next /reload" only then); `foreverImpact` — what the player's own scans
+/// changed (`render_impacts`), only while any is fresh. No retail key is ever written here.
+pub fn render_forever_app_data_lua(
+    forever_string: Option<&str>,
+    uploads: bool,
+    impacts: &[crate::forever::ScanImpact],
+    written_at: i64,
+) -> String {
     let mut fields = Vec::new();
     if let Some(s) = forever_string {
         fields.push(format!("foreverString = '{}'", escape_lua_string(s)));
@@ -196,20 +238,28 @@ pub fn render_forever_app_data_lua(forever_string: Option<&str>, uploads: bool, 
     if uploads {
         fields.push("foreverUpload = true".to_string());
     }
+    fields.extend(render_impacts(impacts, written_at));
     fields.push(format!("writtenAt = {written_at}"));
     format!("GoldCap_AppData = {{ {} }}\n", fields.join(", "))
 }
 
 /// The Forever install's `GoldCap_AppData`: its `_Camelot.toc` (written only when it differs)
 /// and `AppData.lua` (atomic). Nothing else: no retail toc, no LedgerSummary.lua, no Runs.lua.
-pub fn write_forever_app_data(dir: &Path, interface: i64, forever_string: Option<&str>, uploads: bool, written_at: i64) -> io::Result<()> {
+pub fn write_forever_app_data(
+    dir: &Path,
+    interface: i64,
+    forever_string: Option<&str>,
+    uploads: bool,
+    impacts: &[crate::forever::ScanImpact],
+    written_at: i64,
+) -> io::Result<()> {
     fs::create_dir_all(dir)?;
     let toc = dir.join(FOREVER_TOC_FILE_NAME);
     let want = forever_toc_contents(interface);
     if fs::read_to_string(&toc).ok().as_deref() != Some(want.as_str()) {
         fs::write(&toc, &want)?;
     }
-    write_atomic(&dir.join(LUA_FILE_NAME), &render_forever_app_data_lua(forever_string, uploads, written_at))
+    write_atomic(&dir.join(LUA_FILE_NAME), &render_forever_app_data_lua(forever_string, uploads, impacts, written_at))
 }
 
 #[cfg(test)]
@@ -456,7 +506,7 @@ mod tests {
     #[test]
     fn a_forever_install_gets_its_own_toc_and_nothing_retail() {
         let dir = temp_dir("forever-appdata");
-        write_forever_app_data(&dir, 16001, Some("GCF1;s;90;R;Horde;1;I:1=2=2===3=1=0"), true, 1790000000).unwrap();
+        write_forever_app_data(&dir, 16001, Some("GCF1;s;90;R;Horde;1;I:1=2=2===3=1=0"), true, &[], 1790000000).unwrap();
         let mut names: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
         names.sort();
         assert_eq!(names, vec!["AppData.lua".to_string(), FOREVER_TOC_FILE_NAME.to_string()]);
@@ -470,13 +520,52 @@ mod tests {
 
     #[test]
     fn a_forever_install_without_prices_or_pairing_still_says_the_companion_is_there() {
-        assert_eq!(render_forever_app_data_lua(None, false, 5), "GoldCap_AppData = { writtenAt = 5 }\n");
-        assert_eq!(render_forever_app_data_lua(None, true, 5), "GoldCap_AppData = { foreverUpload = true, writtenAt = 5 }\n");
+        assert_eq!(render_forever_app_data_lua(None, false, &[], 5), "GoldCap_AppData = { writtenAt = 5 }\n");
+        assert_eq!(render_forever_app_data_lua(None, true, &[], 5), "GoldCap_AppData = { foreverUpload = true, writtenAt = 5 }\n");
         // A realm with a quote survives the Lua string.
         assert_eq!(
-            render_forever_app_data_lua(Some("GCF1;s;90;Zul'jin;-;1;I:1=2=2===3=1=0"), false, 5),
+            render_forever_app_data_lua(Some("GCF1;s;90;Zul'jin;-;1;I:1=2=2===3=1=0"), false, &[], 5),
             "GoldCap_AppData = { foreverString = 'GCF1;s;90;Zul\\'jin;-;1;I:1=2=2===3=1=0', writtenAt = 5 }\n"
         );
+    }
+
+    fn impact(at: i64, sent_at: i64, updated: u32, only_yours: u32, first: bool, realm: &str, faction: Option<&str>) -> crate::forever::ScanImpact {
+        crate::forever::ScanImpact { at, sent_at, updated, only_yours, first, realm: realm.into(), faction: faction.map(str::to_string) }
+    }
+
+    #[test]
+    fn scan_impacts_are_written_newest_first_with_optional_keys_and_an_escaped_realm() {
+        let now = 1_790_500_000;
+        let older = impact(1790461000, now - 3600, 2210, 2210, true, "Classic Beta PvE 2", Some("Horde"));
+        let newer = impact(1790464249, now - 60, 412, 38, false, "Zul'jin", None);
+        // Input order does not matter: the newest send is first.
+        assert_eq!(
+            render_forever_app_data_lua(None, true, &[older.clone(), newer.clone()], now),
+            format!("GoldCap_AppData = {{ foreverUpload = true, foreverImpact = {{ \
+{{ at = 1790464249, updated = 412, onlyYours = 38, realm = 'Zul\\'jin' }}, \
+{{ at = 1790461000, updated = 2210, onlyYours = 2210, first = true, realm = 'Classic Beta PvE 2', faction = 'Horde' }} }}, writtenAt = {now} }}\n")
+        );
+    }
+
+    #[test]
+    fn a_scan_impact_older_than_72_hours_is_left_out_and_at_most_four_go() {
+        let now = 1_790_500_000;
+        let stale = impact(1, now - crate::forever::CROWD_MAX_AGE_SECS - 1, 5, 1, false, "R", None);
+        let edge = impact(2, now - crate::forever::CROWD_MAX_AGE_SECS, 5, 1, false, "R", None);
+        // Only stale ones: nothing is written, the bytes are 1.15.0's.
+        assert_eq!(render_forever_app_data_lua(None, true, std::slice::from_ref(&stale), now), format!("GoldCap_AppData = {{ foreverUpload = true, writtenAt = {now} }}\n"));
+        let lua = render_forever_app_data_lua(None, false, &[stale, edge], now);
+        assert_eq!(lua.matches("{ at = ").count(), 1);
+        assert!(lua.contains("at = 2,"));
+        let many: Vec<_> = (0..6).map(|i| impact(100 + i, now - 10 * (i + 1), 5, 1, false, "R", None)).collect();
+        let lua = render_forever_app_data_lua(None, false, &many, now);
+        assert_eq!(lua.matches("{ at = ").count(), 4);
+        assert!(lua.contains("at = 100,") && lua.contains("at = 103,") && !lua.contains("at = 104,"));
+    }
+
+    #[test]
+    fn with_no_scan_impact_the_forever_bytes_are_unchanged() {
+        assert_eq!(render_forever_app_data_lua(Some("GCF1;s;90;R;Horde;1;I:1=2=2===3=1=0"), true, &[], 9), "GoldCap_AppData = { foreverString = 'GCF1;s;90;R;Horde;1;I:1=2=2===3=1=0', foreverUpload = true, writtenAt = 9 }\n");
     }
 
     #[test]
@@ -488,5 +577,7 @@ mod tests {
             "GoldCap_AppData = { importString = 'GCS1;eu;x;1;I:1=2', regionString = 'GCM1;eu;1;I:1=2', writtenAt = 7 }\n"
         );
         assert!(!TOC_CONTENTS.contains("16001"), "retail's toc is retail's");
+        // Scan results are a Forever-only key: retail's renderer has no way to write one.
+        assert!(!render_app_data_lua("GCS1;eu;x;1;I:1=2", Some("GCM1;eu;1;I:1=2"), 7).contains("foreverImpact"));
     }
 }

@@ -222,6 +222,69 @@ export const FIXTURES = {
     },
   },
 
+  // The Forever card after goldcap.gg counted the last scan: how many prices it updated and how
+  // many of those nobody else had in the last 24 hours.
+  "forever-only: scan impact": {
+    config: {
+      region: "eu",
+      realmSlug: "",
+      wowRetailPath: "",
+      foreverRootPath: "C:\\Program Files (x86)\\World of Warcraft",
+      retailEnabled: false,
+      foreverEnabled: true,
+      intervalMinutes: 30,
+      launchAtStartup: true,
+      autoUpdate: true,
+      companionToken: "tok",
+    },
+    status: {
+      configured: true, paired: true, retailEnabled: false, foreverEnabled: true, region: "eu", realmSlug: "",
+      syncing: false, nextTickAt: NOW + 900, intervalMinutes: 30, version: "1.16.0",
+      prices: stage("notConnected", null, "Retail is off"),
+      addon: stage("notConnected", null, "Retail is off"),
+      ledger: stage("notConnected", null, "Retail is off"),
+      games: [
+        {
+          folder: "_classic_beta_", game: "forever",
+          market: "us-beta-classic-beta-pve-2-alliance", realm: "Classic Beta PvE 2", faction: "Alliance",
+          lastSentAt: NOW - 12, sentItems: 2324, crowdItems: 1974, crowdTs: NOW - 600, crowdWrittenAt: NOW - 60,
+          impact: { at: NOW - 40, sentAt: NOW - 12, updated: 412, onlyYours: 38, first: false, realm: "Classic Beta PvE 2", faction: "Alliance" },
+        },
+      ],
+    },
+  },
+
+  // The first scan on a market nobody had scanned: the card says the player opened it.
+  "forever-only: opened a market": {
+    config: {
+      region: "eu",
+      realmSlug: "",
+      wowRetailPath: "",
+      foreverRootPath: "C:\\Program Files (x86)\\World of Warcraft",
+      retailEnabled: false,
+      foreverEnabled: true,
+      intervalMinutes: 30,
+      launchAtStartup: true,
+      autoUpdate: true,
+      companionToken: "tok",
+    },
+    status: {
+      configured: true, paired: true, retailEnabled: false, foreverEnabled: true, region: "eu", realmSlug: "",
+      syncing: false, nextTickAt: NOW + 900, intervalMinutes: 30, version: "1.16.0",
+      prices: stage("notConnected", null, "Retail is off"),
+      addon: stage("notConnected", null, "Retail is off"),
+      ledger: stage("notConnected", null, "Retail is off"),
+      games: [
+        {
+          folder: "_classic_beta_", game: "forever",
+          market: "us-beta-classic-beta-pve-2-horde", realm: "Classic Beta PvE 2", faction: "Horde",
+          lastSentAt: NOW - 30, sentItems: 2210,
+          impact: { at: NOW - 60, sentAt: NOW - 30, updated: 2210, onlyYours: 2210, first: true, realm: "Classic Beta PvE 2", faction: "Horde" },
+        },
+      ],
+    },
+  },
+
   // A Forever-only player who has never had a scan accepted yet — no market,
   // no crowd line, just the "no scan uploaded yet" state and the reminder.
   "forever-only: no scan yet": {

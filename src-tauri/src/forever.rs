@@ -217,7 +217,10 @@ pub enum UploadOutcome {
     /// `quarantined` or `rejected` answer can name a market that is not this install's own (a
     /// stale fold from another character's realm), and must not switch it.
     /// `note`: what the Status screen should tell the player, when anything.
-    Done { market: Option<String>, note: Option<String> },
+    /// `impact`: what the accepted scan changed on its market — `(updated, only_yours,
+    /// first_on_market)` — only from an `accepted` or `duplicate` answer that carried it whole.
+    /// Anything malformed, or an old site that sends none, is `None`, never a wrong number.
+    Done { market: Option<String>, note: Option<String>, impact: Option<(u32, u32, bool)> },
     /// The token itself was refused (401): nothing decided about this fold, so it is retried
     /// next tick like any other unresolved answer — but distinct from `Retry` so the caller can
     /// stop telling the addon this install uploads until a later attempt actually succeeds
@@ -235,6 +238,17 @@ fn note_for(status: &str, reason: Option<&str>) -> Option<String> {
         ("rejected", Some(r)) => Some(format!("goldcap.gg refused the last scan ({r})")),
         _ => None,
     }
+}
+
+/// The site's `impact` object, read strictly: `updated` and `onlyYours` whole non-negative
+/// numbers that fit u32, `onlyYours <= updated`, `firstOnMarket` a bool. One thing off and the
+/// whole object is dropped — the Status card would rather say nothing than a wrong number.
+fn read_impact(body: &serde_json::Value) -> Option<(u32, u32, bool)> {
+    let impact = body.get("impact")?;
+    let updated = u32::try_from(impact.get("updated")?.as_u64()?).ok()?;
+    let only_yours = u32::try_from(impact.get("onlyYours")?.as_u64()?).ok()?;
+    let first = impact.get("firstOnMarket")?.as_bool()?;
+    (only_yours <= updated).then_some((updated, only_yours, first))
 }
 
 /// Sends one fold to `POST {base}/v1/forever/scans` under the pairing token, with the Forever
@@ -258,15 +272,19 @@ pub async fn upload_fold(client: &reqwest::Client, base: &str, token: &str, up: 
         .filter(|s| matches!(*s, "accepted" | "duplicate"))
         .and_then(|_| body["market"].as_str())
         .map(str::to_string);
+    let impact = status
+        .filter(|s| matches!(*s, "accepted" | "duplicate"))
+        .and_then(|_| read_impact(&body));
     match code {
         // A captive portal or a proxy's own error page can answer 200 with a body that carries
         // no `status` at all — that is not the site having its say, so the fold is retried
         // rather than silently marked sent and lost (fix round 1 M4).
         200 if status.is_none() => UploadOutcome::Retry("200 without a status".into()),
-        200 | 422 => UploadOutcome::Done { market, note: note_for(status.unwrap_or(""), body["reason"].as_str()) },
+        200 | 422 => UploadOutcome::Done { market, note: note_for(status.unwrap_or(""), body["reason"].as_str()), impact },
         400 | 409 | 413 => UploadOutcome::Done {
             market: None,
             note: Some(format!("goldcap.gg refused the last scan ({})", body["error"].as_str().unwrap_or("unknown"))),
+            impact: None,
         },
         401 => UploadOutcome::Unauthorized,
         _ => UploadOutcome::Retry(format!("status {code}")),
@@ -301,6 +319,24 @@ pub struct InstallState {
     /// say `foreverUpload = false` until a fresh upload actually succeeds — the addon's "shared
     /// on your next /reload" line must not lie about a revoked token (fix round 1 M8).
     pub unauthorized: bool,
+    /// What the last *sent* fold changed on its market, for the Status card. Set on every `Done`
+    /// (None when the answer carried no numbers), so the card never shows an older scan's
+    /// numbers under a newer "Scan uploaded" line — the rule `sent_items` follows.
+    pub impact: Option<ScanImpact>,
+}
+
+/// What one accepted scan changed on its market, as goldcap.gg counted it at receipt. `at` is
+/// the fold's own `at`: the key the addon matches its own scan by.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanImpact {
+    pub at: i64,
+    pub sent_at: i64,
+    pub updated: u32,
+    pub only_yours: u32,
+    pub first: bool,
+    pub realm: String,
+    pub faction: Option<String>,
 }
 
 /// One row of the Status screen's game list.
@@ -322,6 +358,9 @@ pub struct ForeverState {
     pub installs: BTreeMap<String, InstallState>,
     /// Every game folder the last tick found, for the Status screen.
     pub games: Vec<GameStatus>,
+    /// SavedVariables path → the last scan result for that file (one WoW account), as
+    /// `foreverImpact` for the addon. Removed when the last answer for the file had no numbers.
+    pub impacts: BTreeMap<String, ScanImpact>,
 }
 
 impl ForeverState {
@@ -568,10 +607,24 @@ pub async fn sync_forever_at_root(
                 continue;
             }
             match upload_fold(client, base, &token, &up).await {
-                UploadOutcome::Done { market, note } => {
+                UploadOutcome::Done { market, note, impact } => {
                     logger.info(&format!("forever scan from {}: sent ({} items)", game.folder, up.fold.items.len()));
-                    state.sent.insert(file_key, up.fold.at);
+                    state.sent.insert(file_key.clone(), up.fold.at);
+                    let scan_impact = impact.map(|(updated, only_yours, first)| ScanImpact {
+                        at: up.fold.at,
+                        sent_at: now,
+                        updated,
+                        only_yours,
+                        first,
+                        realm: up.fold.realm.clone(),
+                        faction: up.fold.faction.clone(),
+                    });
+                    match &scan_impact {
+                        Some(i) => state.impacts.insert(file_key, i.clone()),
+                        None => state.impacts.remove(&file_key),
+                    };
                     let entry = state.installs.entry(key.clone()).or_default();
+                    entry.impact = scan_impact;
                     entry.last_sent_at = Some(now);
                     entry.note = note;
                     entry.unauthorized = false;
@@ -602,11 +655,17 @@ pub async fn sync_forever_at_root(
         // /reload" — the addon only prints that while `foreverUpload == true` (fix round 1 M8).
         let can_upload = !token.is_empty() && !entry.unauthorized;
         let has_crowd = crowd.is_some();
+        let impacts: Vec<ScanImpact> = game
+            .saved_vars
+            .iter()
+            .filter_map(|f| state.impacts.get(f.to_string_lossy().as_ref()).cloned())
+            .collect();
         match crate::luafile::write_forever_app_data(
             &crate::luafile::addon_dir(&game.dir),
             interface,
             crowd.as_ref().map(|(body, _)| body.as_str()),
             can_upload,
+            &impacts,
             now,
         ) {
             Ok(()) => {
@@ -788,6 +847,36 @@ mod tests {
         (base, rx)
     }
 
+    /// Several canned answers on one local port, served to consecutive connections in order.
+    fn serve_forever(responses: Vec<String>) -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for response in responses {
+                let Ok((mut stream, _)) = listener.accept() else { return };
+                let mut request = Vec::new();
+                let mut buf = [0u8; 65536];
+                loop {
+                    let n = stream.read(&mut buf).unwrap_or(0);
+                    if n == 0 { break; }
+                    request.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&request);
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let len = text[..end].lines()
+                            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0)))
+                            .unwrap_or(0);
+                        if request.len() >= end + 4 + len { break; }
+                    }
+                }
+                let _ = tx.send(String::from_utf8_lossy(&request).into_owned());
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        (base, rx)
+    }
+
     fn answer(status: &str, body: &str) -> String {
         format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
     }
@@ -797,7 +886,7 @@ mod tests {
         let up = parse_forever_upload(REAL).unwrap().unwrap();
         let (base, seen) = serve_once(answer("200 OK", r#"{"status":"accepted","market":"us-beta-classic-beta-pve-2-horde","items":1974,"dropped":0}"#));
         let out = upload_fold(&crate::sync::build_client(), &base, "tok", &up).await;
-        assert_eq!(out, UploadOutcome::Done { market: Some("us-beta-classic-beta-pve-2-horde".into()), note: None });
+        assert_eq!(out, UploadOutcome::Done { market: Some("us-beta-classic-beta-pve-2-horde".into()), note: None, impact: None });
         let request = seen.recv().unwrap();
         let lower = request.to_ascii_lowercase();
         assert!(lower.starts_with("post /v1/forever/scans "), "{}", &request[..60]);
@@ -837,6 +926,43 @@ mod tests {
         let (base, _seen) = serve_once(answer("200 OK", r#"{"status":"quarantined","market":"m","items":1,"dropped":0,"reason":"unlinked"}"#));
         let UploadOutcome::Done { note, .. } = upload_fold(&crate::sync::build_client(), &base, "tok", &up).await else { panic!() };
         assert_eq!(note.as_deref(), Some("Link Battle.net on goldcap.gg for your scans to count in public prices"));
+    }
+
+    fn impact_of(status: &str, impact: &str) -> String {
+        format!(r#"{{"status":"{status}","market":"m","items":1,"dropped":0{impact}}}"#)
+    }
+
+    #[tokio::test]
+    async fn an_answer_carries_the_scan_impact_only_when_it_is_whole_and_counted() {
+        let up = parse_forever_upload(REAL).unwrap().unwrap();
+        let good = r#","impact":{"updated":412,"onlyYours":38,"firstOnMarket":false}"#;
+        let cases = vec![
+            (impact_of("accepted", good), Some((412, 38, false))),
+            // A re-sent fold (duplicate) hands back the numbers of the first answer.
+            (impact_of("duplicate", good), Some((412, 38, false))),
+            (impact_of("accepted", r#","impact":{"updated":2210,"onlyYours":2210,"firstOnMarket":true}"#), Some((2210, 2210, true))),
+            (impact_of("accepted", r#","impact":{"updated":0,"onlyYours":0,"firstOnMarket":false}"#), Some((0, 0, false))),
+            // An old site sends none.
+            (impact_of("accepted", ""), None),
+            // A quarantined answer is never a number, even if the body carried one.
+            (impact_of("quarantined", good), None),
+            // Malformed: dropped whole, never a wrong number.
+            (impact_of("accepted", r#","impact":{"updated":-1,"onlyYours":0,"firstOnMarket":false}"#), None),
+            (impact_of("accepted", r#","impact":{"updated":"412","onlyYours":38,"firstOnMarket":false}"#), None),
+            (impact_of("accepted", r#","impact":{"updated":412.5,"onlyYours":38,"firstOnMarket":false}"#), None),
+            (impact_of("accepted", r#","impact":{"updated":4294967296,"onlyYours":38,"firstOnMarket":false}"#), None),
+            (impact_of("accepted", r#","impact":{"updated":10,"onlyYours":11,"firstOnMarket":false}"#), None),
+            (impact_of("accepted", r#","impact":{"updated":10,"onlyYours":5}"#), None),
+            (impact_of("accepted", r#","impact":{"updated":10,"onlyYours":5,"firstOnMarket":"yes"}"#), None),
+            (impact_of("accepted", r#","impact":{"onlyYours":5,"firstOnMarket":false}"#), None),
+            (impact_of("accepted", r#","impact":null"#), None),
+            (impact_of("accepted", r#","impact":[412,38,false]"#), None),
+        ];
+        for (body, want) in cases {
+            let (base, _seen) = serve_once(answer("200 OK", &body));
+            let UploadOutcome::Done { impact, .. } = upload_fold(&crate::sync::build_client(), &base, "tok", &up).await else { panic!("{body}") };
+            assert_eq!(impact, want, "{body}");
+        }
     }
 
     // fix round 1 M4: a captive portal or a proxy's own error page can answer 200 with no
@@ -1131,6 +1257,99 @@ mod tests {
         let entry = state.installs.values().next().unwrap();
         assert_eq!(entry.crowd_written_at, None, "no crowd payload was ever fetched");
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    // The answer's numbers reach the Status card (installs[dir].impact) and, per SavedVariables
+    // file, the addon (impacts[file] -> `foreverImpact` in AppData.lua). A later answer without
+    // numbers (an old site) clears both, so nothing older sits under a newer "Scan uploaded".
+    #[tokio::test]
+    async fn the_scan_impact_reaches_the_card_and_the_addon_and_the_next_answer_replaces_it() {
+        let root = machine("impact");
+        let sv = put(&root, "_classic_beta_", REAL);
+        let config = crate::config::Config { companion_token: "tok".into(), ..crate::config::Config::default() };
+        let logger = crate::logging::Logger::new(&root.join("logs")).unwrap();
+        let store = std::sync::Mutex::new(std::collections::HashMap::new());
+        let state_path = root.join("s.json");
+        let lua_path = root.join("_classic_beta_/Interface/AddOns/GoldCap_AppData/AppData.lua");
+        let file_key = sv.to_string_lossy().into_owned();
+
+        let (base, _seen) = serve_once(answer("200 OK", &impact_of("accepted", r#","impact":{"updated":412,"onlyYours":38,"firstOnMarket":false}"#)));
+        let state = sync_forever_at_root(&crate::sync::build_client(), &base, &root, &config, &logger, &state_path, &store, 1_790_464_500).await;
+        let want = ScanImpact {
+            at: 1_790_464_249,
+            sent_at: 1_790_464_500,
+            updated: 412,
+            only_yours: 38,
+            first: false,
+            realm: "Classic Beta PvE 2".into(),
+            faction: Some("Horde".into()),
+        };
+        assert_eq!(state.impacts.get(&file_key), Some(&want));
+        assert_eq!(state.installs.values().next().unwrap().impact.as_ref(), Some(&want));
+        assert_eq!(state.games[0].state.impact.as_ref(), Some(&want), "the Status screen reads it off the game row");
+        assert_eq!(
+            std::fs::read_to_string(&lua_path).unwrap(),
+            "GoldCap_AppData = { foreverUpload = true, foreverImpact = { { at = 1790464249, updated = 412, onlyYours = 38, realm = 'Classic Beta PvE 2', faction = 'Horde' } }, writtenAt = 1790464500 }\n"
+        );
+        // It is kept on disk: a restart still has it.
+        assert_eq!(ForeverState::load_from(&state_path).impacts.get(&file_key), Some(&want));
+
+        // A new fold, answered by a site that sends no numbers: both are cleared.
+        let newer = std::fs::read_to_string(&sv).unwrap().replace("[\"at\"] = 1790464249,", "[\"at\"] = 1790464300,") + "\n-- saved again\n";
+        std::fs::write(&sv, newer).unwrap();
+        let (base, _seen) = serve_once(answer("200 OK", &impact_of("accepted", "")));
+        let state = sync_forever_at_root(&crate::sync::build_client(), &base, &root, &config, &logger, &state_path, &store, 1_790_464_800).await;
+        assert_eq!(state.sent.get(&file_key), Some(&1_790_464_300));
+        assert!(state.impacts.is_empty());
+        assert_eq!(state.installs.values().next().unwrap().impact, None);
+        assert_eq!(
+            std::fs::read_to_string(&lua_path).unwrap(),
+            "GoldCap_AppData = { foreverUpload = true, writtenAt = 1790464800 }\n",
+            "no numbers, no key: the bytes 1.15.0 wrote"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // One install can hold two WoW accounts: each SavedVariables file keeps its own result, and
+    // both go to the addon (which prints only the one whose fold it holds).
+    #[tokio::test]
+    async fn two_accounts_keep_one_result_each() {
+        let root = machine("impact-two");
+        let a = put(&root, "_classic_beta_", REAL);
+        let sv_b = root.join("_classic_beta_/WTF/Account/B/SavedVariables");
+        std::fs::create_dir_all(&sv_b).unwrap();
+        std::fs::write(sv_b.join("GoldCap.lua"), std::fs::read_to_string(&a).unwrap().replace("[\"at\"] = 1790464249,", "[\"at\"] = 1790464300,")).unwrap();
+        let config = crate::config::Config { companion_token: "tok".into(), ..crate::config::Config::default() };
+        let logger = crate::logging::Logger::new(&root.join("logs")).unwrap();
+        let store = std::sync::Mutex::new(std::collections::HashMap::new());
+        let (base, _seen) = serve_forever(vec![
+            answer("200 OK", &impact_of("accepted", r#","impact":{"updated":10,"onlyYours":1,"firstOnMarket":false}"#)),
+            answer("200 OK", &impact_of("accepted", r#","impact":{"updated":20,"onlyYours":20,"firstOnMarket":true}"#)),
+        ]);
+        let state = sync_forever_at_root(&crate::sync::build_client(), &base, &root, &config, &logger, &root.join("s.json"), &store, 1_790_464_500).await;
+        assert_eq!(state.impacts.len(), 2);
+        let lua = std::fs::read_to_string(root.join("_classic_beta_/Interface/AddOns/GoldCap_AppData/AppData.lua")).unwrap();
+        assert_eq!(lua.matches("{ at = ").count(), 2, "{lua}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // A forever.json from 1.15.0 (no impact keys) loads into 1.16.0, and a 1.16.0 one loads into
+    // 1.15.0's shape too: unknown keys were always ignored (the structs do not deny them).
+    #[test]
+    fn forever_json_is_compatible_in_both_directions() {
+        let old = r#"{"sent":{"/a":1},"installs":{"/w":{"market":"m","realm":"R","lastSentAt":5,"sentItems":3,"unauthorized":false}},"games":[]}"#;
+        let loaded: ForeverState = serde_json::from_str(old).unwrap();
+        assert!(loaded.impacts.is_empty());
+        assert_eq!(loaded.installs["/w"].impact, None);
+        assert_eq!(loaded.installs["/w"].sent_items, Some(3));
+
+        let mut new = loaded.clone();
+        let impact = ScanImpact { at: 9, sent_at: 10, updated: 4, only_yours: 2, first: true, realm: "R".into(), faction: None };
+        new.impacts.insert("/a".into(), impact.clone());
+        new.installs.get_mut("/w").unwrap().impact = Some(impact);
+        let text = serde_json::to_string(&new).unwrap();
+        assert_eq!(serde_json::from_str::<ForeverState>(&text).unwrap(), new);
+        assert!(text.contains(r#""onlyYours":2"#) && text.contains(r#""sentAt":10"#), "{text}");
     }
 
     #[tokio::test]

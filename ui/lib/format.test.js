@@ -10,6 +10,7 @@ import {
   foreverScanLine,
   foreverCrowdLine,
   foreverMarketLine,
+  foreverImpactLines,
 } from "./format.js";
 
 const NOW = 1_785_600_000;
@@ -123,4 +124,52 @@ test("foreverMarketLine joins realm and faction, or says nothing yet", () => {
   assert.equal(foreverMarketLine({ realm: "Classic Beta PvE 2", faction: "Horde" }), "Classic Beta PvE 2 · Horde");
   assert.equal(foreverMarketLine({ realm: "Classic Beta PvE 2" }), "Classic Beta PvE 2");
   assert.equal(foreverMarketLine({}), "");
+});
+
+const impact = (over) => ({
+  at: 1790464249, sentAt: 1790464300, updated: 412, onlyYours: 38, first: false,
+  realm: "Classic Beta PvE 2", faction: "Alliance", ...over,
+});
+
+test("foreverImpactLines is null without an impact, so the card shows nothing new", () => {
+  assert.equal(foreverImpactLines({}), null);
+  assert.equal(foreverImpactLines({ impact: null }), null);
+});
+
+test("foreverImpactLines: prices updated, with how many nobody else had", () => {
+  assert.deepEqual(foreverImpactLines({ impact: impact() }), {
+    big: "412",
+    label: "prices updated on Classic Beta PvE 2 · Alliance",
+    sub: "38 of them nobody else had in the last 24 hours.",
+  });
+});
+
+test("foreverImpactLines: nobody-else count is left out when it is zero", () => {
+  assert.deepEqual(foreverImpactLines({ impact: impact({ onlyYours: 0 }) }), {
+    big: "412",
+    label: "prices updated on Classic Beta PvE 2 · Alliance",
+    sub: "",
+  });
+});
+
+test("foreverImpactLines: the first scan on a market says the player opened it", () => {
+  assert.deepEqual(foreverImpactLines({ impact: impact({ first: true, updated: 2210, onlyYours: 2210, faction: "Horde" }) }), {
+    big: "",
+    label: "",
+    sub: "You opened Classic Beta PvE 2 · Horde — its first 2\u2009210 prices are yours.",
+  });
+});
+
+test("foreverImpactLines: a scan that updated nothing says so, even on an opened market", () => {
+  const sub = "Your last scan updated no prices on Classic Beta PvE 2 · Alliance.";
+  assert.deepEqual(foreverImpactLines({ impact: impact({ updated: 0, onlyYours: 0 }) }), { big: "", label: "", sub });
+  assert.deepEqual(foreverImpactLines({ impact: impact({ updated: 0, onlyYours: 0, first: true }) }), { big: "", label: "", sub });
+});
+
+test("foreverImpactLines groups digits and names a market without a faction by its realm alone", () => {
+  const lines = foreverImpactLines({ impact: impact({ updated: 12345, onlyYours: 1200, faction: null }) });
+  assert.equal(lines.big, "12\u2009345");
+  assert.equal(lines.label, "prices updated on Classic Beta PvE 2");
+  assert.equal(lines.sub, "1\u2009200 of them nobody else had in the last 24 hours.");
+  assert.equal(foreverImpactLines({ impact: impact({ updated: 1, onlyYours: 1, faction: undefined }) }).big, "1");
 });
