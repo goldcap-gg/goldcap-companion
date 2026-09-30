@@ -692,7 +692,7 @@ pub async fn sync_forever_at_root(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const REAL: &str = include_str!("../tests/fixtures/GoldCap-forever.lua");
@@ -819,7 +819,7 @@ mod tests {
     }
 
     /// One canned HTTP answer on a local port; hands back the base URL and the raw request.
-    fn serve_once(response: String) -> (String, std::sync::mpsc::Receiver<String>) {
+    pub(crate) fn serve_once(response: String) -> (String, std::sync::mpsc::Receiver<String>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -848,7 +848,7 @@ mod tests {
     }
 
     /// Several canned answers on one local port, served to consecutive connections in order.
-    fn serve_forever(responses: Vec<String>) -> (String, std::sync::mpsc::Receiver<String>) {
+    pub(crate) fn serve_forever(responses: Vec<String>) -> (String, std::sync::mpsc::Receiver<String>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -877,7 +877,7 @@ mod tests {
         (base, rx)
     }
 
-    fn answer(status: &str, body: &str) -> String {
+    pub(crate) fn answer(status: &str, body: &str) -> String {
         format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
     }
 

@@ -228,6 +228,10 @@ pub struct WireRunLine {
     /// written.
     #[serde(default, deserialize_with = "lenient_opt")]
     pub min_ilvl: Option<u32>,
+    /// The route the list came from crafts this item itself: a line to craft, never to buy.
+    /// Added with BUY 2.0; absent, or anything but `true`, reads as false and writes nothing.
+    #[serde(default, deserialize_with = "lenient_flag")]
+    pub make: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -286,6 +290,11 @@ pub struct WireRuns {
     pub generated_at: String,
     pub plan: String,
     pub free_lines: u32,
+    /// Which game these runs belong to: "retail" or "forever". Sent since BUY 2.0. The Forever
+    /// write refuses an answer that does not say "forever": an older site ignores `?game=` and
+    /// answers with retail lists, whose item ids mean other items in WoW: Forever.
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub game: Option<String>,
     pub runs: Vec<WireRun>,
     /// Alert-group names, indexed by `caps[].group`. Absent before 2026-09.
     #[serde(default, deserialize_with = "lenient_names")]
@@ -439,6 +448,11 @@ pub fn render_runs_lua(runs: &WireRuns, generated_at: i64) -> Result<String, Str
             if let Some(min_ilvl) = line.min_ilvl.filter(|v| *v > 0) {
                 out.push_str(&format!(", minIlvl = {min_ilvl}"));
             }
+            // BUY 2.0: a line the route crafts itself. Written only when true, so a line without
+            // it renders the bytes it always did.
+            if line.make {
+                out.push_str(", mk = true");
+            }
             if let Some(realm) = line
                 .realm
                 .as_ref()
@@ -531,6 +545,51 @@ pub async fn fetch_runs(client: &reqwest::Client, token: &str) -> Result<WireRun
         .map_err(|e| crate::sync::describe_err(&e, crate::sync::CLIENT_TIMEOUT))
 }
 
+/// The account's WoW: Forever runs for one Forever install: `?game=forever`, priced in `market`
+/// (the market the install's last accepted scan named) when there is one. Same token and route as
+/// `fetch_runs`.
+pub async fn fetch_forever_runs(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+    market: Option<&str>,
+) -> Result<WireRuns, String> {
+    let mut query: Vec<(&str, &str)> = vec![("game", "forever")];
+    if let Some(m) = market {
+        query.push(("market", m));
+    }
+    let res = client
+        .get(format!("{base}/v1/lists/companion"))
+        .query(&query)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| crate::sync::describe_err(&e, crate::sync::CLIENT_TIMEOUT))?;
+    if !res.status().is_success() {
+        return Err(format!("http {}", res.status()));
+    }
+    res.json::<WireRuns>()
+        .await
+        .map_err(|e| crate::sync::describe_err(&e, crate::sync::CLIENT_TIMEOUT))
+}
+
+/// The Forever install's write seam: `Runs.lua` next to the Forever `AppData.lua`, only from an
+/// answer that says it is WoW: Forever's, never touching the retail toc (the Forever leg writes
+/// `GoldCap_AppData_Camelot.toc` itself). Any failure writes nothing and keeps the previous file.
+pub fn apply_forever_fetch_result(dir: &Path, fetched: Result<WireRuns, String>, generated_at: i64) -> Result<bool, String> {
+    let runs = fetched?;
+    if runs.game.as_deref() != Some("forever") {
+        return Err("runs: the site did not answer for WoW: Forever".into());
+    }
+    if !SUPPORTED_VERSIONS.contains(&runs.v) {
+        return Err(format!("runs: unsupported version {}", runs.v));
+    }
+    let contents = render_runs_lua(&runs, generated_at)?;
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    crate::luafile::write_atomic(&dir.join(crate::luafile::RUNS_FILE_NAME), &contents).map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
 /// Runs contracts this build understands. v1 is the phase-1 shape; v2 adds
 /// the optional per-line price facts; v3 adds a run's kind, who shared it and
 /// where it came from, plus a line's absolute cap, its realm and the recipe
@@ -581,6 +640,7 @@ mod tests {
             realm: None,
             craft: None,
             min_ilvl: None,
+            make: false,
         }
     }
 
@@ -610,6 +670,7 @@ mod tests {
             runs: vec![],
             groups: vec![],
             caps: vec![],
+            game: None,
         }
     }
 
@@ -622,6 +683,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            game: None,
             runs: vec![WireRun {
                 code: "abcd2345".into(),
                 name: Some("Cooking 1-100".into()),
@@ -648,6 +710,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            game: None,
             runs: vec![WireRun {
                 code: "abcd2345".into(),
                 name: None,
@@ -671,6 +734,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            game: None,
             runs: vec![WireRun {
                 code: "abcd2345".into(),
                 name: None,
@@ -708,6 +772,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            game: None,
             runs: vec![WireRun {
                 code: "abcd2345".into(),
                 name: Some("O'Brien's \\ Emporium".into()),
@@ -744,6 +809,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            game: None,
             runs: vec![],
         };
         let empty_source = render_runs_lua(&empty, 1).unwrap();
@@ -775,6 +841,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            game: None,
             runs: vec![],
         };
         assert!(apply_fetch_result(dir.path(), Ok(runs), 7).unwrap());
@@ -793,6 +860,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            game: None,
             runs: vec![],
         };
         assert!(apply_fetch_result(dir.path(), Ok(runs), 7).is_err());
@@ -809,6 +877,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            game: None,
             runs: vec![WireRun {
                 code: "abcd2345".into(),
                 name: Some("Cooking 1-100".into()),
@@ -839,6 +908,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            game: None,
             runs: vec![WireRun {
                 code: "abcd2345".into(),
                 name: None,
@@ -865,6 +935,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            game: None,
             runs: vec![],
         };
         assert!(apply_fetch_result(dir.path(), Ok(runs), 7).is_err());
@@ -887,6 +958,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            game: None,
             runs: vec![WireRun {
                 code: "abcd2345".into(),
                 name: Some("Cooking 1-100".into()),
@@ -923,6 +995,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            game: None,
             runs: vec![WireRun {
                 code: "abcd2345".into(),
                 name: Some("Cooking 1-100".into()),
@@ -954,6 +1027,7 @@ mod tests {
                 free_lines: 5,
                 groups: vec![],
                 caps: vec![],
+                game: None,
                 runs: vec![WireRun {
                     code: "abcd2345".into(),
                     name: None,
@@ -1004,6 +1078,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            game: None,
             runs: vec![WireRun {
                 code: "abcd2345".into(),
                 name: None,
@@ -1033,6 +1108,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            game: None,
             runs: vec![WireRun {
                 code: "abcd2345".into(),
                 name: None,
@@ -1101,6 +1177,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            game: None,
             runs: vec![WireRun {
                 code: "abcd2345".into(),
                 name: Some("Cooking 1-100".into()),
@@ -1302,6 +1379,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            game: None,
             runs: vec![WireRun {
                 code: "a0000016".into(),
                 name: Some("Flask watch".into()),
@@ -1336,6 +1414,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            game: None,
             runs: vec![WireRun {
                 code: "abcd2345".into(),
                 name: Some("Cooking 1-100".into()),
@@ -1393,6 +1472,7 @@ mod tests {
                 free_lines: 5,
                 groups: vec![],
                 caps: vec![],
+                game: None,
                 runs: vec![WireRun {
                     kind: kind.map(Into::into),
                     lines: vec![line(5, 210, false, "Plant Protein")],
@@ -1414,6 +1494,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            game: None,
             runs: vec![WireRun {
                 shared_by: Some("   ".into()),
                 source: Some(WireRunSource { label: "".into() }),
@@ -1438,6 +1519,7 @@ mod tests {
                 free_lines: 5,
                 groups: vec![],
                 caps: vec![],
+                game: None,
                 runs: vec![WireRun {
                     lines: vec![WireRunLine {
                         cap,
@@ -1470,6 +1552,7 @@ mod tests {
                 free_lines: 5,
                 groups: vec![],
                 caps: vec![],
+                game: None,
                 runs: vec![WireRun {
                     lines: vec![WireRunLine {
                         realm: Some(realm.clone()),
@@ -1541,6 +1624,7 @@ mod tests {
                 free_lines: 5,
                 groups: vec![],
                 caps: vec![],
+                game: None,
                 runs: vec![WireRun {
                     lines: vec![WireRunLine {
                         craft: Some(craft.clone()),
@@ -1561,6 +1645,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            game: None,
             runs: vec![WireRun {
                 lines: vec![WireRunLine {
                     craft: Some(good),
@@ -1582,6 +1667,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            game: None,
             runs: vec![WireRun {
                 lines: vec![WireRunLine {
                     craft: Some(WireCraft {
@@ -1615,6 +1701,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            game: None,
             runs: vec![WireRun {
                 shared_by: Some("O'Brien".into()),
                 source: Some(WireRunSource {
@@ -1660,6 +1747,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            game: None,
             runs: vec![WireRun {
                 code: "a0000016".into(),
                 name: Some("Flask watch".into()),
@@ -1689,6 +1777,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            game: None,
             runs: vec![
                 WireRun {
                     code: "a0000016".into(),
@@ -2097,5 +2186,51 @@ mod tests {
             .eval()
             .unwrap();
         assert_eq!(none, None);
+    }
+
+    #[test]
+    fn a_made_line_is_written_mk_true_and_a_list_cap_as_cc() {
+        let json = r#"{"v":3,"generatedAt":"2026-10-01T10:00:00.000Z","plan":"pro","freeLines":5,"game":"retail","runs":[{"code":"abcd2345","updatedAt":"2026-10-01T09:00:00.000Z","lines":[{"itemId":2996,"qty":30,"vendor":false,"nameEn":"Bolt of Linen Cloth","make":true},{"itemId":2589,"qty":120,"vendor":false,"nameEn":"Linen Cloth","cap":91}]}]}"#;
+        let parsed: WireRuns = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.game.as_deref(), Some("retail"));
+        let lua = render_runs_lua(&parsed, 1).unwrap();
+        assert!(lua.contains("{ i = 2996, q = 30, v = false, n = 'Bolt of Linen Cloth', mk = true }"), "{lua}");
+        assert!(lua.contains("{ i = 2589, q = 120, v = false, n = 'Linen Cloth', cc = 91 }"), "{lua}");
+    }
+
+    #[test]
+    fn a_make_that_is_not_true_is_no_make_and_writes_nothing() {
+        let json = r#"{"v":3,"generatedAt":"2026-10-01T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[{"code":"abcd2345","updatedAt":"2026-10-01T09:00:00.000Z","lines":[{"itemId":2996,"qty":30,"vendor":false,"nameEn":"Bolt","make":"yes"}]}]}"#;
+        let parsed: WireRuns = serde_json::from_str(json).unwrap();
+        assert!(!parsed.runs[0].lines[0].make);
+        assert!(!render_runs_lua(&parsed, 1).unwrap().contains("mk ="));
+        assert_eq!(parsed.game, None, "an answer from before BUY 2.0 names no game");
+    }
+
+    #[test]
+    fn a_forever_write_refuses_an_answer_that_is_not_forever() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs_file = dir.path().join(crate::luafile::RUNS_FILE_NAME);
+        let retail = WireRuns { game: Some("retail".into()), ..v3_empty() };
+        assert!(apply_forever_fetch_result(dir.path(), Ok(retail), 1).is_err());
+        let old_site = WireRuns { game: None, ..v3_empty() };
+        assert!(apply_forever_fetch_result(dir.path(), Ok(old_site), 1).is_err(), "a site from before BUY 2.0 ignores ?game= and answers with retail lists");
+        assert!(!runs_file.exists());
+        let forever = WireRuns { game: Some("forever".into()), ..v3_empty() };
+        assert_eq!(apply_forever_fetch_result(dir.path(), Ok(forever), 1), Ok(true));
+        assert!(std::fs::read_to_string(&runs_file).unwrap().starts_with("GoldCap_AppRuns = { v = 3,"));
+        assert!(!dir.path().join(crate::luafile::TOC_FILE_NAME).exists(), "never the retail toc in a Forever install");
+    }
+
+    #[tokio::test]
+    async fn the_forever_fetch_names_the_game_and_the_market() {
+        use crate::forever::tests::{answer, serve_once};
+        let body = r#"{"v":3,"generatedAt":"2026-10-01T10:00:00.000Z","plan":"free","freeLines":5,"game":"forever","runs":[]}"#;
+        let (base, seen) = serve_once(answer("200 OK", body));
+        let runs = fetch_forever_runs(&crate::sync::build_client(), &base, "tok", Some("us-beta-x-horde")).await.unwrap();
+        assert_eq!(runs.game.as_deref(), Some("forever"));
+        let request = seen.recv().unwrap();
+        assert!(request.starts_with("GET /v1/lists/companion?game=forever&market=us-beta-x-horde "), "{request}");
+        assert!(request.to_ascii_lowercase().contains("authorization: bearer tok"));
     }
 }
