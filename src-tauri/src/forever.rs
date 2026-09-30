@@ -675,6 +675,14 @@ pub async fn sync_forever_at_root(
             }
             Err(e) => logger.error(&format!("forever prices for {}: could not write ({e})", game.folder)),
         }
+        // BUY 2.0: this account's WoW: Forever lists, priced in this install's market, as Runs.lua
+        // beside AppData.lua. Only while paired and trusted; a failure keeps the previous file.
+        if can_upload {
+            let fetched = crate::runs::fetch_forever_runs(client, base, &token, market.as_deref()).await;
+            if let Err(e) = crate::runs::apply_forever_fetch_result(&crate::luafile::addon_dir(&game.dir), fetched, now) {
+                logger.error(&format!("forever runs for {}: {e}", game.folder));
+            }
+        }
     }
 
     state.games = games
@@ -1393,5 +1401,40 @@ pub(crate) mod tests {
         let (body, summary) = crowd.expect("GCF1 back from the stand — did you run forever:aggregate?");
         assert!(body.starts_with("GCF1;us-beta-classic-beta-pve-2-horde;90;Classic Beta PvE 2;Horde;"));
         assert!(summary.items > 1000);
+    }
+
+    #[tokio::test]
+    async fn a_paired_forever_install_gets_its_runs_beside_appdata() {
+        let root = machine("forever-runs");
+        put(&root, "_classic_beta_", REAL);
+        let config = crate::config::Config { companion_token: "tok".into(), ..crate::config::Config::default() };
+        let logger = crate::logging::Logger::new(&root.join("logs")).unwrap();
+        let store = std::sync::Mutex::new(std::collections::HashMap::new());
+        let runs = r#"{"v":3,"generatedAt":"2026-10-01T10:00:00.000Z","plan":"pro","freeLines":5,"game":"forever","runs":[{"code":"abcd2345","name":"Tailoring 1 → 100","updatedAt":"2026-10-01T09:00:00.000Z","lines":[{"itemId":2589,"qty":120,"vendor":false,"nameEn":"Linen Cloth","usual":70}]}]}"#;
+        let (base, seen) = serve_forever(vec![
+            answer("200 OK", r#"{"status":"accepted","market":"us-beta-classic-beta-pve-2-horde","items":1974,"dropped":0}"#),
+            answer("500 Internal Server Error", "{}"), // the crowd prices: not this test's business
+            answer("200 OK", runs),
+        ]);
+        sync_forever_at_root(&crate::sync::build_client(), &base, &root, &config, &logger, &root.join("s.json"), &store, 1).await;
+        let requests: Vec<String> = seen.try_iter().collect();
+        assert!(requests.iter().any(|r| r.starts_with("GET /v1/lists/companion?game=forever&market=us-beta-classic-beta-pve-2-horde ")), "{requests:?}");
+        let dir = root.join("_classic_beta_/Interface/AddOns/GoldCap_AppData");
+        let written = std::fs::read_to_string(dir.join(crate::luafile::RUNS_FILE_NAME)).unwrap();
+        assert!(written.contains("{ i = 2589, q = 120, v = false, n = 'Linen Cloth', u = 70 }"), "{written}");
+        assert!(std::fs::read_to_string(dir.join(crate::luafile::FOREVER_TOC_FILE_NAME)).unwrap().contains("\nRuns.lua\n"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn unpaired_no_runs_are_asked_for_or_written() {
+        let root = machine("forever-runs-unpaired");
+        put(&root, "_classic_beta_", REAL);
+        let config = crate::config::Config::default();
+        let logger = crate::logging::Logger::new(&root.join("logs")).unwrap();
+        let store = std::sync::Mutex::new(std::collections::HashMap::new());
+        sync_forever_at_root(&crate::sync::build_client(), "http://127.0.0.1:9", &root, &config, &logger, &root.join("s.json"), &store, 1).await;
+        assert!(!root.join("_classic_beta_/Interface/AddOns/GoldCap_AppData").join(crate::luafile::RUNS_FILE_NAME).exists());
+        std::fs::remove_dir_all(&root).ok();
     }
 }
