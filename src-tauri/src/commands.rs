@@ -278,6 +278,22 @@ pub fn unpair(app: AppHandle, state: State<AppState>) -> Result<(), String> {
         }
     }
 
+    // BUY 2.0: a Forever install's lists belong to the account just unpaired, too.
+    if let Some(root) = crate::games::forever_root(&config) {
+        let retail = config.wow_retail_path.trim();
+        let retail_dir = (!retail.is_empty()).then(|| std::path::PathBuf::from(retail));
+        for game in crate::games::discover(&root, retail_dir.as_deref())
+            .into_iter()
+            .filter(|g| g.kind == crate::games::GameKind::Forever)
+        {
+            if let Err(e) = crate::luafile::remove_runs(&crate::luafile::addon_dir(&game.dir)) {
+                state
+                    .logger
+                    .error(&format!("could not remove Forever runs on unpair: {e}"));
+            }
+        }
+    }
+
     save_config(app, state, config)
 }
 

@@ -352,6 +352,12 @@ pub struct GameStatus {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ForeverState {
+    /// SavedVariables path → the keys of BUY purchases goldcap.gg has taken from that file (BUY 2.0).
+    /// Only keys still in the file are kept, so this never outgrows the file.
+    pub purchases_sent: BTreeMap<String, std::collections::BTreeSet<String>>,
+    /// SavedVariables path → the file's (mtime, length) when every purchase in it had been sent:
+    /// an unchanged file is not parsed again for purchases.
+    pub purchase_stamps: BTreeMap<String, (i64, u64)>,
     /// SavedVariables path → the fold `at` the site has had its say about.
     pub sent: BTreeMap<String, i64>,
     /// Install dir → what the Forever leg knows about it.
@@ -643,6 +649,33 @@ pub async fn sync_forever_at_root(
                 UploadOutcome::Retry(why) => logger.error(&format!("forever scan from {}: will retry ({why})", game.folder)),
             }
         }
+        // BUY 2.0: purchases made through the BUY tab in this install go up to the Forever route —
+        // never a retail one. A file is parsed again only when it changed since everything in it
+        // was sent.
+        if !token.is_empty() && !state.installs.get(&key).is_some_and(|e| e.unauthorized) {
+            for file in &game.saved_vars {
+                let file_key = file.to_string_lossy().into_owned();
+                let stamp = file_stamp(file);
+                if stamp.is_some() && state.purchase_stamps.get(&file_key).copied() == stamp {
+                    continue;
+                }
+                let mut sent = state.purchases_sent.remove(&file_key).unwrap_or_default();
+                let pass = crate::forever_runs::send_run_purchases(client, base, &token, file, &mut sent, logger).await;
+                state.purchases_sent.insert(file_key.clone(), sent);
+                match pass {
+                    crate::forever_runs::PurchasePass::Complete => {
+                        if let Some(s) = stamp {
+                            state.purchase_stamps.insert(file_key, s);
+                        }
+                    }
+                    crate::forever_runs::PurchasePass::Incomplete => {}
+                    crate::forever_runs::PurchasePass::Unauthorized => {
+                        state.installs.entry(key.clone()).or_default().unauthorized = true;
+                        break;
+                    }
+                }
+            }
+        }
         let market = state.installs.get(&key).and_then(|e| e.market.clone());
         let crowd = match &market {
             Some(slug) => refresh_crowd_at(client, base, store, &key, slug, logger, now).await,
@@ -675,6 +708,14 @@ pub async fn sync_forever_at_root(
             }
             Err(e) => logger.error(&format!("forever prices for {}: could not write ({e})", game.folder)),
         }
+        // BUY 2.0: this account's WoW: Forever lists, priced in this install's market, as Runs.lua
+        // beside AppData.lua. Only while paired and trusted; a failure keeps the previous file.
+        if can_upload {
+            let fetched = crate::runs::fetch_forever_runs(client, base, &token, market.as_deref()).await;
+            if let Err(e) = crate::runs::apply_forever_fetch_result(&crate::luafile::addon_dir(&game.dir), fetched, now) {
+                logger.error(&format!("forever runs for {}: {e}", game.folder));
+            }
+        }
     }
 
     state.games = games
@@ -692,7 +733,7 @@ pub async fn sync_forever_at_root(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const REAL: &str = include_str!("../tests/fixtures/GoldCap-forever.lua");
@@ -819,7 +860,7 @@ mod tests {
     }
 
     /// One canned HTTP answer on a local port; hands back the base URL and the raw request.
-    fn serve_once(response: String) -> (String, std::sync::mpsc::Receiver<String>) {
+    pub(crate) fn serve_once(response: String) -> (String, std::sync::mpsc::Receiver<String>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -848,7 +889,7 @@ mod tests {
     }
 
     /// Several canned answers on one local port, served to consecutive connections in order.
-    fn serve_forever(responses: Vec<String>) -> (String, std::sync::mpsc::Receiver<String>) {
+    pub(crate) fn serve_forever(responses: Vec<String>) -> (String, std::sync::mpsc::Receiver<String>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -877,7 +918,7 @@ mod tests {
         (base, rx)
     }
 
-    fn answer(status: &str, body: &str) -> String {
+    pub(crate) fn answer(status: &str, body: &str) -> String {
         format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
     }
 
@@ -1393,5 +1434,64 @@ mod tests {
         let (body, summary) = crowd.expect("GCF1 back from the stand — did you run forever:aggregate?");
         assert!(body.starts_with("GCF1;us-beta-classic-beta-pve-2-horde;90;Classic Beta PvE 2;Horde;"));
         assert!(summary.items > 1000);
+    }
+
+    #[tokio::test]
+    async fn a_paired_forever_install_gets_its_runs_beside_appdata() {
+        let root = machine("forever-runs");
+        put(&root, "_classic_beta_", REAL);
+        let config = crate::config::Config { companion_token: "tok".into(), ..crate::config::Config::default() };
+        let logger = crate::logging::Logger::new(&root.join("logs")).unwrap();
+        let store = std::sync::Mutex::new(std::collections::HashMap::new());
+        let runs = r#"{"v":3,"generatedAt":"2026-10-01T10:00:00.000Z","plan":"pro","freeLines":5,"game":"forever","runs":[{"code":"abcd2345","name":"Tailoring 1 → 100","updatedAt":"2026-10-01T09:00:00.000Z","lines":[{"itemId":2589,"qty":120,"vendor":false,"nameEn":"Linen Cloth","usual":70}]}]}"#;
+        let (base, seen) = serve_forever(vec![
+            answer("200 OK", r#"{"status":"accepted","market":"us-beta-classic-beta-pve-2-horde","items":1974,"dropped":0}"#),
+            answer("500 Internal Server Error", "{}"), // the crowd prices: not this test's business
+            answer("200 OK", runs),
+        ]);
+        sync_forever_at_root(&crate::sync::build_client(), &base, &root, &config, &logger, &root.join("s.json"), &store, 1).await;
+        let requests: Vec<String> = seen.try_iter().collect();
+        assert!(requests.iter().any(|r| r.starts_with("GET /v1/lists/companion?game=forever&market=us-beta-classic-beta-pve-2-horde ")), "{requests:?}");
+        let dir = root.join("_classic_beta_/Interface/AddOns/GoldCap_AppData");
+        let written = std::fs::read_to_string(dir.join(crate::luafile::RUNS_FILE_NAME)).unwrap();
+        assert!(written.contains("{ i = 2589, q = 120, v = false, n = 'Linen Cloth', u = 70 }"), "{written}");
+        assert!(std::fs::read_to_string(dir.join(crate::luafile::FOREVER_TOC_FILE_NAME)).unwrap().contains("\nRuns.lua\n"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn unpaired_no_runs_are_asked_for_or_written() {
+        let root = machine("forever-runs-unpaired");
+        put(&root, "_classic_beta_", REAL);
+        let config = crate::config::Config::default();
+        let logger = crate::logging::Logger::new(&root.join("logs")).unwrap();
+        let store = std::sync::Mutex::new(std::collections::HashMap::new());
+        sync_forever_at_root(&crate::sync::build_client(), "http://127.0.0.1:9", &root, &config, &logger, &root.join("s.json"), &store, 1).await;
+        assert!(!root.join("_classic_beta_/Interface/AddOns/GoldCap_AppData").join(crate::luafile::RUNS_FILE_NAME).exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_paired_forever_install_sends_its_buy_purchases_once() {
+        let root = machine("forever-buys");
+        let sv = put(&root, "_classic_beta_", r#"GoldCapDB = { client = { interface = 16001, build = "1.60.1.70009", regionId = 90 }, ledger = {
+          { key = "buyrun-a", kind = "buy", source = "goldcap_buy", itemID = 2589, qty = 53, total = 3551, runCode = "k7f3qzab", at = 1790000000 } } }"#);
+        let config = crate::config::Config { companion_token: "tok".into(), ..crate::config::Config::default() };
+        let logger = crate::logging::Logger::new(&root.join("logs")).unwrap();
+        let store = std::sync::Mutex::new(std::collections::HashMap::new());
+        let (base, seen) = serve_forever(vec![
+            answer("200 OK", r#"{"accepted":1,"stored":1}"#),
+            answer("200 OK", r#"{"v":3,"generatedAt":"2026-10-01T10:00:00.000Z","plan":"free","freeLines":5,"game":"forever","runs":[]}"#),
+        ]);
+        let state = sync_forever_at_root(&crate::sync::build_client(), &base, &root, &config, &logger, &root.join("s.json"), &store, 1).await;
+        let first: Vec<String> = seen.try_iter().collect();
+        assert!(first[0].to_ascii_lowercase().starts_with("post /v1/forever/run-purchases "), "{first:?}");
+        let key = sv.to_string_lossy().into_owned();
+        assert!(state.purchases_sent.get(&key).is_some_and(|s| s.contains("buyrun-a")));
+        assert!(state.purchase_stamps.contains_key(&key));
+        // Same file next tick: not re-read, not re-sent (nothing listens on port 9 anyway).
+        let again = sync_forever_at_root(&crate::sync::build_client(), "http://127.0.0.1:9", &root, &config, &logger, &root.join("s.json"), &store, 2).await;
+        assert!(again.purchases_sent.get(&key).is_some_and(|s| s.contains("buyrun-a")));
+        std::fs::remove_dir_all(&root).ok();
     }
 }

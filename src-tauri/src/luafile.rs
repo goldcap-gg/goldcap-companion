@@ -177,10 +177,12 @@ pub fn remove_runs(dir: &Path) -> io::Result<()> {
 /// `<Addon>_Camelot.toc` (spec, "The client"). Never written into `_retail_`.
 pub const FOREVER_TOC_FILE_NAME: &str = "GoldCap_AppData_Camelot.toc";
 
-/// The toc, with the interface the addon's passport reported, so it follows Forever patches.
+/// The toc, with the interface the addon's passport reported, so it follows Forever patches. It
+/// loads `Runs.lua` too (BUY 2.0): WoW skips a listed file that is not there, so a machine that
+/// never pairs is unaffected.
 pub fn forever_toc_contents(interface: i64) -> String {
     format!(
-        "## Interface: {interface}\n## Title: GoldCap AppData\n## Notes: Auto-synced market data for GoldCap. File is rewritten by the GoldCap companion app.\n## LoadOnDemand: 0\nAppData.lua\n"
+        "## Interface: {interface}\n## Title: GoldCap AppData\n## Notes: Auto-synced market data for GoldCap. File is rewritten by the GoldCap companion app.\n## LoadOnDemand: 0\nAppData.lua\nRuns.lua\n"
     )
 }
 
@@ -244,7 +246,8 @@ pub fn render_forever_app_data_lua(
 }
 
 /// The Forever install's `GoldCap_AppData`: its `_Camelot.toc` (written only when it differs)
-/// and `AppData.lua` (atomic). Nothing else: no retail toc, no LedgerSummary.lua, no Runs.lua.
+/// and `AppData.lua` (atomic). Nothing else: no retail toc, no LedgerSummary.lua; `Runs.lua` is written by the Forever leg
+/// itself through `runs::apply_forever_fetch_result`.
 pub fn write_forever_app_data(
     dir: &Path,
     interface: i64,
@@ -579,5 +582,14 @@ mod tests {
         assert!(!TOC_CONTENTS.contains("16001"), "retail's toc is retail's");
         // Scan results are a Forever-only key: retail's renderer has no way to write one.
         assert!(!render_app_data_lua("GCS1;eu;x;1;I:1=2", Some("GCM1;eu;1;I:1=2"), 7).contains("foreverImpact"));
+    }
+
+    #[test]
+    fn the_forever_toc_loads_runs_and_the_retail_toc_is_unchanged() {
+        assert_eq!(
+            forever_toc_contents(16001),
+            "## Interface: 16001\n## Title: GoldCap AppData\n## Notes: Auto-synced market data for GoldCap. File is rewritten by the GoldCap companion app.\n## LoadOnDemand: 0\nAppData.lua\nRuns.lua\n"
+        );
+        assert!(TOC_CONTENTS.ends_with("AppData.lua\nLedgerSummary.lua\nRuns.lua\n"));
     }
 }
