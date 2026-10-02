@@ -4,7 +4,7 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
-## 1.17.0 (unreleased)
+## 1.17.0 (2026-10-02)
 
 - WoW: Forever: your BUY lists from goldcap.gg now reach the addon in your Forever install too,
   priced from the auction house you scan, and what you buy through the BUY tab there goes back to
