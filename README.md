@@ -36,7 +36,11 @@ The complete list. Every address is ours, and nothing else is contacted.
 | Request | What for |
 | --- | --- |
 | `GET api.goldcap.gg/v1/addon/import-string` | the price string for your realm |
+| `GET api.goldcap.gg/v1/addon/region-data` | region-wide market facts for every commodity, written beside the price string |
 | `GET api.goldcap.gg/v1/addon/realms`, `/v1/addon/resolve-realm` | realm names |
+| `GET api.goldcap.gg/v1/forever/addon-data` | WoW: Forever only: every player's prices for your auction house |
+| `POST /v1/forever/scans` | WoW: Forever only: your auction house scan (realm, faction, game build and the price of each item, no names) |
+| `POST /v1/forever/run-purchases` | WoW: Forever only: what you bought in the addon's BUY tab from a list made on goldcap.gg (item, amount, price, time, character), so the list on the site shows what is done |
 | `POST api.goldcap.gg/v1/companion/claim` | trades your pairing code for a token |
 | `POST /v1/ledger/upload`, `/v1/live-observations`, `/v1/owned-lots`, `/v1/addon/item-names` | your own rows, from the addon's saved data |
 | `GET /v1/lists/companion`, `/v1/ledger/summary/companion` | what the window shows you |
@@ -56,7 +60,7 @@ Windows asks for administrator rights once while it installs, and again when you
 accept an update. A copy installed from the older `-setup.exe` installer keeps
 updating from that installer, for your user only, and needs no reinstall.
 
-**WoW: Forever.** If you also play WoW: Forever, the Companion finds that install next to retail. After each /reload it sends your Forever auction house scan to goldcap.gg (only the scan: never your ledger or characters), and it writes every player's Forever prices into the Forever install's `GoldCap_AppData`. It tells the two games apart by what the addon writes into its own save file, not by folder names. Retail works exactly as before.
+**WoW: Forever.** If you also play WoW: Forever, the Companion finds that install next to retail. Once paired, after each /reload it sends your Forever auction house scan to goldcap.gg, and what you bought in the BUY tab from a list made on goldcap.gg, so that list shows what is done; never the rest of your ledger. It writes every player's Forever prices into the Forever install's `GoldCap_AppData`. It tells the two games apart by what the addon writes into its own save file, not by folder names. Retail works exactly as before.
 
 ## Checking the file you downloaded
 
