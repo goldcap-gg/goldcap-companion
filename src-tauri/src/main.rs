@@ -30,7 +30,19 @@ use tauri::Manager;
 use tokio::sync::{mpsc, watch};
 
 fn main() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // One companion per Windows user. Launching it again (Start menu, a
+    // second shortcut) used to start a second tray app syncing the same
+    // files, and since 1.18.0 a player who installs the .msi over a copy
+    // installed from the old NSIS .exe has two installs side by side. The
+    // second launch now only brings the running one's window forward. The
+    // plugin has to be registered first to see the launch before anything
+    // else starts.
+    #[cfg(windows)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        tray::open_main_window(app);
+    }));
+    builder
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
