@@ -4,7 +4,7 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
-## 1.18.0 (unreleased)
+## 1.18.0 (2026-10-09)
 
 - On Windows the Companion now downloads as an .msi installer. It installs into Program Files,
   so Windows asks for administrator rights while it installs and when you accept an update. If
