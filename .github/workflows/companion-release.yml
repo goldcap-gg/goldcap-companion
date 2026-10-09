@@ -6,8 +6,11 @@ name: Companion Release
 #      bytes they got against the bytes a tag produced.
 #   2. The VPS downloads dir (/opt/wow-auction/downloads), served by Caddy
 #      at https://goldcap.gg/downloads/ — this is the user-facing download
-#      the site links to. Stable asset names (no version in the filename)
-#      keep those URLs permanent:
+#      the site links to. The site's buttons point at the versioned files
+#      latest.json names (the Windows one is the .msi), through its own
+#      /api/download/<platform> redirect. The old stable names, which links
+#      out in the world still use, are no longer published: the site's Caddy
+#      config redirects them to that same route.
 #        https://goldcap.gg/downloads/GoldCap-Companion-Setup.exe
 #        https://goldcap.gg/downloads/GoldCap-Companion.dmg
 #
@@ -25,8 +28,8 @@ name: Companion Release
 # owner outside the repo) — Windows SmartScreen may still warn on first run,
 # but the in-app updater verifies the signature before applying an update.
 # Each release additionally publishes updater.json plus versioned installer
-# artifacts (GoldCap-Companion_<ver>_x64-setup.exe / _universal.app.tar.gz
-# + .sig) that installed companions poll for updates. Old versioned
+# artifacts (GoldCap-Companion_<ver>_x64.msi / _x64-setup.exe /
+# _universal.app.tar.gz + .sig) that installed companions poll for updates. Old versioned
 # artifacts accumulate on the VPS downloads dir by design — see the
 # "Write the updater manifest" step for why that's load-bearing.
 on:
@@ -80,38 +83,49 @@ jobs:
           projectPath: .
           args: ${{ matrix.os == 'macos-latest' && '--target universal-apple-darwin' || '' }}
 
-      # Tauri names bundles "GoldCap Companion_<version>_<arch>-setup.exe" —
-      # copy to stable, versionless names so the site's download URLs never
-      # change across releases.
-      - name: Collect installer under a stable name (Windows)
+      # Tauri names bundles "GoldCap Companion_<version>_<arch>-setup.exe" and
+      # "GoldCap Companion_<version>_<arch>_<lang>.msi". The .msi is what new
+      # installs download: the unsigned NSIS .exe drew ML "malicious" verdicts
+      # from four engines on VirusTotal (4/71 for 1.17.0), the .msi of the
+      # same build none (0/62). The NSIS .exe is published for one reader
+      # only, the updater of copies already installed from it: it picks the
+      # installer type it was installed with, so those copies keep updating
+      # in place instead of gaining a second, per-machine copy. Nothing links
+      # to it and the GitHub Release leaves it out.
+      - name: Collect installers (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force out | Out-Null
-          Copy-Item "src-tauri/target/release/bundle/nsis/*-setup.exe" "out/GoldCap-Companion-Setup.exe"
+          $exe = @(Get-Item "src-tauri/target/release/bundle/nsis/*-setup.exe")
+          $msi = @(Get-Item "src-tauri/target/release/bundle/msi/*.msi")
+          if ($exe.Count -ne 1 -or $msi.Count -ne 1) { throw "expected one .exe and one .msi, got $($exe.Count) and $($msi.Count)" }
+          $exe = $exe[0]
+          $msi = $msi[0]
 
-          # Also collect a versioned copy + its updater signature, so the
-          # in-app updater can fetch a byte-stream that never changes under
-          # a previously-published signature (version parsed from Tauri's
-          # own bundle name so workflow_dispatch runs without a tag still
-          # produce a usable filename).
-          $exe = Get-Item "src-tauri/target/release/bundle/nsis/*-setup.exe"
+          # Version parsed from Tauri's own bundle name, so workflow_dispatch
+          # runs without a tag still produce usable filenames.
           $ver = $exe.Name -replace '^.*_([0-9][0-9.]*)_.*$', '$1'
           if ($ver -notmatch '^[0-9]') { throw "could not parse version from $($exe.Name)" }
+
+          # Versioned copies + their updater signatures, so the in-app updater
+          # fetches a byte-stream that never changes under a previously
+          # published signature.
+          Copy-Item $msi.FullName "out/GoldCap-Companion_${ver}_x64.msi"
+          Copy-Item "$($msi.FullName).sig" "out/GoldCap-Companion_${ver}_x64.msi.sig"
           Copy-Item $exe.FullName "out/GoldCap-Companion_${ver}_x64-setup.exe"
           Copy-Item "$($exe.FullName).sig" "out/GoldCap-Companion_${ver}_x64-setup.exe.sig"
 
-      - name: Collect installer under a stable name (macOS)
+      - name: Collect installers (macOS)
         if: matrix.os == 'macos-latest'
         run: |
           mkdir -p out
-          cp src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg out/GoldCap-Companion.dmg
-
-          # Also collect a versioned copy + its updater signature — same
-          # reasoning as the Windows leg above.
+          # The versioned .dmg the site's button downloads, and the updater
+          # archive + its signature: same reasoning as the Windows leg above.
           dmg=$(basename src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg)
           ver=$(printf '%s' "$dmg" | sed -E 's/^.*_([0-9][0-9.]+)_.*$/\1/')
           [[ "$ver" =~ ^[0-9] ]] || { echo "could not parse version from $dmg" >&2; exit 1; }
+          cp "src-tauri/target/universal-apple-darwin/release/bundle/dmg/$dmg" "out/GoldCap-Companion_${ver}_universal.dmg"
           appgz=(src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz)
           cp "${appgz[0]}" "out/GoldCap-Companion_${ver}_universal.app.tar.gz"
           cp "${appgz[0]}.sig" "out/GoldCap-Companion_${ver}_universal.app.tar.gz.sig"
@@ -147,17 +161,22 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          notes="Unsigned builds (no OS code signing — Windows SmartScreen will warn) — Windows NSIS installer + macOS universal DMG. Updater artifacts are minisign-signed. Public download: https://goldcap.gg/downloads/"
+          notes="Unsigned builds (no OS code signing, so Windows SmartScreen will warn): the Windows .msi and the macOS universal .dmg. Updates are minisign-signed. Public download: https://goldcap.gg/downloads/"
+          # The two installers a person downloads, and nothing else: the
+          # updater's own files (the NSIS .exe kept for older installs, the
+          # macOS .app.tar.gz, their .sig) live on the VPS only.
+          ver="${GITHUB_REF_NAME#companion-v}"
+          assets=("installers/GoldCap-Companion_${ver}_x64.msi" "installers/GoldCap-Companion_${ver}_universal.dmg")
           # Idempotent on purpose. A later step in this job can fail (the smoke
           # test did, on companion-v1.7.0), and re-running the job then died
           # here on "release already exists" — so the one recovery path this
           # job has was blocked by its own first step. Re-uploading the same
           # assets over themselves is the correct no-op.
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" installers/* \
+            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" \
               --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create "$GITHUB_REF_NAME" installers/* \
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
               --repo "$GITHUB_REPOSITORY" \
               --title "Companion ${GITHUB_REF_NAME#companion-v}" \
               --notes "$notes" \
@@ -207,24 +226,29 @@ jobs:
           # JSON (e.g. an empty `"bytes": ,`) instead of failing the step. As
           # plain assignments, a failure here exits the step non-zero before
           # any JSON is written.
-          win="installers/GoldCap-Companion-Setup.exe"
-          mac="installers/GoldCap-Companion.dmg"
-          win_bytes=$(stat -c%s "$win")
-          win_sha=$(sha256sum "$win" | cut -d' ' -f1)
-          mac_bytes=$(stat -c%s "$mac")
-          mac_sha=$(sha256sum "$mac" | cut -d' ' -f1)
+          #
+          # `file` is what the site's download buttons fetch (through its
+          # /api/download/<platform> redirect) and what its checksums block
+          # names, so it must be the versioned file this release published.
+          ver="${GITHUB_REF_NAME#companion-v}"
+          win_file="GoldCap-Companion_${ver}_x64.msi"
+          mac_file="GoldCap-Companion_${ver}_universal.dmg"
+          win_bytes=$(stat -c%s "installers/$win_file")
+          win_sha=$(sha256sum "installers/$win_file" | cut -d' ' -f1)
+          mac_bytes=$(stat -c%s "installers/$mac_file")
+          mac_sha=$(sha256sum "installers/$mac_file" | cut -d' ' -f1)
           released_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           cat > installers/latest.json <<JSON
           {
-            "version": "${GITHUB_REF_NAME#companion-v}",
+            "version": "$ver",
             "releasedAt": "$released_at",
             "windows": {
-              "file": "GoldCap-Companion-Setup.exe",
+              "file": "$win_file",
               "bytes": $win_bytes,
               "sha256": "$win_sha"
             },
             "macos": {
-              "file": "GoldCap-Companion.dmg",
+              "file": "$mac_file",
               "bytes": $mac_bytes,
               "sha256": "$mac_sha"
             }
@@ -258,11 +282,20 @@ jobs:
           # heredoc, so a failed read (e.g. a missing .sig) fails the step
           # before any JSON is written instead of silently emitting an
           # empty signature field.
+          #
+          # tauri-plugin-updater looks up `{os}-{arch}-{installer}` first and
+          # `{os}-{arch}` second; the installer comes from a marker the
+          # bundler patches into each bundle's binary. So a copy installed
+          # from the .msi gets the .msi, a copy installed from the NSIS .exe
+          # gets the .exe, and anything that cannot tell falls back to the
+          # .exe, which is what every install before 1.18.0 came from.
           ver="${GITHUB_REF_NAME#companion-v}"
           base="https://goldcap.gg/downloads"
-          win="installers/GoldCap-Companion_${ver}_x64-setup.exe"
+          exe="installers/GoldCap-Companion_${ver}_x64-setup.exe"
+          msi="installers/GoldCap-Companion_${ver}_x64.msi"
           mac="installers/GoldCap-Companion_${ver}_universal.app.tar.gz"
-          win_sig=$(cat "$win.sig")
+          exe_sig=$(cat "$exe.sig")
+          msi_sig=$(cat "$msi.sig")
           mac_sig=$(cat "$mac.sig")
           pub_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           cat > installers/updater.json <<JSON
@@ -270,7 +303,9 @@ jobs:
             "version": "$ver",
             "pub_date": "$pub_date",
             "platforms": {
-              "windows-x86_64": { "url": "$base/GoldCap-Companion_${ver}_x64-setup.exe", "signature": "$win_sig" },
+              "windows-x86_64-msi": { "url": "$base/GoldCap-Companion_${ver}_x64.msi", "signature": "$msi_sig" },
+              "windows-x86_64-nsis": { "url": "$base/GoldCap-Companion_${ver}_x64-setup.exe", "signature": "$exe_sig" },
+              "windows-x86_64": { "url": "$base/GoldCap-Companion_${ver}_x64-setup.exe", "signature": "$exe_sig" },
               "darwin-aarch64": { "url": "$base/GoldCap-Companion_${ver}_universal.app.tar.gz", "signature": "$mac_sig" },
               "darwin-x86_64": { "url": "$base/GoldCap-Companion_${ver}_universal.app.tar.gz", "signature": "$mac_sig" }
             }
@@ -315,12 +350,20 @@ jobs:
         run: |
           set -o pipefail
           bust="cb=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          # updater.json, not an installer: every release publishes it under
+          # the same name, while the installers' stable names are gone.
           curl -fsSI -H 'Cache-Control: no-cache' \
-            "https://goldcap.gg/downloads/GoldCap-Companion-Setup.exe?$bust" | head -n 5
+            "https://goldcap.gg/downloads/updater.json?$bust" | head -n 5
           if [[ "$GITHUB_REF" == refs/tags/companion-v* ]]; then
+            ver="${GITHUB_REF_NAME#companion-v}"
             curl -fsS -H 'Cache-Control: no-cache' \
               "https://goldcap.gg/downloads/updater.json?$bust" \
-              | grep -F "\"version\": \"${GITHUB_REF_NAME#companion-v}\""
+              | grep -F "\"version\": \"$ver\""
+            curl -fsS -H 'Cache-Control: no-cache' \
+              "https://goldcap.gg/downloads/latest.json?$bust" \
+              | grep -F "\"file\": \"GoldCap-Companion_${ver}_x64.msi\""
+            curl -fsSI -H 'Cache-Control: no-cache' \
+              "https://goldcap.gg/downloads/GoldCap-Companion_${ver}_x64.msi?$bust" | head -n 5
           fi
 
       # The announcement said a new build exists and nothing about what is in

@@ -36,7 +36,11 @@ The complete list. Every address is ours, and nothing else is contacted.
 | Request | What for |
 | --- | --- |
 | `GET api.goldcap.gg/v1/addon/import-string` | the price string for your realm |
+| `GET api.goldcap.gg/v1/addon/region-data` | region-wide market facts for every commodity, written beside the price string |
 | `GET api.goldcap.gg/v1/addon/realms`, `/v1/addon/resolve-realm` | realm names |
+| `GET api.goldcap.gg/v1/forever/addon-data` | WoW: Forever only: every player's prices for your auction house |
+| `POST /v1/forever/scans` | WoW: Forever only: your auction house scan (realm, faction, game build and the price of each item, no names) |
+| `POST /v1/forever/run-purchases` | WoW: Forever only: what you bought in the addon's BUY tab from a list made on goldcap.gg (item, amount, price, time, character), so the list on the site shows what is done |
 | `POST api.goldcap.gg/v1/companion/claim` | trades your pairing code for a token |
 | `POST /v1/ledger/upload`, `/v1/live-observations`, `/v1/owned-lots`, `/v1/addon/item-names` | your own rows, from the addon's saved data |
 | `GET /v1/lists/companion`, `/v1/ledger/summary/companion` | what the window shows you |
@@ -49,21 +53,27 @@ enforced by the app's own permissions file rather than by good intentions.
 
 On disk it writes two things: the price file in your `AddOns` folder, and its own
 settings and log in your user profile. It reads the GoldCap addon's saved
-variables. It installs for your user only, with no administrator prompt, and it
-never touches the game's memory or its process.
+variables. It never touches the game's memory or its process.
 
-**WoW: Forever.** If you also play WoW: Forever, the Companion finds that install next to retail. After each /reload it sends your Forever auction house scan to goldcap.gg (only the scan: never your ledger or characters), and it writes every player's Forever prices into the Forever install's `GoldCap_AppData`. It tells the two games apart by what the addon writes into its own save file, not by folder names. Retail works exactly as before.
+On Windows the installer is an `.msi`. It installs the app into Program Files, so
+Windows asks for administrator rights once while it installs, and again when you
+accept an update. A copy installed from the older `-setup.exe` installer keeps
+updating from that installer, for your user only, and needs no reinstall.
+
+**WoW: Forever.** If you also play WoW: Forever, the Companion finds that install next to retail. Once paired, after each /reload it sends your Forever auction house scan to goldcap.gg, and what you bought in the BUY tab from a list made on goldcap.gg, so that list shows what is done; never the rest of your ledger. It writes every player's Forever prices into the Forever install's `GoldCap_AppData`. It tells the two games apart by what the addon writes into its own save file, not by folder names. Retail works exactly as before.
 
 ## Checking the file you downloaded
 
 1. **Compare the hash.** Each release's SHA-256 is published at
    [goldcap.gg/downloads](https://goldcap.gg/downloads) under "Checksums", written
-   by the build itself. On Windows: `Get-FileHash .\GoldCap-Companion-Setup.exe`.
-   On macOS: `shasum -a 256 GoldCap-Companion.dmg`.
-2. **Or have it scanned before you download it.** Paste the download URL into
-   [virustotal.com](https://www.virustotal.com) → URL. Unsigned installers often
-   collect a generic "heuristic" hit or two; that is the missing signature, not a
-   finding about behaviour.
+   by the build itself. The file name carries the version, for example on
+   Windows: `Get-FileHash .\GoldCap-Companion_1.18.0_x64.msi`.
+   On macOS: `shasum -a 256 GoldCap-Companion_1.18.0_universal.dmg`.
+2. **Or have it scanned.** Upload the file itself to
+   [virustotal.com](https://www.virustotal.com) under File, or search there for
+   its SHA-256. The URL tab only checks the address against blocklists, not the
+   file. Unsigned installers can collect a generic machine-learning hit or two;
+   that is the missing signature, not a finding about behaviour.
 3. **Or build your own** and trust none of the above. With a Rust toolchain
    installed:
 

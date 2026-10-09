@@ -4,6 +4,15 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
+## 1.18.0 (2026-10-09)
+
+- On Windows the Companion now downloads as an .msi installer. It installs into Program Files,
+  so Windows asks for administrator rights while it installs and when you accept an update. If
+  you already have the Companion, keep it: it goes on updating itself as before.
+- The download's file name now says which version it is.
+- Opening the Companion on Windows while it is already running brings up its window instead of
+  starting a second one.
+
 ## 1.17.0 (2026-10-02)
 
 - WoW: Forever: your BUY lists from goldcap.gg now reach the addon in your Forever install too,
