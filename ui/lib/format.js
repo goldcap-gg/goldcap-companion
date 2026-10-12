@@ -20,14 +20,6 @@ export function countdown(until, now) {
   return `${Math.round(left / 3600)} h`;
 }
 
-export function truncateMiddle(text, max) {
-  if (text.length <= max) return text;
-  const keep = max - 1;
-  const head = Math.ceil(keep / 2);
-  const tail = keep - head;
-  return `${text.slice(0, head)}…${text.slice(text.length - tail)}`;
-}
-
 export function groupDigits(n) {
   // A thin space, not a comma: the mono digits are already wide enough.
   return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, "\u2009");
@@ -75,7 +67,7 @@ export function foreverMarketLine(g) {
 // sent (`g.impact`, only ever set when goldcap.gg answered with numbers): `{ big, label, sub }`, or
 // null when there are none — an old site, a quarantined scan — so the card shows nothing new.
 // "updated" and "in the last 24 hours" are all the counts can prove: never "confirmed", never "live".
-//   opened a market:   sub only  "You opened <market> — its first N prices are yours."
+//   opened a market:   sub only  "You opened <market>: its first N prices are yours."
 //   updated, some ours: big N, label "prices updated on <market>", sub "M of them nobody else had …"
 //   updated, none ours: big N, label only
 //   nothing updated:    sub only  "Your last scan updated no prices on <market>."
@@ -85,7 +77,7 @@ export function foreverImpactLines(g) {
   const market = foreverMarketLine(i);
   if (i.updated === 0) return { big: "", label: "", sub: `Your last scan updated no prices on ${market}.` };
   if (i.first) {
-    return { big: "", label: "", sub: `You opened ${market} — its first ${groupDigits(i.updated)} prices are yours.` };
+    return { big: "", label: "", sub: `You opened ${market}: its first ${groupDigits(i.updated)} prices are yours.` };
   }
   return {
     big: groupDigits(i.updated),

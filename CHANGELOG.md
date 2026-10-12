@@ -4,6 +4,19 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
+## 1.19.0 (unreleased)
+
+- The Companion now runs on Linux, as an AppImage. It finds World of Warcraft in the Wine
+  prefixes that Lutris, Steam (Proton), Bottles, Faugus or plain Wine keep; if yours is somewhere
+  else, pick the folder in Settings. Opening it a second time brings up the running one's window.
+- In the setup window each game's checkbox and folder line up on the left again, and the game
+  folder is shown in full there and in Settings instead of cut short in the middle. Ticking a game
+  whose folder wasn't found asks you for the folder instead of doing nothing.
+- Checkboxes, dropdowns and links in the Companion's windows now look the same on every system,
+  in GoldCap's own colours, instead of each system drawing its own.
+- With the realm set to Auto, prices follow the realm you actually played last. Before, they
+  could stay on the realm where you last created a character.
+
 ## 1.18.0 (2026-10-09)
 
 - On Windows the Companion now downloads as an .msi installer. It installs into Program Files,

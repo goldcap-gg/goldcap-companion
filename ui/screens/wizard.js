@@ -1,4 +1,4 @@
-import { truncateMiddle, formatPairCode } from "../lib/format.js";
+import { formatPairCode } from "../lib/format.js";
 
 // The install path and, when the game folders resolve to exactly one, the
 // realm all come out of the game's own files — see detect() below. Step 0
@@ -171,18 +171,26 @@ export function render(el, ctx) {
   // Retail and Forever are found, configured, and picked independently, since they may not even
   // share a drive.
   function gameFolderRow(opts) {
-    const { title, subtitle, path, checked, disabled, onToggle, onChange } = opts;
+    const { title, subtitle, path, checked, onToggle, onChange } = opts;
 
     const row = document.createElement("div");
-    row.className = "checkbox-row card stack";
+    row.className = "card stack game-choice";
 
     const top = document.createElement("label");
-    top.className = "row";
+    top.className = "checkbox-row";
     const box = document.createElement("input");
     box.type = "checkbox";
     box.checked = checked;
-    box.disabled = disabled;
-    box.addEventListener("change", () => onToggle(box.checked));
+    box.addEventListener("change", () => {
+      // A game with no folder yet is ticked by picking its folder: the picker turns it on.
+      // Unticking always just unticks, so a game left on without a folder can be turned off.
+      if (box.checked && !path) {
+        box.checked = false;
+        change.click();
+        return;
+      }
+      onToggle(box.checked);
+    });
     const body = document.createElement("div");
     body.className = "stage-body";
     const t = document.createElement("span");
@@ -197,9 +205,8 @@ export function render(el, ctx) {
     const pathRow = document.createElement("div");
     pathRow.className = "row";
     const pathLabel = document.createElement("span");
-    pathLabel.className = "mono muted";
-    pathLabel.textContent = path ? truncateMiddle(path, 38) : "Not found";
-    pathLabel.title = path;
+    pathLabel.className = "mono muted path-text";
+    pathLabel.textContent = path || "Not found";
     const pathSpacer = document.createElement("span");
     pathSpacer.className = "spacer";
     const change = document.createElement("button");
@@ -243,7 +250,7 @@ export function render(el, ctx) {
   // ---- step 0: which games ------------------------------------------------
 
   function stepGames() {
-    setHead("Which WoW do you play?", "Each game gets its own folder — pick the ones GoldCap should keep in sync.");
+    setHead("Which WoW do you play?", "Each game gets its own folder. Pick the ones GoldCap should keep in sync.");
     bodyEl.replaceChildren();
 
     const list = document.createElement("div");
@@ -251,7 +258,7 @@ export function render(el, ctx) {
 
     const hint = document.createElement("p");
     hint.className = "muted wizard-hint";
-    hint.textContent = "Only WoW: Forever? Leave Retail off — nothing else to set up.";
+    hint.textContent = "Only WoW: Forever? Leave Retail off, there is nothing else to set up.";
 
     const next = document.createElement("button");
     next.className = "btn btn-primary";
@@ -274,7 +281,6 @@ export function render(el, ctx) {
           subtitle: "Uploads your scans, brings back crowd prices",
           path: draft.foreverRootPath,
           checked: draft.foreverEnabled,
-          disabled: !draft.foreverRootPath,
           onToggle: (checked) => {
             draft.foreverEnabled = checked;
             paintNext();
@@ -295,7 +301,6 @@ export function render(el, ctx) {
           subtitle: "Realm prices, ledger",
           path: draft.wowRetailPath,
           checked: draft.retailEnabled,
-          disabled: !draft.wowRetailPath,
           onToggle: (checked) => {
             draft.retailEnabled = checked;
             paintNext();
@@ -430,7 +435,7 @@ export function render(el, ctx) {
 
       async function loadRealms() {
         const request = ++realmRequest;
-        realm.replaceChildren(new Option("— pick a realm —", ""));
+        realm.replaceChildren(new Option("Pick a realm", ""));
         try {
           const game = await ctx.api.detectGame(draft.wowRetailPath);
           if (request !== realmRequest) return;

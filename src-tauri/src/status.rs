@@ -140,7 +140,7 @@ pub fn build(
         stage(
             StageHealth::NotConnected,
             None,
-            "Not paired — nothing is uploaded",
+            "Not paired, nothing is uploaded",
             None,
         )
     } else if let Some(err) = &status.upload.last_error {
@@ -154,7 +154,7 @@ pub fn build(
         stage(
             StageHealth::NotConnected,
             None,
-            "No ledger yet — launch WoW with GoldCap",
+            "No ledger yet: launch WoW with GoldCap",
             None,
         )
     } else {

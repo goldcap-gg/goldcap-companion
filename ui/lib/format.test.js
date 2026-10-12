@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import {
   relativeTime,
   countdown,
-  truncateMiddle,
   groupDigits,
   formatPairCode,
   gameLine,
@@ -49,19 +48,6 @@ test("countdown reports an elapsed schedule as due", () => {
 
 test("countdown switches to hours past 90 minutes", () => {
   assert.equal(countdown(NOW + 2 * 3600, NOW), "2 h");
-});
-
-test("truncateMiddle keeps both ends of a long path", () => {
-  const path = "C:\\Program Files (x86)\\World of Warcraft\\_retail_";
-  const out = truncateMiddle(path, 30);
-  assert.equal(out.length, 30);
-  assert.ok(out.startsWith("C:\\Prog"));
-  assert.ok(out.endsWith("_retail_"));
-  assert.ok(out.includes("…"));
-});
-
-test("truncateMiddle leaves short text alone", () => {
-  assert.equal(truncateMiddle("/tmp/wow", 30), "/tmp/wow");
 });
 
 test("groupDigits uses thin separators", () => {
@@ -156,7 +142,7 @@ test("foreverImpactLines: the first scan on a market says the player opened it",
   assert.deepEqual(foreverImpactLines({ impact: impact({ first: true, updated: 2210, onlyYours: 2210, faction: "Horde" }) }), {
     big: "",
     label: "",
-    sub: "You opened Classic Beta PvE 2 · Horde — its first 2\u2009210 prices are yours.",
+    sub: "You opened Classic Beta PvE 2 · Horde: its first 2\u2009210 prices are yours.",
   });
 });
 

@@ -1,4 +1,4 @@
-import { truncateMiddle, formatPairCode } from "../lib/format.js";
+import { formatPairCode } from "../lib/format.js";
 
 const PRESET_INTERVALS = [15, 30, 60];
 
@@ -14,7 +14,7 @@ const PRESET_INTERVALS = [15, 30, 60];
 // keeps a keystroke in the custom-interval field, or a click on a segment,
 // from throwing focus back to <body> the way a full body.replaceChildren()
 // would.
-// How long the "Unpair — click to confirm" armed state stays live before it
+// How long the "Unpair? Click to confirm" armed state stays live before it
 // reverts on its own.
 const UNPAIR_CONFIRM_MS = 5000;
 
@@ -177,13 +177,19 @@ export function render(el, ctx) {
     function paint() {
       const path = pathKeyOf(config);
       box.checked = Boolean(config[enabledKey]);
-      box.disabled = !path;
-      pathText.textContent = path ? truncateMiddle(path, 34) : "Not found";
-      pathText.title = path || "";
+      pathText.textContent = path || "Not found";
       change.textContent = path ? "Change…" : "Choose folder…";
     }
 
     box.addEventListener("change", async () => {
+      // A game with no folder yet is ticked by picking its folder (the Change… handler below
+      // turns it on), not by a tick that would sync nothing. Unticking always just unticks,
+      // so a game left on without a folder can be turned off.
+      if (box.checked && !pathKeyOf(config)) {
+        box.checked = false;
+        change.click();
+        return;
+      }
       await persist({ [enabledKey]: box.checked });
       if (disposed) return;
       paint();
@@ -241,7 +247,7 @@ export function render(el, ctx) {
 
     const classicEra = document.createElement("p");
     classicEra.className = "hint";
-    classicEra.textContent = "Classic Era was found too — not supported by GoldCap.";
+    classicEra.textContent = "Classic Era was found too, but GoldCap does not support it.";
     games.append(classicEra);
 
     paintGames = () => {
@@ -320,7 +326,7 @@ export function render(el, ctx) {
         realm.value = config.realmSlug;
       }
       realmHint.textContent = config.realmAuto
-        ? "Follows the realm you logged into last — switch characters and prices follow."
+        ? "Follows the realm you logged into last: switch characters and prices follow."
         : "Pinned. Prices are always for this realm.";
     }
 
@@ -341,7 +347,7 @@ export function render(el, ctx) {
     let realmRequest = 0;
     loadRealms = async (path, regionValue) => {
       const gen = ++realmRequest;
-      realm.replaceChildren(new Option("Auto — my last played realm", AUTO));
+      realm.replaceChildren(new Option("Auto: my last played realm", AUTO));
 
       // The realms this install has actually logged into come first: for
       // nearly everyone their realm is one of two or three names, not one of
@@ -593,8 +599,8 @@ export function render(el, ctx) {
       state.className = "muted account-state";
       state.tabIndex = -1;
       state.textContent = paired
-        ? "Paired — your ledger uploads on every sync."
-        : "Not paired — nothing is uploaded.";
+        ? "Paired. Your ledger uploads on every sync."
+        : "Not paired. Nothing is uploaded.";
       accountBody.append(state);
 
       if (paired) {
@@ -632,7 +638,7 @@ export function render(el, ctx) {
         drop.addEventListener("click", async () => {
           if (unpairArmTimer === null) {
             drop.classList.add("btn-danger");
-            drop.textContent = "Unpair — click to confirm";
+            drop.textContent = "Unpair? Click to confirm";
             unpairArmTimer = setTimeout(disarm, UNPAIR_CONFIRM_MS);
             return;
           }

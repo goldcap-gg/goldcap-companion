@@ -340,7 +340,7 @@ pub async fn claim_code(
         .await
         .map_err(|e| format!("request failed: {}", crate::sync::describe_err(&e, crate::sync::CLIENT_TIMEOUT)))?;
     if !res.status().is_success() {
-        return Err("that code is not valid — get a fresh one on goldcap.gg/account".into());
+        return Err("that code is not valid, get a fresh one on goldcap.gg/account".into());
     }
     let body: serde_json::Value = res.json().await.map_err(|e| crate::sync::describe_err(&e, crate::sync::CLIENT_TIMEOUT))?;
     body.get("token")

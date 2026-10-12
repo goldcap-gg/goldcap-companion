@@ -16,7 +16,7 @@ pub struct GameSettings {
     /// Lowercased login portal ("eu"/"us"/...) when Config.wtf declares one.
     pub region: Option<String>,
     /// Realm display names found under WTF/Account/*/, most recently played
-    /// first (directory mtime), deduped across accounts.
+    /// first (see `last_played`), deduped across accounts.
     pub realm_names: Vec<String>,
 }
 
@@ -54,8 +54,8 @@ pub fn parse_portal(config_wtf: &str) -> Option<String> {
 
 /// Directory names under `WTF/Account/<ACCOUNT>/` are realm display names;
 /// `SavedVariables` is the one non-realm directory living at that level.
-/// Sorted by directory mtime, newest first — the realm the player logged
-/// into most recently comes out on top.
+/// Sorted by `last_played`, newest first: the realm the player logged into
+/// most recently comes out on top.
 pub fn list_realm_names(wow_retail_path: &Path) -> Vec<String> {
     let account_root = wow_retail_path.join("WTF").join("Account");
     let Ok(accounts) = fs::read_dir(&account_root) else {
@@ -79,10 +79,7 @@ pub fn list_realm_names(wow_retail_path: &Path) -> Vec<String> {
             if name == "SavedVariables" {
                 continue;
             }
-            let mtime = fs::metadata(&path)
-                .and_then(|m| m.modified())
-                .unwrap_or(SystemTime::UNIX_EPOCH);
-            found.push((name, mtime));
+            found.push((name, last_played(&path)));
         }
     }
 
@@ -94,6 +91,40 @@ pub fn list_realm_names(wow_retail_path: &Path) -> Vec<String> {
         }
     }
     names
+}
+
+/// When the player was last on a realm: the newest file under its folder (a
+/// character's `config-cache.wtf`, or an addon's SavedVariables), not the
+/// folder's own date. WoW writes those files on every logout and /reload but
+/// changes the realm folder itself only when a character is created there, so
+/// the folder's date points at the realm with the newest character, not the
+/// one played last. Three levels reach `<Realm>/<Character>/SavedVariables/*`.
+fn last_played(realm: &Path) -> SystemTime {
+    newest_modified(realm, 3)
+}
+
+fn newest_modified(path: &Path, depth: u8) -> SystemTime {
+    let mut newest = fs::metadata(path)
+        .and_then(|m| m.modified())
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    if depth == 0 {
+        return newest;
+    }
+    let Ok(entries) = fs::read_dir(path) else {
+        return newest;
+    };
+    for entry in entries.flatten() {
+        let modified = match entry.file_type() {
+            Ok(kind) if kind.is_dir() => newest_modified(&entry.path(), depth - 1),
+            Ok(_) => entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH),
+            Err(_) => continue,
+        };
+        newest = newest.max(modified);
+    }
+    newest
 }
 
 #[cfg(test)]
@@ -155,6 +186,36 @@ mod tests {
         assert!(names.contains(&"Tarren Mill".to_string()));
         assert!(names.contains(&"Silvermoon".to_string()));
         assert!(!names.contains(&"SavedVariables".to_string()));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_realm_played_last_comes_first_even_when_another_realm_folder_is_newer() {
+        // WoW dates a realm folder when a character is created on it; playing
+        // only rewrites the files inside. Draenor is the older folder but was
+        // played last, so it comes first.
+        let dir = temp_dir("last-played");
+        let account = dir.join("WTF").join("Account").join("ACC");
+        let saved = account.join("Draenor").join("Meolis").join("SavedVariables");
+        fs::create_dir_all(&saved).unwrap();
+        let file = saved.join("GoldCap.lua");
+        fs::write(&file, "GoldCapDB = {}").unwrap();
+        // So Tarren Mill's folder is strictly the newer one on any filesystem.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::create_dir_all(account.join("Tarren Mill").join("Kovaqq")).unwrap();
+        let logged_out = SystemTime::now() + std::time::Duration::from_secs(3600);
+        fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(logged_out)
+            .unwrap();
+
+        assert_eq!(
+            list_realm_names(&dir),
+            vec!["Draenor".to_string(), "Tarren Mill".to_string()]
+        );
 
         fs::remove_dir_all(&dir).ok();
     }

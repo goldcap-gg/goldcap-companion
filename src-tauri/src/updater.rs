@@ -209,6 +209,28 @@ pub async fn check_once(
     Ok(Some(announcement))
 }
 
+/// Releases are built for Windows, macOS and x86-64 Linux (companion-release.yml). Anything
+/// else, an ARM Linux machine say, runs a build of its own that no update is published for.
+const RELEASED_FOR_THIS_SYSTEM: bool = !cfg!(target_os = "linux") || cfg!(target_arch = "x86_64");
+
+/// What the Settings button says when a check fails. On a system no release is built for, every
+/// check fails with "None of the fallback platforms [...] were found in the response `platforms`
+/// object", which reads like something broke; nothing did. Where releases are built, the same
+/// error means a release's updater.json lost a platform, and that keeps its own words.
+pub fn explain(e: &tauri_plugin_updater::Error) -> String {
+    explain_for(e, RELEASED_FOR_THIS_SYSTEM)
+}
+
+fn explain_for(e: &tauri_plugin_updater::Error, released_here: bool) -> String {
+    use tauri_plugin_updater::Error;
+    match e {
+        Error::TargetNotFound(_) | Error::TargetsNotFound(_) if !released_here => {
+            "GoldCap does not publish updates for this system".to_string()
+        }
+        other => other.to_string(),
+    }
+}
+
 /// Say it where someone will see it.
 ///
 /// A tray menu item is only visible to someone who opens the tray menu, and
@@ -229,7 +251,7 @@ fn announce(app: &AppHandle, update: &UpdateView, logger: &Logger) {
             "Version {} is out, but this copy could not update itself. Open the downloads page to get it.",
             update.version
         ),
-        _ => format!("Version {} is ready — {}.", update.version, update.action.to_lowercase()),
+        _ => format!("Version {} is ready: {}.", update.version, update.action.to_lowercase()),
     };
     // Best effort by design: notification permission can be denied at the OS
     // level, and a missing toast must not cost the tray item or the banner.
@@ -257,14 +279,11 @@ pub fn apply_staged(app: &AppHandle) {
     match staged {
         None => {}
         Some(Staged::Manual { version }) => {
-            use tauri_plugin_opener::OpenerExt;
             // Keep it staged: opening a page doesn't update anything, so the
             // offer must survive the click.
             *state.staged.lock().unwrap_or_else(|p| p.into_inner()) =
                 Some(Staged::Manual { version });
-            let _ = app
-                .opener()
-                .open_url("https://goldcap.gg/downloads/", None::<&str>);
+            let _ = crate::commands::open_in_browser(app, "https://goldcap.gg/downloads/");
         }
         Some(Staged::Installed { .. }) => app.restart(),
         Some(Staged::Pending { version, update, bytes }) => {
@@ -284,6 +303,22 @@ pub fn apply_staged(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_system_without_a_published_build_is_told_so_plainly() {
+        let missing = tauri_plugin_updater::Error::TargetsNotFound(vec![
+            "linux-aarch64-deb".into(),
+            "linux-aarch64".into(),
+        ]);
+        assert_eq!(
+            explain_for(&missing, false),
+            "GoldCap does not publish updates for this system"
+        );
+        // Where releases are built, a missing platform is a broken release: say what broke.
+        assert_eq!(explain_for(&missing, true), missing.to_string());
+        let other = tauri_plugin_updater::Error::ReleaseNotFound;
+        assert_eq!(explain_for(&other, false), other.to_string());
+    }
 
     #[test]
     fn installed_label_offers_restart() {
