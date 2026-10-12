@@ -1501,6 +1501,9 @@ mod tests {
 
     // ---- Linux: Wine prefixes -----------------------------------------------
 
+    // A Wine prefix is a Unix host's folder: on Windows, joining "d:" onto a path starts a new
+    // drive-relative path instead of a folder named "d:" inside the prefix.
+    #[cfg(unix)]
     #[test]
     fn wine_path_to_host_maps_c_to_drive_c_and_other_drives_to_their_dosdevices_link() {
         let prefix = Path::new("/home/p/Games/battlenet");
@@ -1572,6 +1575,9 @@ mod tests {
         );
     }
 
+    // A Wine prefix is a Unix host's folder: on Windows, joining "d:" onto a path starts a new
+    // drive-relative path instead of a folder named "d:" inside the prefix.
+    #[cfg(unix)]
     #[test]
     fn wine_prefix_wow_candidates_reads_battlenet_files_before_the_default_folders() {
         let tmp = tempfile::tempdir().unwrap();
