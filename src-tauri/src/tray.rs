@@ -117,7 +117,7 @@ pub fn refresh(app: &AppHandle) {
     let _ = handles.status_item.set_text(&label);
     let _ = handles
         .tray
-        .set_tooltip(Some(format!("GoldCap Companion — {label}")));
+        .set_tooltip(Some(format!("GoldCap Companion: {label}")));
 }
 
 /// Shows (or re-labels) the update entry, right below the status line.

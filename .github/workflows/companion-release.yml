@@ -29,7 +29,7 @@ name: Companion Release
 # but the in-app updater verifies the signature before applying an update.
 # Each release additionally publishes updater.json plus versioned installer
 # artifacts (GoldCap-Companion_<ver>_x64.msi / _x64-setup.exe /
-# _universal.app.tar.gz + .sig) that installed companions poll for updates. Old versioned
+# _universal.app.tar.gz / _amd64.AppImage + .sig) that installed companions poll for updates. Old versioned
 # artifacts accumulate on the VPS downloads dir by design — see the
 # "Write the updater manifest" step for why that's load-bearing.
 on:
@@ -47,6 +47,11 @@ jobs:
             artifact: companion-installer-windows
           - os: macos-latest
             artifact: companion-installer-macos
+          # The oldest supported Ubuntu: an AppImage runs on systems with the
+          # glibc it was built against or newer, so building on 22.04 keeps
+          # 2022-era distributions in.
+          - os: ubuntu-22.04
+            artifact: companion-installer-linux
     runs-on: ${{ matrix.os }}
     # Comfortably above the observed run time — this caps a hung job, not a
     # merely slow one.
@@ -64,10 +69,20 @@ jobs:
         with:
           workspaces: src-tauri
 
+      # The system libraries Tauri links against on Linux: the WebKitGTK
+      # webview, the tray (appindicator) and SVG icons, plus patchelf for the
+      # AppImage.
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+
       - name: Run tests
-        # The tests are platform-independent, and the Windows leg already
-        # runs them — running them again on the macOS leg is minutes of
-        # duplicate work for the same result. Skip on macOS, keep on Windows.
+        # The tests are platform-independent apart from where each OS looks
+        # for WoW, and the Windows and Linux legs run them — running them
+        # again on the macOS leg is minutes of duplicate work for the same
+        # result. Skip on macOS, keep on Windows and Linux.
         if: matrix.os != 'macos-latest'
         working-directory: src-tauri
         run: cargo test --locked
@@ -81,7 +96,9 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: .
-          args: ${{ matrix.os == 'macos-latest' && '--target universal-apple-darwin' || '' }}
+          # Linux ships as an AppImage only: one file that runs on any
+          # distribution and is the one Linux format the updater can replace.
+          args: ${{ matrix.os == 'macos-latest' && '--target universal-apple-darwin' || matrix.os == 'ubuntu-22.04' && '--bundles appimage' || '' }}
 
       # Tauri names bundles "GoldCap Companion_<version>_<arch>-setup.exe" and
       # "GoldCap Companion_<version>_<arch>_<lang>.msi". The .msi is what new
@@ -130,6 +147,21 @@ jobs:
           cp "${appgz[0]}" "out/GoldCap-Companion_${ver}_universal.app.tar.gz"
           cp "${appgz[0]}.sig" "out/GoldCap-Companion_${ver}_universal.app.tar.gz.sig"
 
+      - name: Collect installers (Linux)
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          mkdir -p out
+          # The AppImage is both what a player downloads and what the updater
+          # replaces, so it and its signature are all there is: same naming
+          # as the other legs.
+          img=(src-tauri/target/release/bundle/appimage/*.AppImage)
+          [ "${#img[@]}" -eq 1 ] && [ -f "${img[0]}" ] || { echo "expected one .AppImage, got ${img[*]}" >&2; exit 1; }
+          name=$(basename "${img[0]}")
+          ver=$(printf '%s' "$name" | sed -E 's/^.*_([0-9][0-9.]+)_.*$/\1/')
+          [[ "$ver" =~ ^[0-9] ]] || { echo "could not parse version from $name" >&2; exit 1; }
+          cp "${img[0]}" "out/GoldCap-Companion_${ver}_amd64.AppImage"
+          cp "${img[0]}.sig" "out/GoldCap-Companion_${ver}_amd64.AppImage.sig"
+
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
@@ -161,12 +193,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          notes="Unsigned builds (no OS code signing, so Windows SmartScreen will warn): the Windows .msi and the macOS universal .dmg. Updates are minisign-signed. Public download: https://goldcap.gg/downloads/"
-          # The two installers a person downloads, and nothing else: the
+          notes="Unsigned builds (no OS code signing, so Windows SmartScreen will warn): the Windows .msi, the macOS universal .dmg and the Linux .AppImage. Updates are minisign-signed. Public download: https://goldcap.gg/downloads/"
+          # The three installers a person downloads, and nothing else: the
           # updater's own files (the NSIS .exe kept for older installs, the
           # macOS .app.tar.gz, their .sig) live on the VPS only.
           ver="${GITHUB_REF_NAME#companion-v}"
-          assets=("installers/GoldCap-Companion_${ver}_x64.msi" "installers/GoldCap-Companion_${ver}_universal.dmg")
+          assets=("installers/GoldCap-Companion_${ver}_x64.msi" "installers/GoldCap-Companion_${ver}_universal.dmg" "installers/GoldCap-Companion_${ver}_amd64.AppImage")
           # Idempotent on purpose. A later step in this job can fail (the smoke
           # test did, on companion-v1.7.0), and re-running the job then died
           # here on "release already exists" — so the one recovery path this
@@ -233,10 +265,13 @@ jobs:
           ver="${GITHUB_REF_NAME#companion-v}"
           win_file="GoldCap-Companion_${ver}_x64.msi"
           mac_file="GoldCap-Companion_${ver}_universal.dmg"
+          linux_file="GoldCap-Companion_${ver}_amd64.AppImage"
           win_bytes=$(stat -c%s "installers/$win_file")
           win_sha=$(sha256sum "installers/$win_file" | cut -d' ' -f1)
           mac_bytes=$(stat -c%s "installers/$mac_file")
           mac_sha=$(sha256sum "installers/$mac_file" | cut -d' ' -f1)
+          linux_bytes=$(stat -c%s "installers/$linux_file")
+          linux_sha=$(sha256sum "installers/$linux_file" | cut -d' ' -f1)
           released_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           cat > installers/latest.json <<JSON
           {
@@ -251,6 +286,11 @@ jobs:
               "file": "$mac_file",
               "bytes": $mac_bytes,
               "sha256": "$mac_sha"
+            },
+            "linux": {
+              "file": "$linux_file",
+              "bytes": $linux_bytes,
+              "sha256": "$linux_sha"
             }
           }
           JSON
@@ -294,9 +334,11 @@ jobs:
           exe="installers/GoldCap-Companion_${ver}_x64-setup.exe"
           msi="installers/GoldCap-Companion_${ver}_x64.msi"
           mac="installers/GoldCap-Companion_${ver}_universal.app.tar.gz"
+          img="installers/GoldCap-Companion_${ver}_amd64.AppImage"
           exe_sig=$(cat "$exe.sig")
           msi_sig=$(cat "$msi.sig")
           mac_sig=$(cat "$mac.sig")
+          img_sig=$(cat "$img.sig")
           pub_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           cat > installers/updater.json <<JSON
           {
@@ -307,7 +349,8 @@ jobs:
               "windows-x86_64-nsis": { "url": "$base/GoldCap-Companion_${ver}_x64-setup.exe", "signature": "$exe_sig" },
               "windows-x86_64": { "url": "$base/GoldCap-Companion_${ver}_x64-setup.exe", "signature": "$exe_sig" },
               "darwin-aarch64": { "url": "$base/GoldCap-Companion_${ver}_universal.app.tar.gz", "signature": "$mac_sig" },
-              "darwin-x86_64": { "url": "$base/GoldCap-Companion_${ver}_universal.app.tar.gz", "signature": "$mac_sig" }
+              "darwin-x86_64": { "url": "$base/GoldCap-Companion_${ver}_universal.app.tar.gz", "signature": "$mac_sig" },
+              "linux-x86_64": { "url": "$base/GoldCap-Companion_${ver}_amd64.AppImage", "signature": "$img_sig" }
             }
           }
           JSON

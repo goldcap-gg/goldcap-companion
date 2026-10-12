@@ -355,7 +355,7 @@ export const FIXTURES = {
       syncing: false, nextTickAt: NOW + 900, intervalMinutes: 30, version: "1.15.0",
       prices: stage("ok", NOW - 120, "Fetched from goldcap.gg"),
       addon: stage("broken", null, "The GoldCap addon is not installed"),
-      ledger: stage("notConnected", null, "No ledger yet — launch WoW with GoldCap"),
+      ledger: stage("notConnected", null, "No ledger yet: launch WoW with GoldCap"),
     },
   },
 
@@ -366,7 +366,7 @@ export const FIXTURES = {
       syncing: false, nextTickAt: NOW + 300, intervalMinutes: 30, version: "1.15.0",
       prices: stage("ok", NOW - 60, "Fetched from goldcap.gg"),
       addon: stage("ok", NOW - 60, "Written to GoldCap_AppData"),
-      ledger: stage("notConnected", null, "Not paired — nothing is uploaded"),
+      ledger: stage("notConnected", null, "Not paired, nothing is uploaded"),
     },
   },
 
@@ -377,7 +377,7 @@ export const FIXTURES = {
       syncing: false, nextTickAt: NOW + 1200, intervalMinutes: 30, version: "1.15.0",
       prices: stage("ok", NOW - 300, "Fetched from goldcap.gg"),
       addon: stage("ok", NOW - 300, "Written to GoldCap_AppData"),
-      ledger: stage("notConnected", null, "No ledger yet — launch WoW with GoldCap"),
+      ledger: stage("notConnected", null, "No ledger yet: launch WoW with GoldCap"),
     },
   },
 
@@ -410,7 +410,7 @@ export const FIXTURES = {
       syncing: false, nextTickAt: NOW + 1800, intervalMinutes: 30, version: "1.15.0",
       prices: stage("notConnected", null, "No sync yet"),
       addon: stage("notConnected", null, "No price file written yet"),
-      ledger: stage("notConnected", null, "Not paired — nothing is uploaded"),
+      ledger: stage("notConnected", null, "Not paired, nothing is uploaded"),
     },
   },
 };

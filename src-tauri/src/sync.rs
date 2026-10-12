@@ -435,8 +435,9 @@ pub async fn resolve_realm_slug(
 /// Which realm this tick is for.
 ///
 /// Pinned mode is the stored slug. Auto mode reads the realm folders WoW
-/// keeps under `WTF/Account/` — already sorted newest-first by mtime, so the
-/// first one is where the player logged in last — and resolves that name.
+/// keeps under `WTF/Account/`, already sorted by when each was last played
+/// (`wtf::list_realm_names`), so the first one is where the player logged in
+/// last, and resolves that name.
 /// That is the answer for someone who plays a couple of hours on one realm
 /// and a couple on another: the prices follow them instead of being pinned to
 /// whichever realm they happened to configure once.

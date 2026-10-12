@@ -30,6 +30,10 @@
 
 .screen-scroll {
   overflow-y: auto;
+  /* Nothing here scrolls sideways. WebKitGTK measured the sticky top bar's
+     bleed into the side padding (margin: 0 -20px) and then added that
+     padding again, and gave Settings a sideways scrollbar. */
+  overflow-x: hidden;
   scrollbar-width: thin;
   scrollbar-color: var(--border-strong) transparent;
 }
@@ -413,6 +417,9 @@
   min-width: 0;
   flex: 1 1 auto;
   cursor: default;
+  /* A whole path, wrapped wherever it has to: a Wine prefix on Linux puts
+     the game four or five folders deeper than on Windows. */
+  overflow-wrap: anywhere;
 }
 
 .segments {
@@ -453,10 +460,45 @@
   cursor: pointer;
 }
 
+/* Drawn here rather than left to each OS: WebKitGTK's own checkbox puts the tick off-centre,
+   and Windows and macOS each draw a different one, so one box everywhere. The tick's path is
+   centred in its own 10x10 box, and that box is centred in the checkbox. */
 .checkbox-row input {
-  accent-color: var(--gold);
+  appearance: none;
+  -webkit-appearance: none;
+  flex: none;
   width: 16px;
   height: 16px;
+  margin: 0;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--surface-2) center / 10px 10px no-repeat;
+  cursor: pointer;
+}
+
+.checkbox-row input:checked {
+  border-color: var(--gold);
+  background-color: var(--gold);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath d='M1.5 5.2 4 7.6 8.5 2.6' fill='none' stroke='%230a0912' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
+.checkbox-row input:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* The wizard's game card: the checkbox sits on the title's line, not between title and
+   subtitle, and the folder line starts where the title does (16px box + 8px gap). */
+.game-choice > .checkbox-row {
+  align-items: flex-start;
+}
+
+.game-choice > .checkbox-row input {
+  margin: 2px 0 0;
+}
+
+.game-choice > .row {
+  padding-left: 24px;
 }
 
 .account-state {

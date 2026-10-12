@@ -327,7 +327,7 @@ pub fn matches_wow_uninstall_entry(display_name: Option<&str>, publisher: Option
 /// wouldn't split on this dev machine (macOS) the way it does at runtime on Windows, and these
 /// helpers are unit-tested here rather than only on a Windows CI runner. Trailing separators are
 /// ignored; no separator at all yields an empty parent.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "windows", target_os = "linux")), allow(dead_code))]
 fn windows_path_split(path: &str) -> (String, String) {
     let trimmed = path.trim_end_matches(['\\', '/']);
     match trimmed.rfind(['\\', '/']) {
@@ -369,7 +369,7 @@ pub fn install_location_from_entry(
 /// numbers documented in WowUp's `product-db.ts`/`warcraft-platform.service.ts` (file paths and
 /// commit noted in the report) — no code copied from that project, which is GPL-3.0 licensed;
 /// only the field layout (a fact about the file format, not an expression) is reused.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "windows", target_os = "linux")), allow(dead_code))]
 mod protobuf {
     /// A base-128 varint starting at `data[*pos]`. Advances `*pos` past it; `None` on a
     /// truncated or unreasonably long (>10 bytes, more than a `u64` can ever need) varint.
@@ -439,7 +439,7 @@ mod protobuf {
 /// full path to that client's game folder), `Client.name` = field 13 (string, the folder name
 /// itself, e.g. `"_retail_"`/`"_classic_beta_"`).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "windows", target_os = "linux")), allow(dead_code))]
 pub struct ProductDbInstall {
     pub family: String,
     pub client_name: String,
@@ -448,7 +448,7 @@ pub struct ProductDbInstall {
 
 /// Decodes every `Product` in a `product.db` buffer. An install with no `Client.location` is
 /// dropped — nothing usable to offer as a candidate.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "windows", target_os = "linux")), allow(dead_code))]
 pub fn parse_product_db(data: &[u8]) -> Vec<ProductDbInstall> {
     let mut out = Vec::new();
     for (field, product_bytes) in protobuf::length_delimited_fields(data) {
@@ -485,7 +485,7 @@ pub fn parse_product_db(data: &[u8]) -> Vec<ProductDbInstall> {
 /// "does it actually contain a game folder" are left to the same downstream checks every other
 /// `wow_base_candidates` entry already goes through (`normalize_retail_dir`,
 /// `games::detect_games`) rather than duplicated here.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "windows", target_os = "linux")), allow(dead_code))]
 pub fn product_db_root_candidates(installs: &[ProductDbInstall]) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for install in installs {
@@ -503,7 +503,7 @@ pub fn product_db_root_candidates(installs: &[ProductDbInstall]) -> Vec<PathBuf>
 
 /// `Client.Install.DefaultInstallPath` from Battle.net's own `Battle.net.config` JSON, if
 /// present and non-empty.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "windows", target_os = "linux")), allow(dead_code))]
 pub fn default_install_path_from_battlenet_config(json: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(json).ok()?;
     value
@@ -519,7 +519,7 @@ pub fn default_install_path_from_battlenet_config(json: &str) -> Option<String> 
 /// De-duplicates a candidate list while keeping first-seen order. `case_insensitive` is a
 /// parameter rather than a `cfg` so the same logic is testable everywhere — the caller passes
 /// `cfg!(target_os = "windows")`.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "windows", target_os = "linux")), allow(dead_code))]
 pub fn dedupe_candidates(candidates: Vec<PathBuf>, case_insensitive: bool) -> Vec<PathBuf> {
     let mut seen: Vec<String> = Vec::new();
     let mut out = Vec::new();
@@ -537,7 +537,8 @@ pub fn dedupe_candidates(candidates: Vec<PathBuf>, case_insensitive: bool) -> Ve
 /// Where a WoW install's base folder may be: on Windows the registry keys Blizzard/Battle.net
 /// write, every uninstall entry that looks like a Warcraft product, Battle.net's own install
 /// database and config file, then common locations across every drive letter; on macOS the
-/// standard /Applications path (and the per-user ~/Applications one). Shared by
+/// standard /Applications path (and the per-user ~/Applications one); on Linux the same Windows
+/// search inside every Wine prefix (see `wine_prefix_candidates`). Shared by
 /// `detect_wow_retail_path` and games.rs's Forever root detection — each walks this same list
 /// independently, since Retail and Forever can sit on different drives entirely.
 #[cfg(target_os = "windows")]
@@ -650,30 +651,42 @@ fn windows_uninstall_candidates() -> Vec<PathBuf> {
     out
 }
 
-/// Reads `%ProgramData%\Battle.net\Agent\product.db` and turns it into root candidates via the
-/// pure `parse_product_db`/`product_db_root_candidates` above. Missing/unreadable file is just no
-/// candidates, same as every other best-effort source here.
-#[cfg(target_os = "windows")]
-fn windows_product_db_candidates() -> Vec<PathBuf> {
-    let Ok(program_data) = std::env::var("ProgramData") else {
-        return Vec::new();
-    };
-    let path = PathBuf::from(program_data).join("Battle.net").join("Agent").join("product.db");
+/// Reads `<program_data>\Battle.net\Agent\product.db` and turns it into root candidates via the
+/// pure `parse_product_db`/`product_db_root_candidates` above, as the Windows paths Battle.net
+/// wrote. Missing/unreadable file is just no candidates, same as every other best-effort source
+/// here. `program_data` is `%ProgramData%` on Windows and a Wine prefix's `drive_c/ProgramData`.
+#[cfg_attr(not(any(target_os = "windows", target_os = "linux")), allow(dead_code))]
+fn product_db_candidates_in(program_data: &Path) -> Vec<PathBuf> {
+    let path = program_data.join("Battle.net").join("Agent").join("product.db");
     let Ok(bytes) = fs::read(&path) else {
         return Vec::new();
     };
     product_db_root_candidates(&parse_product_db(&bytes))
 }
 
-/// Reads `%APPDATA%\Battle.net\Battle.net.config` and, when it names a default install path,
-/// returns `<that>\World of Warcraft` — the base folder Battle.net itself would install a new
-/// product under.
+/// The default install path named in `<appdata>\Battle.net\Battle.net.config`, as the Windows
+/// path Battle.net wrote. `appdata` is `%APPDATA%` on Windows and a Wine prefix user's
+/// `AppData/Roaming`.
+#[cfg_attr(not(any(target_os = "windows", target_os = "linux")), allow(dead_code))]
+fn battlenet_default_install_path_in(appdata: &Path) -> Option<String> {
+    let path = appdata.join("Battle.net").join("Battle.net.config");
+    let text = fs::read_to_string(&path).ok()?;
+    default_install_path_from_battlenet_config(&text)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_product_db_candidates() -> Vec<PathBuf> {
+    std::env::var_os("ProgramData")
+        .map(|dir| product_db_candidates_in(Path::new(&dir)))
+        .unwrap_or_default()
+}
+
+/// `<default install path>\World of Warcraft`: the base folder Battle.net itself would install a
+/// new product under.
 #[cfg(target_os = "windows")]
 fn windows_battlenet_config_candidate() -> Option<PathBuf> {
-    let appdata = std::env::var("APPDATA").ok()?;
-    let path = PathBuf::from(appdata).join("Battle.net").join("Battle.net.config");
-    let text = fs::read_to_string(&path).ok()?;
-    let install_path = default_install_path_from_battlenet_config(&text)?;
+    let appdata = std::env::var_os("APPDATA")?;
+    let install_path = battlenet_default_install_path_in(Path::new(&appdata))?;
     Some(PathBuf::from(install_path).join("World of Warcraft"))
 }
 
@@ -686,7 +699,120 @@ pub fn wow_base_candidates() -> Vec<PathBuf> {
     candidates
 }
 
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+// ---- Linux: the Windows client inside a Wine prefix ----------------------------------------
+//
+// There is no Linux client. A Linux player runs the Windows one through Wine, usually by way of
+// Lutris, Steam (Proton), Bottles or a plain `~/.wine`, and each of those keeps a whole Windows
+// drive inside a prefix folder. So the Linux search is the Windows one run inside every prefix
+// found: Battle.net's own install database and config file, then the usual Program Files folders.
+
+/// Folders that hold a Wine prefix (a `drive_c` inside), deduplicated by where they really are:
+/// `~/.steam/steam` is usually a link to `~/.local/share/Steam`, and the same prefix must not be
+/// offered twice. `$WINEPREFIX` and `~/.wine` first, then each launcher's own prefixes.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn wine_prefix_candidates(home: &Path, wineprefix: Option<&Path>) -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = wineprefix.into_iter().map(Path::to_path_buf).collect();
+    candidates.push(home.join(".wine"));
+    // Lutris gives every game its own prefix under ~/Games (Battle.net as ~/Games/battlenet).
+    candidates.extend(subdirs(&home.join("Games")));
+    for bottles in [
+        home.join(".local/share/bottles/bottles"),
+        home.join(".var/app/com.usebottles.bottles/data/bottles/bottles"),
+    ] {
+        candidates.extend(subdirs(&bottles));
+    }
+    // Battle.net added to Steam as a non-Steam game runs in a Proton prefix: compatdata/<id>/pfx.
+    for steam in [
+        home.join(".local/share/Steam"),
+        home.join(".steam/steam"),
+        home.join(".var/app/com.valvesoftware.Steam/.local/share/Steam"),
+    ] {
+        candidates.extend(subdirs(&steam.join("steamapps/compatdata")).into_iter().map(|d| d.join("pfx")));
+    }
+    candidates.extend(subdirs(&home.join("Faugus")));
+
+    let mut out: Vec<PathBuf> = Vec::new();
+    for prefix in candidates {
+        if !prefix.join("drive_c").is_dir() {
+            continue;
+        }
+        let real = fs::canonicalize(&prefix).unwrap_or(prefix);
+        if !out.contains(&real) {
+            out.push(real);
+        }
+    }
+    out
+}
+
+/// Every folder directly inside `dir`, sorted so the search order never depends on the order the
+/// filesystem lists them in. A missing or unreadable `dir` is no folders.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn subdirs(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+    out.sort();
+    out
+}
+
+/// A Windows path as Wine resolves it inside `prefix`: `C:` is the prefix's `drive_c`, any other
+/// drive the `dosdevices/<letter>:` link Wine keeps for it (`z:` is usually `/`). `None` for
+/// anything that does not start with a drive letter. Either separator is accepted, since
+/// Battle.net writes `/` in its config file and `\` in its install database.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn wine_path_to_host(prefix: &Path, windows_path: &str) -> Option<PathBuf> {
+    let windows_path = windows_path.trim();
+    let mut chars = windows_path.chars();
+    let letter = chars.next().filter(char::is_ascii_alphabetic)?.to_ascii_lowercase();
+    if chars.next() != Some(':') {
+        return None;
+    }
+    let mut host = if letter == 'c' {
+        prefix.join("drive_c")
+    } else {
+        prefix.join("dosdevices").join(format!("{letter}:"))
+    };
+    for segment in windows_path[2..].split(['\\', '/']).filter(|s| !s.is_empty()) {
+        host.push(segment);
+    }
+    Some(host)
+}
+
+/// Where WoW may be inside one Wine prefix: what Battle.net's `product.db` and each Windows user's
+/// `Battle.net.config` say, then the two Program Files folders Battle.net installs into by default.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn wine_prefix_wow_candidates(prefix: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let drive_c = prefix.join("drive_c");
+    for candidate in product_db_candidates_in(&drive_c.join("ProgramData")) {
+        out.extend(wine_path_to_host(prefix, &candidate.to_string_lossy()));
+    }
+    for user in subdirs(&drive_c.join("users")) {
+        if let Some(install_path) = battlenet_default_install_path_in(&user.join("AppData/Roaming")) {
+            out.extend(wine_path_to_host(prefix, &install_path).map(|p| p.join("World of Warcraft")));
+        }
+    }
+    out.push(drive_c.join("Program Files (x86)/World of Warcraft"));
+    out.push(drive_c.join("Program Files/World of Warcraft"));
+    out
+}
+
+/// Every Wine prefix's candidates, in prefix order (see `wine_prefix_candidates`).
+#[cfg(target_os = "linux")]
+pub fn wow_base_candidates() -> Vec<PathBuf> {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Vec::new();
+    };
+    let wineprefix = std::env::var_os("WINEPREFIX").map(PathBuf::from);
+    let candidates = wine_prefix_candidates(&home, wineprefix.as_deref())
+        .iter()
+        .flat_map(|prefix| wine_prefix_wow_candidates(prefix))
+        .collect();
+    dedupe_candidates(candidates, false)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 pub fn wow_base_candidates() -> Vec<PathBuf> {
     Vec::new()
 }
@@ -1371,5 +1497,124 @@ mod tests {
 
         let kept = dedupe_candidates(candidates, false);
         assert_eq!(kept.len(), 3, "case-sensitive mode treats differing case as distinct");
+    }
+
+    // ---- Linux: Wine prefixes -----------------------------------------------
+
+    // A Wine prefix is a Unix host's folder: on Windows, joining "d:" onto a path starts a new
+    // drive-relative path instead of a folder named "d:" inside the prefix.
+    #[cfg(unix)]
+    #[test]
+    fn wine_path_to_host_maps_c_to_drive_c_and_other_drives_to_their_dosdevices_link() {
+        let prefix = Path::new("/home/p/Games/battlenet");
+        assert_eq!(
+            wine_path_to_host(prefix, r"C:\Program Files (x86)\World of Warcraft\_retail_"),
+            Some(prefix.join("drive_c/Program Files (x86)/World of Warcraft/_retail_"))
+        );
+        assert_eq!(wine_path_to_host(prefix, "d:/Games/"), Some(prefix.join("dosdevices/d:/Games")));
+        assert_eq!(wine_path_to_host(prefix, "/home/p/wow"), None);
+        assert_eq!(wine_path_to_host(prefix, "World of Warcraft"), None);
+        assert_eq!(wine_path_to_host(prefix, ""), None);
+    }
+
+    /// A home folder laid out the way the launchers leave it: each of `prefixes` gets a `drive_c`
+    /// inside, each of `plain` is just a folder. The path is canonical, as the search returns it.
+    fn fake_home(prefixes: &[&str], plain: &[&str]) -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = fs::canonicalize(tmp.path()).unwrap();
+        for p in prefixes {
+            fs::create_dir_all(home.join(p).join("drive_c")).unwrap();
+        }
+        for p in plain {
+            fs::create_dir_all(home.join(p)).unwrap();
+        }
+        (tmp, home)
+    }
+
+    #[test]
+    fn wine_prefix_candidates_finds_every_launchers_prefixes_wineprefix_first() {
+        let (_tmp, home) = fake_home(
+            &[
+                "custom",
+                ".wine",
+                "Games/battlenet",
+                ".local/share/bottles/bottles/WoW",
+                ".local/share/Steam/steamapps/compatdata/2851239845/pfx",
+                "Faugus/battlenet",
+            ],
+            &["Games/a-native-game"],
+        );
+        let custom = home.join("custom");
+        assert_eq!(
+            wine_prefix_candidates(&home, Some(&custom)),
+            vec![
+                custom.clone(),
+                home.join(".wine"),
+                home.join("Games/battlenet"),
+                home.join(".local/share/bottles/bottles/WoW"),
+                home.join(".local/share/Steam/steamapps/compatdata/2851239845/pfx"),
+                home.join("Faugus/battlenet"),
+            ]
+        );
+    }
+
+    #[test]
+    fn wine_prefix_candidates_is_empty_on_a_machine_without_wine() {
+        let (_tmp, home) = fake_home(&[], &[".wine", "Games/a-native-game"]);
+        assert!(wine_prefix_candidates(&home, None).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_prefix_reached_through_a_link_is_offered_once() {
+        let (_tmp, home) = fake_home(&[".local/share/Steam/steamapps/compatdata/1/pfx"], &[".steam"]);
+        std::os::unix::fs::symlink(home.join(".local/share/Steam"), home.join(".steam/steam")).unwrap();
+        assert_eq!(
+            wine_prefix_candidates(&home, None),
+            vec![home.join(".local/share/Steam/steamapps/compatdata/1/pfx")]
+        );
+    }
+
+    // A Wine prefix is a Unix host's folder: on Windows, joining "d:" onto a path starts a new
+    // drive-relative path instead of a folder named "d:" inside the prefix.
+    #[cfg(unix)]
+    #[test]
+    fn wine_prefix_wow_candidates_reads_battlenet_files_before_the_default_folders() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prefix = tmp.path().join("battlenet");
+        let drive_c = prefix.join("drive_c");
+        let agent = drive_c.join("ProgramData/Battle.net/Agent");
+        fs::create_dir_all(&agent).unwrap();
+        let product = encode_product("wow", &encode_client(r"E:\WoW\_retail_", "_retail_"));
+        fs::write(agent.join("product.db"), encode_field(1, &product)).unwrap();
+        let roaming = drive_c.join("users/steamuser/AppData/Roaming/Battle.net");
+        fs::create_dir_all(&roaming).unwrap();
+        fs::write(
+            roaming.join("Battle.net.config"),
+            r#"{"Client": {"Install": {"DefaultInstallPath": "D:/Games"}}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            wine_prefix_wow_candidates(&prefix),
+            vec![
+                prefix.join("dosdevices/e:/WoW"),
+                prefix.join("dosdevices/e:/WoW/_retail_"),
+                prefix.join("dosdevices/d:/Games/World of Warcraft"),
+                drive_c.join("Program Files (x86)/World of Warcraft"),
+                drive_c.join("Program Files/World of Warcraft"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_lutris_install_in_the_default_folder_is_found_as_retail() {
+        let retail = "Games/battlenet/drive_c/Program Files (x86)/World of Warcraft/_retail_";
+        let (_tmp, home) = fake_home(&["Games/battlenet"], &[retail]);
+        let found = wine_prefix_candidates(&home, None)
+            .iter()
+            .flat_map(|prefix| wine_prefix_wow_candidates(prefix))
+            .find_map(|c| normalize_retail_dir(&c));
+        assert_eq!(found, Some(home.join(retail)));
     }
 }

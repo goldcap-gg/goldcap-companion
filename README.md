@@ -1,6 +1,6 @@
 # GoldCap Companion
 
-A small tray app for Windows and macOS that keeps the [GoldCap](https://github.com/goldcap-gg/goldcap-addon)
+A small tray app for Windows, macOS and Linux that keeps the [GoldCap](https://github.com/goldcap-gg/goldcap-addon)
 addon's auction-house prices fresh, and — if you pair it with your account —
 carries your own sales into your profit ledger on [goldcap.gg](https://goldcap.gg).
 
@@ -60,22 +60,38 @@ Windows asks for administrator rights once while it installs, and again when you
 accept an update. A copy installed from the older `-setup.exe` installer keeps
 updating from that installer, for your user only, and needs no reinstall.
 
+On Linux the download is an `.AppImage` from the
+[latest release](https://github.com/goldcap-gg/goldcap-companion/releases/latest):
+make it executable (`chmod +x`) and run it, there is nothing to install. It looks
+for World of Warcraft inside the Wine prefixes that Lutris (`~/Games`), Steam
+(Proton), Bottles, Faugus and plain Wine (`$WINEPREFIX`, `~/.wine`) keep, where
+Battle.net says it installed the game or in its default Program Files folder. If
+yours is somewhere else, pick the folder in Settings. The tray icon needs a desktop
+that shows tray icons; on GNOME that is the AppIndicator extension. If the file
+does not start and the error mentions FUSE, install `libfuse2` (`libfuse2t64` on
+Ubuntu 24.04 and later).
+
 **WoW: Forever.** If you also play WoW: Forever, the Companion finds that install next to retail. Once paired, after each /reload it sends your Forever auction house scan to goldcap.gg, and what you bought in the BUY tab from a list made on goldcap.gg, so that list shows what is done; never the rest of your ledger. It writes every player's Forever prices into the Forever install's `GoldCap_AppData`. It tells the two games apart by what the addon writes into its own save file, not by folder names. Retail works exactly as before.
 
 ## Checking the file you downloaded
 
 1. **Compare the hash.** Each release's SHA-256 is published at
    [goldcap.gg/downloads](https://goldcap.gg/downloads) under "Checksums", written
-   by the build itself. The file name carries the version, for example on
-   Windows: `Get-FileHash .\GoldCap-Companion_1.18.0_x64.msi`.
-   On macOS: `shasum -a 256 GoldCap-Companion_1.18.0_universal.dmg`.
+   by the build itself. Until that page lists the Linux file, its SHA-256 is the one
+   GitHub shows next to it on the
+   [release page](https://github.com/goldcap-gg/goldcap-companion/releases/latest).
+   The file name carries the version, for example on
+   Windows: `Get-FileHash .\GoldCap-Companion_1.19.0_x64.msi`.
+   On macOS: `shasum -a 256 GoldCap-Companion_1.19.0_universal.dmg`.
+   On Linux: `sha256sum GoldCap-Companion_1.19.0_amd64.AppImage`.
 2. **Or have it scanned.** Upload the file itself to
    [virustotal.com](https://www.virustotal.com) under File, or search there for
    its SHA-256. The URL tab only checks the address against blocklists, not the
    file. Unsigned installers can collect a generic machine-learning hit or two;
    that is the missing signature, not a finding about behaviour.
 3. **Or build your own** and trust none of the above. With a Rust toolchain
-   installed:
+   installed (on Linux, plus the system libraries from Tauri's
+   [prerequisites](https://v2.tauri.app/start/prerequisites/#linux)):
 
    ```bash
    cargo install tauri-cli --version "^2"

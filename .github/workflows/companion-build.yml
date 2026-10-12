@@ -2,9 +2,10 @@ name: Companion Build
 
 # Builds an unsigned companion binary as a downloadable artifact, on demand and
 # on every pull request. Windows is the one that matters (players run WoW there
-# and won't have a Rust toolchain); the macOS DMG is built only where it is
-# actually needed — companion-release.yml, on tagged releases — so a PR pays
-# for one runner instead of two.
+# and won't have a Rust toolchain); Linux is built too, because it is the one
+# platform whose code (finding WoW inside a Wine prefix) no other leg compiles.
+# The macOS DMG is built only where it is actually needed —
+# companion-release.yml, on tagged releases.
 on:
   workflow_dispatch:
   pull_request:
@@ -23,6 +24,8 @@ jobs:
         include:
           - os: windows-latest
             artifact: goldcap-companion-windows
+          - os: ubuntu-22.04
+            artifact: goldcap-companion-linux
     runs-on: ${{ matrix.os }}
     # Comfortably above the observed run time — this is here to stop a hung
     # job, not to fail a merely slow one.
@@ -35,6 +38,13 @@ jobs:
       - uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: src-tauri
+
+      # See companion-release.yml.
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
 
       - name: Run tests
         working-directory: src-tauri
@@ -56,6 +66,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: .
+          args: ${{ runner.os == 'Linux' && '--bundles appimage' || '' }}
 
       - name: Compile only (fork pull request — no signing key available)
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
@@ -70,4 +81,5 @@ jobs:
           path: |
             src-tauri/target/release/bundle/msi/*.msi
             src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/appimage/*.AppImage
           if-no-files-found: error

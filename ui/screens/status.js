@@ -178,7 +178,7 @@ function foreverCard(g) {
   const hint = document.createElement("p");
   hint.className = "muted";
   hint.textContent =
-    "A new scan uploads after /reload or logging out — that is when WoW writes it to disk.";
+    "A new scan uploads after /reload or logging out: that is when WoW writes it to disk.";
   card.append(hint);
 
   return { card, scanEl: scan, crowdEl: crowd };

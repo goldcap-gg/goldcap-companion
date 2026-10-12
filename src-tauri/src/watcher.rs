@@ -30,6 +30,14 @@ pub fn is_goldcap_savedvars(path: &Path) -> bool {
             .is_some_and(|d| d == "SavedVariables")
 }
 
+/// True for a `…/SavedVariables` folder itself, whose creation counts as a write. Linux's inotify
+/// watches each folder on its own, and on an account's first logout WoW creates its
+/// SavedVariables folder and writes GoldCap.lua into it at once, before the new folder can be
+/// watched: the file's own event never comes, but the folder's does.
+fn is_savedvars_dir(path: &Path) -> bool {
+    path.file_name().is_some_and(|f| f == "SavedVariables")
+}
+
 /// Debounce state: every event pushes the deadline out; the deadline firing
 /// resets the state. Pure so it can be tested without a runtime.
 #[derive(Default)]
@@ -169,7 +177,12 @@ fn build_watcher(
 ) -> Option<RecommendedWatcher> {
     let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if let Ok(event) = res {
-            for p in event.paths.iter().filter(|p| is_goldcap_savedvars(p)) {
+            let created = event.kind.is_create();
+            for p in event
+                .paths
+                .iter()
+                .filter(|p| is_goldcap_savedvars(p) || (created && is_savedvars_dir(p)))
+            {
                 let _ = event_tx.send(p.clone());
             }
         }
@@ -285,6 +298,39 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_new_savedvariables_folder_counts_as_a_write() {
+        let dir = std::env::temp_dir().join(format!(
+            "goldcap-watcher-new-folder-{}",
+            std::process::id()
+        ));
+        let account = dir.join("Account").join("ACC1");
+        std::fs::create_dir_all(&account).unwrap();
+
+        let logger_dir = dir.join("log");
+        std::fs::create_dir_all(&logger_dir).unwrap();
+        let logger = crate::logging::Logger::new(&logger_dir).unwrap();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let w = build_watcher(dir.join("Account"), tx, &logger)
+            .expect("watcher should start on an existing dir");
+
+        // A realm folder first: any new folder passing the filter would be ordered ahead of
+        // SavedVariables, the same way TSM.lua is in the test above.
+        std::fs::create_dir_all(account.join("Tarren Mill")).unwrap();
+        std::fs::create_dir_all(account.join("SavedVariables")).unwrap();
+
+        let got = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await;
+
+        drop(w);
+        std::fs::remove_dir_all(&dir).ok();
+
+        let first = got
+            .expect("no event within 10s for a new SavedVariables folder")
+            .expect("channel closed unexpectedly");
+        assert!(is_savedvars_dir(&first), "filter let another folder through: {}", first.display());
+    }
+
     #[test]
     fn the_watcher_watches_retail_as_before_plus_each_forever_install() {
         let root = std::env::temp_dir().join(format!("goldcap-watch-roots-{}", std::process::id()));
@@ -343,17 +389,19 @@ mod tests {
         // Give the failed watch attempt time to run and park.
         tokio::time::sleep(Duration::from_millis(300)).await;
 
-        // Now the path exists, so a retry would succeed — but nothing retries it yet.
+        // Now the path exists, so a retry would succeed — but nothing retries it yet. The
+        // account's folders are made here too, before the rebuild: on Linux a folder made and
+        // written into in one go races inotify (see is_savedvars_dir), and this test is about
+        // the rebuild, not that race.
         let account_root = retail.join("WTF").join("Account");
-        std::fs::create_dir_all(&account_root).unwrap();
+        let sv = account_root.join("A").join("SavedVariables");
+        std::fs::create_dir_all(&sv).unwrap();
 
         // A settings save that does not touch the WoW path at all — exactly what pairing or an
         // interval change looks like. This alone must be enough to rebuild the watcher.
         config_tx.send_modify(|c| c.interval_minutes = 45);
         tokio::time::sleep(Duration::from_millis(300)).await;
 
-        let sv = account_root.join("A").join("SavedVariables");
-        std::fs::create_dir_all(&sv).unwrap();
         std::fs::write(sv.join("GoldCap.lua"), "GoldCapDB = {}").unwrap();
 
         let got = tokio::time::timeout(Duration::from_secs(10), trigger_rx.recv()).await;

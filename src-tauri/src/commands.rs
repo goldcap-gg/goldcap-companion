@@ -55,7 +55,7 @@ pub async fn pick_forever_root(app: AppHandle) -> Result<Option<String>, String>
     let path = folder.into_path().map_err(|e| e.to_string())?;
     if !crate::games::has_game_folder(&path) {
         return Err(format!(
-            "No World of Warcraft install found under {} — pick the folder that holds your Forever client",
+            "No World of Warcraft install found under {}. Pick the folder that holds your Forever client",
             path.display()
         ));
     }
@@ -98,7 +98,7 @@ pub async fn pick_wow_path(app: AppHandle) -> Result<Option<String>, String> {
     match config::normalize_retail_dir(&path) {
         Some(retail) => Ok(Some(retail.to_string_lossy().into_owned())),
         None => Err(format!(
-            "No _retail_ folder found under {} — pick the World of Warcraft install folder",
+            "No _retail_ folder found under {}. Pick the World of Warcraft install folder",
             path.display()
         )),
     }
@@ -306,9 +306,27 @@ pub fn unpair(app: AppHandle, state: State<AppState>) -> Result<(), String> {
 /// plugin's own IPC command, which nothing here makes.
 #[tauri::command]
 pub fn open_account_page(app: AppHandle) -> Result<(), String> {
+    open_in_browser(&app, "https://goldcap.gg/account")
+}
+
+/// Opens a page in the player's browser. On Linux a browser that is not running yet starts as
+/// the companion's child, so it is started through xdg-open without what the companion's own
+/// GTK runs with (see linux_env); the opener plugin, which passes all of it on, is the fallback.
+pub fn open_in_browser(app: &AppHandle, url: &str) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut cmd = std::process::Command::new("xdg-open");
+        cmd.arg(url);
+        crate::linux_env::for_child(&mut cmd);
+        if let Ok(mut child) = cmd.spawn() {
+            // xdg-open hands the page over and exits; reap it.
+            std::thread::spawn(move || child.wait());
+            return Ok(());
+        }
+    }
     use tauri_plugin_opener::OpenerExt;
     app.opener()
-        .open_url("https://goldcap.gg/account", None::<&str>)
+        .open_url(url, None::<&str>)
         .map_err(|e| e.to_string())
 }
 
@@ -334,7 +352,7 @@ pub async fn check_for_updates(
     let logger = app.state::<AppState>().logger.clone();
     crate::updater::check_once(&app, &logger)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| crate::updater::explain(&e))
 }
 
 /// The button in that banner: apply whatever is staged (restart, run the

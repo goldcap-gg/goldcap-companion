@@ -1,6 +1,6 @@
 [package]
 name = "goldcap-companion"
-version = "1.18.0"
+version = "1.19.0"
 description = "GoldCap companion — automatic price sync for the GoldCap WoW addon"
 edition = "2021"
 rust-version = "1.77"
@@ -30,8 +30,11 @@ tauri-plugin-autostart = "2"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"
+
 # macOS already funnels a relaunch into the running process (RunEvent::Reopen
-# in main.rs); Windows starts a second one. See main.rs for why that matters.
+# in main.rs); Windows and Linux start a second one. See main.rs for why that
+# matters.
+[target.'cfg(any(windows, target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = "2"
 
 [dev-dependencies]
