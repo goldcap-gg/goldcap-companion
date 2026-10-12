@@ -4,7 +4,7 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
-## 1.19.0 (unreleased)
+## 1.19.0 (2026-10-12)
 
 - The Companion now runs on Linux, as an AppImage. It finds World of Warcraft in the Wine
   prefixes that Lutris, Steam (Proton), Bottles, Faugus or plain Wine keep; if yours is somewhere
