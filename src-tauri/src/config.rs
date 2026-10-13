@@ -722,10 +722,12 @@ pub fn wine_prefix_candidates(home: &Path, wineprefix: Option<&Path>) -> Vec<Pat
         candidates.extend(subdirs(&bottles));
     }
     // Battle.net added to Steam as a non-Steam game runs in a Proton prefix: compatdata/<id>/pfx.
+    // The Snap is the Steam that Ubuntu's App Center installs.
     for steam in [
         home.join(".local/share/Steam"),
         home.join(".steam/steam"),
         home.join(".var/app/com.valvesoftware.Steam/.local/share/Steam"),
+        home.join("snap/steam/common/.local/share/Steam"),
     ] {
         candidates.extend(subdirs(&steam.join("steamapps/compatdata")).into_iter().map(|d| d.join("pfx")));
     }
@@ -1540,6 +1542,7 @@ mod tests {
                 "Games/battlenet",
                 ".local/share/bottles/bottles/WoW",
                 ".local/share/Steam/steamapps/compatdata/2851239845/pfx",
+                "snap/steam/common/.local/share/Steam/steamapps/compatdata/3141592653/pfx",
                 "Faugus/battlenet",
             ],
             &["Games/a-native-game"],
@@ -1553,6 +1556,7 @@ mod tests {
                 home.join("Games/battlenet"),
                 home.join(".local/share/bottles/bottles/WoW"),
                 home.join(".local/share/Steam/steamapps/compatdata/2851239845/pfx"),
+                home.join("snap/steam/common/.local/share/Steam/steamapps/compatdata/3141592653/pfx"),
                 home.join("Faugus/battlenet"),
             ]
         );
