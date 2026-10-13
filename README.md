@@ -64,7 +64,8 @@ On Linux the download is an `.AppImage` from the
 [latest release](https://github.com/goldcap-gg/goldcap-companion/releases/latest):
 make it executable (`chmod +x`) and run it, there is nothing to install. It looks
 for World of Warcraft inside the Wine prefixes that Lutris (`~/Games`), Steam
-(Proton), Bottles, Faugus and plain Wine (`$WINEPREFIX`, `~/.wine`) keep, where
+(Proton, also as a Flatpak or Snap), Bottles, Faugus and plain Wine
+(`$WINEPREFIX`, `~/.wine`) keep, where
 Battle.net says it installed the game or in its default Program Files folder. If
 yours is somewhere else, pick the folder in Settings. The tray icon needs a desktop
 that shows tray icons; on GNOME that is the AppIndicator extension. If the file

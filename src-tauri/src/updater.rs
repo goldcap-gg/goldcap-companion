@@ -285,7 +285,16 @@ pub fn apply_staged(app: &AppHandle) {
                 Some(Staged::Manual { version });
             let _ = crate::commands::open_in_browser(app, "https://goldcap.gg/downloads/");
         }
-        Some(Staged::Installed { .. }) => app.restart(),
+        Some(Staged::Installed { .. }) => {
+            // This runs on the main thread (the tray menu, the window's
+            // button), where restart() starts the new process without the
+            // exit event that makes the single-instance plugin let go of its
+            // claim. Let go first, or the new one can find the claim still
+            // held, take itself for a second copy and quit.
+            #[cfg(any(windows, target_os = "linux"))]
+            tauri_plugin_single_instance::destroy(app);
+            app.restart()
+        }
         Some(Staged::Pending { version, update, bytes }) => {
             // On success the installer exits this process, so this arm only
             // continues on failure — put the update back so the tray item
