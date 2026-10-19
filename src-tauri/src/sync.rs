@@ -514,10 +514,12 @@ pub async fn sync_once(
     // good import string, and whatever it does -- 304, failure, too old -- the import
     // string below is written.
     let mut region_summary = None;
+    let mut region_retry = false;
     let (fetched_ok, sync_error) = match fetch_result {
         Ok(body) => {
-            let region_leg =
+            let (region_leg, retry) =
                 crate::region::refresh(client, &region, logger, luafile::now_unix()).await;
+            region_retry = retry;
             match write_prices(Path::new(&config.wow_retail_path), &body, region_leg) {
                 Ok(written) => {
                     region_summary = written;
@@ -558,13 +560,14 @@ pub async fn sync_once(
             None => {
                 s.last_error = None;
                 s.last_error_stage = None;
-                s.retry_soon = false;
+                // The import string made it; the whole-market payload may not have.
+                s.retry_soon = region_retry;
                 logger.info(&format!("synced {} {}", region, realm_slug));
             }
             Some(e) => {
                 s.last_error_stage = Some(e.stage());
                 s.last_error = Some(e.to_string());
-                s.retry_soon = e.is_transient();
+                s.retry_soon = e.is_transient() || region_retry;
                 logger.error(&format!("sync failed for {} {}: {e}", region, realm_slug));
             }
         }
