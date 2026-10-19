@@ -47,6 +47,16 @@ pub enum SyncErrorStage {
 }
 
 impl SyncError {
+    /// Worth trying again within minutes rather than after a whole interval: the site was
+    /// not reached, or it was briefly unwell.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            SyncError::Request(_) => true,
+            SyncError::BadStatus(code) => *code >= 500 || *code == 429,
+            SyncError::InvalidBody | SyncError::Write(_) => false,
+        }
+    }
+
     pub fn stage(&self) -> SyncErrorStage {
         match self {
             SyncError::Write(_) => SyncErrorStage::Addon,
@@ -74,6 +84,10 @@ pub struct SyncStatus {
     /// When the interval timer will next fire. Republished whenever the
     /// interval changes so the countdown never reflects a stale setting.
     pub next_tick_at: Option<SystemTime>,
+    /// The last tick failed in a way that a short wait can fix (the connection, a 5xx, a 429),
+    /// as opposed to one that would answer the same again (a 404, a bad body, a write error).
+    /// Drives the early retry in the loop.
+    pub retry_soon: bool,
     pub upload: crate::upload::UploadStats,
     /// The whole-market payload written with the last successful tick: how many items
     /// it carried and its snapshot time. `None` when none was written.
@@ -483,6 +497,7 @@ pub async fn sync_once(
         if let Ok(mut s) = status.lock() {
             s.last_error = Some(msg);
             s.last_error_stage = Some(SyncErrorStage::Prices);
+            s.retry_soon = false;
         }
         set_syncing(status, false);
         return;
@@ -543,11 +558,13 @@ pub async fn sync_once(
             None => {
                 s.last_error = None;
                 s.last_error_stage = None;
+                s.retry_soon = false;
                 logger.info(&format!("synced {} {}", region, realm_slug));
             }
             Some(e) => {
                 s.last_error_stage = Some(e.stage());
                 s.last_error = Some(e.to_string());
+                s.retry_soon = e.is_transient();
                 logger.error(&format!("sync failed for {} {}: {e}", region, realm_slug));
             }
         }
@@ -653,19 +670,54 @@ pub async fn sync_once(
 /// "not configured" into `SyncStatus`, which the tray label and the Status screen would both
 /// read as a real error rather than a game the player never turned on. Extracted from the loop
 /// below so a disabled game's silence can be tested without spinning up the whole interval timer.
+///
+/// Returns whether the tick failed in a way worth retrying soon (see `SyncStatus::retry_soon`).
 async fn run_tick(
     client: &reqwest::Client,
     config: &Config,
     status: &Arc<Mutex<SyncStatus>>,
     logger: &Logger,
     state_dir: &Path,
-) {
+) -> bool {
     if config.retail_enabled {
         sync_once(client, config, status, logger, state_dir).await;
     }
     if config.forever_enabled {
         crate::forever::sync_forever(client, config, logger, state_dir).await;
     }
+    config.retail_enabled && status.lock().unwrap_or_else(|p| p.into_inner()).retry_soon
+}
+
+/// How often the loop looks at the clocks to notice the computer has been asleep.
+const WAKE_CHECK_EVERY: Duration = Duration::from_secs(5);
+/// The wall clock running this far ahead of the monotonic one means the machine slept.
+const WAKE_JUMP: Duration = Duration::from_secs(30);
+/// After waking, wait this long for the network to come back before syncing.
+const WAKE_GRACE: Duration = Duration::from_secs(15);
+/// Waits after the first, second and later consecutive failed ticks.
+const TICK_BACKOFF: [Duration; 3] =
+    [Duration::from_secs(60), Duration::from_secs(120), Duration::from_secs(300)];
+
+/// How long to wait before the next tick: the whole interval after a success, a short backoff
+/// (1, 2, then 5 minutes) after consecutive transient failures, never longer than the interval.
+fn next_delay(interval: Duration, consecutive_failures: u32) -> Duration {
+    if consecutive_failures == 0 {
+        return interval;
+    }
+    let i = (consecutive_failures as usize - 1).min(TICK_BACKOFF.len() - 1);
+    TICK_BACKOFF[i].min(interval)
+}
+
+/// Whether the machine slept between two looks: the wall clock moved on by more than the
+/// monotonic clock did. (The monotonic clock, and with it every tokio timer, stands still
+/// while a Mac sleeps, so without this a sync waits out its remaining awake minutes.)
+fn slept_between(wall_elapsed: Duration, mono_elapsed: Duration) -> bool {
+    wall_elapsed.saturating_sub(mono_elapsed) >= WAKE_JUMP
+}
+
+/// The delay left before the next tick after a wake: the sooner of what was left and the grace.
+fn delay_after_wake(remaining: Duration) -> Duration {
+    remaining.min(WAKE_GRACE)
 }
 
 /// The sync loop: on every interval tick (recomputed from `config_rx`'s
@@ -673,6 +725,9 @@ async fn run_tick(
 /// runs one `sync_once`. `on_tick` is called after every attempt so the
 /// caller (the tray) can refresh its label without this module depending on
 /// tauri at all — keeping it plain, testable async/std code.
+///
+/// The next tick is a deadline rather than a ticker: a failed request pulls it in to a
+/// minute or two, and waking from sleep pulls it in to a few seconds.
 pub async fn run_loop(
     client: reqwest::Client,
     mut config_rx: watch::Receiver<Config>,
@@ -682,24 +737,50 @@ pub async fn run_loop(
     state_dir: std::path::PathBuf,
     on_tick: impl Fn() + Send + 'static,
 ) {
+    let mut failures: u32 = 0;
     loop {
         let config = config_rx.borrow().clone();
         let interval = config.interval();
-        let mut ticker = tokio::time::interval(interval);
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // The first tick of a (re)started loop is immediate.
+        let mut deadline = tokio::time::Instant::now();
+        let mut checker = tokio::time::interval(WAKE_CHECK_EVERY);
+        checker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut seen = (SystemTime::now(), std::time::Instant::now());
 
         loop {
             tokio::select! {
-                _ = ticker.tick() => {
-                    schedule_next_tick(&status, SystemTime::now() + interval);
-                    run_tick(&client, &config, &status, &logger, &state_dir).await;
+                _ = tokio::time::sleep_until(deadline) => {
+                    let retry = run_tick(&client, &config, &status, &logger, &state_dir).await;
+                    failures = if retry { failures.saturating_add(1) } else { 0 };
+                    let delay = next_delay(interval, failures);
+                    deadline = tokio::time::Instant::now() + delay;
+                    schedule_next_tick(&status, SystemTime::now() + delay);
+                    seen = (SystemTime::now(), std::time::Instant::now());
                     on_tick();
+                }
+                _ = checker.tick() => {
+                    let now = (SystemTime::now(), std::time::Instant::now());
+                    let wall = now.0.duration_since(seen.0).unwrap_or_default();
+                    let mono = now.1.duration_since(seen.1);
+                    seen = now;
+                    if slept_between(wall, mono) {
+                        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                        let delay = delay_after_wake(remaining);
+                        logger.info(&format!("woke from sleep, syncing in {} s", delay.as_secs()));
+                        deadline = tokio::time::Instant::now() + delay;
+                        schedule_next_tick(&status, SystemTime::now() + delay);
+                    }
                 }
                 maybe = trigger_rx.recv() => {
                     if maybe.is_none() {
                         return; // sender dropped — app is shutting down
                     }
-                    run_tick(&client, &config, &status, &logger, &state_dir).await;
+                    let retry = run_tick(&client, &config, &status, &logger, &state_dir).await;
+                    failures = if retry { failures.saturating_add(1) } else { 0 };
+                    let delay = next_delay(interval, failures);
+                    deadline = tokio::time::Instant::now() + delay;
+                    schedule_next_tick(&status, SystemTime::now() + delay);
+                    seen = (SystemTime::now(), std::time::Instant::now());
                     on_tick();
                 }
                 changed = config_rx.changed() => {
@@ -716,6 +797,55 @@ pub async fn run_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_success_waits_the_whole_interval() {
+        let i = Duration::from_secs(900);
+        assert_eq!(next_delay(i, 0), i);
+    }
+
+    #[test]
+    fn failures_back_off_one_two_then_five_minutes() {
+        let i = Duration::from_secs(1800);
+        assert_eq!(next_delay(i, 1), Duration::from_secs(60));
+        assert_eq!(next_delay(i, 2), Duration::from_secs(120));
+        assert_eq!(next_delay(i, 3), Duration::from_secs(300));
+        assert_eq!(next_delay(i, 40), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn a_backoff_never_outlasts_the_interval() {
+        let i = Duration::from_secs(60);
+        assert_eq!(next_delay(i, 1), i);
+        assert_eq!(next_delay(i, 3), i);
+    }
+
+    #[test]
+    fn a_wall_clock_jump_past_the_monotonic_one_is_a_wake() {
+        let s = Duration::from_secs;
+        assert!(slept_between(s(5 + 3600), s(5)));
+        assert!(slept_between(s(35), s(5)));
+        assert!(!slept_between(s(5), s(5)));
+        assert!(!slept_between(s(10), s(5)));
+        assert!(!slept_between(s(4), s(5)), "a clock set back is not a wake");
+    }
+
+    #[test]
+    fn a_wake_syncs_within_the_grace_but_never_later_than_planned() {
+        assert_eq!(delay_after_wake(Duration::from_secs(600)), WAKE_GRACE);
+        assert_eq!(delay_after_wake(Duration::from_secs(4)), Duration::from_secs(4));
+        assert_eq!(delay_after_wake(Duration::ZERO), Duration::ZERO);
+    }
+
+    #[test]
+    fn only_a_missed_site_or_a_5xx_or_429_is_retried_soon() {
+        assert!(SyncError::Request("reset".into()).is_transient());
+        assert!(SyncError::BadStatus(503).is_transient());
+        assert!(SyncError::BadStatus(429).is_transient());
+        assert!(!SyncError::BadStatus(404).is_transient());
+        assert!(!SyncError::InvalidBody.is_transient());
+        assert!(!SyncError::Write("disk".into()).is_transient());
+    }
 
     #[test]
     fn label_before_first_sync() {
