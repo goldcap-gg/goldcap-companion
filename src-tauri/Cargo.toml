@@ -24,6 +24,12 @@ notify = "8"
 # Blizzard's to change. The VM is built with NO stdlib and the file is loaded
 # as data, so nothing in it can reach the filesystem or the network.
 mlua = { version = "0.11", features = ["lua54", "vendored"] }
+# The addon install: the same minisign key the self-updater uses verifies a
+# small manifest, the zip is checked against the hash in it and unpacked here.
+minisign-verify = "0.2"
+base64 = "0.22"
+sha2 = "0.10"
+zip = { version = "4", default-features = false, features = ["deflate-flate2"] }
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-autostart = "2"
