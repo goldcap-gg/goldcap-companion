@@ -1,4 +1,4 @@
-use crate::addon_files::{recover, staging_dir, swap_in, unpack};
+use crate::addon_files::{recover, staging_dir, swap_steps, unpack};
 use crate::addon_folder::{decide, inspect, Decision, FolderState};
 use crate::addon_game::{wow_is_running, GameProcesses, SystemProcesses};
 use crate::addon_manifest::{
@@ -160,12 +160,20 @@ pub struct Source<'a> {
     pub pubkey: &'a str,
 }
 
-pub fn next_wait(has_waiting: bool) -> Duration {
-    if has_waiting {
-        WAITING_INTERVAL
-    } else {
-        crate::updater::CHECK_INTERVAL
+/// The wait before the next pass. An update waiting for the game is looked at
+/// again in two minutes. So is a failed one: mostly a file an antivirus scan or
+/// an Explorer window held for a moment, or a dropped connection. Each failed
+/// pass in a row doubles that wait, up to the normal cycle, so a release that
+/// keeps failing is not downloaded again every two minutes.
+pub fn next_wait(lines: &[AddonLine], failed_in_a_row: u32) -> Duration {
+    if lines.iter().any(|l| l.kind == LineKind::Waiting) {
+        return WAITING_INTERVAL;
     }
+    if lines.iter().any(|l| l.kind == LineKind::Failed) {
+        let doublings = failed_in_a_row.saturating_sub(1).min(16);
+        return (WAITING_INTERVAL * (1u32 << doublings)).min(crate::updater::CHECK_INTERVAL);
+    }
+    crate::updater::CHECK_INTERVAL
 }
 
 async fn fetch(client: &reqwest::Client, url: &str, timeout: Option<Duration>) -> Result<Vec<u8>, String> {
@@ -366,7 +374,8 @@ pub(crate) async fn run_once_with_key(
     for dir in applied {
         state.taken_over.remove(&dir);
     }
-    if !lines.iter().any(|l| l.kind == LineKind::Waiting) {
+    // A failed swap is tried again with the same verified download.
+    if !lines.iter().any(|l| matches!(l.kind, LineKind::Waiting | LineKind::Failed)) {
         *ctx.control.pending.lock().unwrap_or_else(|p| p.into_inner()) = None;
     }
     state.lines = lines.iter().map(|l| (l.dir.clone(), l.clone())).collect();
@@ -379,16 +388,31 @@ fn changed_since_checked(ctx: &Ctx<'_>, t: &Target, seen: &FolderState) -> bool 
     wow_is_running(ctx.procs) || inspect(&t.addons_dir()) != *seen
 }
 
-/// Unpack beside `AddOns` and swap in; the staging folder never outlives the call.
+/// Unpack beside `AddOns` and swap in; the staging folder never outlives the
+/// call. A failure is followed by `recover` at once: a rollback that could not
+/// put the old folder back must not leave the game without `GoldCap` until the
+/// next pass.
 fn apply(t: &Target, release: &VerifiedRelease, now: i64) -> Result<(), String> {
+    apply_steps(t, release, now, &|_| Ok(()))
+}
+
+fn apply_steps(
+    t: &Target,
+    release: &VerifiedRelease,
+    now: i64,
+    hook: &dyn Fn(crate::addon_files::SwapStep) -> std::io::Result<()>,
+) -> Result<(), String> {
     let addons = t.addons_dir();
     std::fs::create_dir_all(&addons).map_err(|e| format!("could not create {}: {e}", addons.display()))?;
     let staging = staging_dir(&addons, now);
     let result = std::fs::create_dir_all(&staging)
         .map_err(|e| format!("could not create a staging folder: {e}"))
         .and_then(|_| unpack(&release.zip, &staging))
-        .and_then(|_| swap_in(&addons, &staging.join("GoldCap"), &release.version, now));
+        .and_then(|_| swap_steps(&addons, &staging.join("GoldCap"), &release.version, now, hook));
     let _ = std::fs::remove_dir_all(&staging);
+    if result.is_err() {
+        recover(&addons);
+    }
     result
 }
 
@@ -440,9 +464,11 @@ async fn run_now(app: &AppHandle, client: &reqwest::Client) -> Vec<AddonLine> {
 pub async fn run_loop(app: AppHandle, _logger: Arc<Logger>) {
     let client = crate::sync::build_client();
     tokio::time::sleep(STARTUP_DELAY).await;
+    let mut failed_in_a_row = 0u32;
     loop {
         let lines = run_now(&app, &client).await;
-        let wait = next_wait(lines.iter().any(|l| l.kind == LineKind::Waiting));
+        failed_in_a_row = if lines.iter().any(|l| l.kind == LineKind::Failed) { failed_in_a_row.saturating_add(1) } else { 0 };
+        let wait = next_wait(&lines, failed_in_a_row);
         let control = app.state::<AddonControl>();
         tokio::select! {
             _ = tokio::time::sleep(wait) => {}
@@ -718,10 +744,73 @@ mod tests {
         assert_eq!(plan(&Foreign(None), true, &a, false), Skip(LineKind::Foreign));
     }
 
+    fn line_of(kind: LineKind) -> AddonLine {
+        AddonLine {
+            dir: "/AddOns".into(),
+            folder: "_retail_".into(),
+            game: GameKind::Retail,
+            kind,
+            installed_version: None,
+            available_version: None,
+            updated_at: None,
+            last_change: None,
+            error: None,
+        }
+    }
+
     #[test]
     fn waits_two_minutes_only_while_something_waits() {
-        assert_eq!(next_wait(true), std::time::Duration::from_secs(120));
-        assert_eq!(next_wait(false), crate::updater::CHECK_INTERVAL);
+        assert_eq!(next_wait(&[line_of(LineKind::Waiting)], 0), std::time::Duration::from_secs(120));
+        assert_eq!(next_wait(&[line_of(LineKind::Managed)], 0), crate::updater::CHECK_INTERVAL);
+        assert_eq!(next_wait(&[], 0), crate::updater::CHECK_INTERVAL);
+    }
+
+    #[test]
+    fn a_failure_is_tried_again_in_two_minutes_then_less_often() {
+        let failed = [line_of(LineKind::Managed), line_of(LineKind::Failed)];
+        let min = |m: u64| std::time::Duration::from_secs(m * 60);
+        assert_eq!(next_wait(&failed, 1), min(2));
+        assert_eq!(next_wait(&failed, 2), min(4));
+        assert_eq!(next_wait(&failed, 3), min(8));
+        assert_eq!(next_wait(&failed, 8), crate::updater::CHECK_INTERVAL);
+        assert_eq!(next_wait(&failed, u32::MAX), crate::updater::CHECK_INTERVAL);
+        // Something waiting for the game keeps the two-minute look.
+        assert_eq!(next_wait(&[line_of(LineKind::Failed), line_of(LineKind::Waiting)], 6), min(2));
+    }
+
+    fn release_0_23() -> VerifiedRelease {
+        VerifiedRelease { manifest: serde_json::from_slice(RELEASE).unwrap(), version: v(0, 23, 0), zip: ZIP.to_vec() }
+    }
+
+    #[test]
+    fn a_swap_whose_rollback_also_fails_puts_the_old_folder_back_at_once() {
+        use crate::addon_files::SwapStep;
+        let rig = Rig::new();
+        rig.hand_made("0.22.0", true);
+        let before = tree(&rig.addons().join("GoldCap"));
+        let t = &targets(&rig.config)[0];
+        let r = apply_steps(t, &release_0_23(), 1_800_000_000, &|s| match s {
+            SwapStep::MoveNewIn | SwapStep::PutOldBack => Err(std::io::Error::other("held by a scanner")),
+            _ => Ok(()),
+        });
+        assert!(r.unwrap_err().contains("held by a scanner"));
+        assert_eq!(tree(&rig.addons().join("GoldCap")), before);
+        assert_eq!(names(&rig.addons()), vec!["GoldCap"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_swap_is_tried_again_with_the_download_it_kept() {
+        use std::os::unix::fs::PermissionsExt;
+        let rig = Rig::new();
+        rig.hand_made("0.22.0", true);
+        fs::set_permissions(rig.addons(), fs::Permissions::from_mode(0o555)).unwrap();
+        let lines = rig.run(&[]).await;
+        fs::set_permissions(rig.addons(), fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(lines[0].kind, LineKind::Failed);
+        let lines = rig.run(&[]).await;
+        assert_eq!(lines[0].kind, LineKind::Managed);
+        assert_eq!(rig.server.zip_requests(), 1, "the verified download is reused");
     }
 
     // Targets.

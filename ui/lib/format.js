@@ -132,9 +132,10 @@ export function addonCard(line, now) {
         tone: "idle",
       };
     case "failed":
+      // The Companion looks again in two minutes, then less often while it keeps failing.
       return {
         title: withVersion(""),
-        detail: "The addon could not be updated. You can still get it from CurseForge or Wago.",
+        detail: `The addon could not be ${line.installedVersion ? "updated" : "installed"} this time. The Companion will try again.`,
         tone: "broken",
         error: line.error ?? "",
       };

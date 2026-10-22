@@ -217,11 +217,16 @@ test("addonCard: waiting names the version that is ready", () => {
   assert.equal(c.detail, "Addon 0.23.0 is ready, it installs when you close the game.");
 });
 
-test("addonCard: failed points to CurseForge and Wago and carries the error", () => {
+test("addonCard: failed says the Companion tries again and carries the error", () => {
   const c = addonCard(line({ kind: "failed", error: "could not move the new addon in: denied" }), NOW);
-  assert.equal(c.detail, "The addon could not be updated. You can still get it from CurseForge or Wago.");
+  assert.equal(c.detail, "The addon could not be updated this time. The Companion will try again.");
   assert.equal(c.error, "could not move the new addon in: denied");
   assert.equal(c.tone, "broken");
+});
+
+test("addonCard: a failed first install says installed, not updated", () => {
+  const c = addonCard(line({ kind: "failed", installedVersion: null, error: "timed out" }), NOW);
+  assert.equal(c.detail, "The addon could not be installed this time. The Companion will try again.");
 });
 
 test("addonCard: no card when the companion does not manage the addon", () => {

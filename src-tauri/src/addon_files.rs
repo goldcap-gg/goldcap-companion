@@ -100,6 +100,7 @@ pub enum SwapStep {
     WriteMarker,
     MoveOldAside,
     MoveNewIn,
+    PutOldBack,
     DeleteOld,
 }
 
@@ -128,12 +129,9 @@ fn rename_retry(from: &Path, to: &Path) -> io::Result<()> {
 /// `staged_top` is `<staging>/GoldCap`. The marker goes into the staged folder
 /// first, so after any crash `GoldCap` is either the old folder or the new one,
 /// each with its marker. Then old aside, new in, old deleted; a failure before
-/// the delete puts the old folder back.
-pub fn swap_in(addons_dir: &Path, staged_top: &Path, version: &Version, now: i64) -> Result<(), String> {
-    swap_steps(addons_dir, staged_top, version, now, &|_| Ok(()))
-}
-
-fn swap_steps(
+/// the delete puts the old folder back. `hook` runs before each step: the
+/// installer passes one that does nothing, tests fail a step through it.
+pub fn swap_steps(
     addons_dir: &Path,
     staged_top: &Path,
     version: &Version,
@@ -154,7 +152,7 @@ fn swap_steps(
     }
     if let Err(e) = hook(SwapStep::MoveNewIn).and_then(|_| rename_retry(staged_top, &live)) {
         if had_old {
-            let _ = rename_retry(&aside, &live);
+            let _ = hook(SwapStep::PutOldBack).and_then(|_| rename_retry(&aside, &live));
         }
         return Err(format!("could not move the new addon in: {e}"));
     }
@@ -231,6 +229,10 @@ mod tests {
             ("GoldCap/GoldCap.toc", b"## Version: addon-v0.23.0\n"),
             ("GoldCap/Core/a.lua", b"local a = 1\n"),
         ]
+    }
+
+    fn swap_in(addons_dir: &Path, staged_top: &Path, version: &Version, now: i64) -> Result<(), String> {
+        swap_steps(addons_dir, staged_top, version, now, &|_| Ok(()))
     }
 
     fn unpack_to_temp(zip: &[u8]) -> (tempfile::TempDir, Result<(), String>) {
