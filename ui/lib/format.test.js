@@ -227,6 +227,16 @@ test("addonCard: waiting names the version that is ready", () => {
   assert.equal(c.detail, "Addon 0.23.0 is ready, it installs when you close the game.");
 });
 
+test("addonCard: waiting because the game cannot be checked says so, not that the game is open", () => {
+  const c = addonCard(
+    line({ kind: "waiting", installedVersion: null, availableVersion: "0.23.0", error: "the list of running programs cannot be read: denied" }),
+    NOW,
+  );
+  assert.equal(c.detail, "Addon 0.23.0 is ready. The Companion cannot tell whether the game is open, so it waits.");
+  assert.equal(c.error, "the list of running programs cannot be read: denied");
+  assert.equal(c.tone, "idle");
+});
+
 test("addonCard: failed says the Companion tries again and carries the error", () => {
   const c = addonCard(line({ kind: "failed", error: "could not move the new addon in: denied" }), NOW);
   assert.equal(c.detail, "The addon could not be updated this time. The Companion will try again.");

@@ -307,7 +307,10 @@ pub(crate) async fn run_once_with_key(
         }
     }
     let ready = wanted && download_error.is_none();
-    let game_running = ready && wow_is_running(ctx.procs);
+    let listing = if ready { wow_is_running(ctx.procs) } else { Ok(false) };
+    let game_running = listing != Ok(false);
+    // Why the game cannot be checked, shown on a card that waits because of it.
+    let cannot_tell = listing.err();
 
     let mut lines = Vec::new();
     let mut applied = Vec::new();
@@ -329,11 +332,15 @@ pub(crate) async fn run_once_with_key(
                     LineKind::Waiting => ctx.logger.info(&format!(
                         "addon: {} update {available} waits for the game to close{}",
                         t.folder,
-                        held.as_deref().map(|h| format!(" ({h})")).unwrap_or_default()
+                        held.as_deref().or(cannot_tell.as_deref()).map(|h| format!(" ({h})")).unwrap_or_default()
                     )),
                     _ => {}
                 }
-                base_line(t, kind, folder_state, Some(&available), prev.as_ref())
+                let mut l = base_line(t, kind, folder_state, Some(&available), prev.as_ref());
+                if kind == LineKind::Waiting {
+                    l.error = cannot_tell.clone();
+                }
+                l
             }
             Action::Apply(decision) => match (&release, &download_error) {
                 (Some(r), None) if already_in_place(t, r, &in_place) => {
@@ -424,7 +431,9 @@ fn managed_line(
 
 /// Looked at again right before the swap: the folder and the game as they are now.
 fn changed_since_checked(ctx: &Ctx<'_>, t: &Target, seen: &FolderState) -> bool {
-    wow_is_running(ctx.procs) || ctx.procs.exe_in_use(&t.game_dir).is_some() || inspect(&t.addons_dir()) != *seen
+    wow_is_running(ctx.procs) != Ok(false)
+        || ctx.procs.exe_in_use(&t.game_dir).is_some()
+        || inspect(&t.addons_dir()) != *seen
 }
 
 /// Unpack beside `AddOns` and swap in; the staging folder never outlives the
@@ -1008,6 +1017,30 @@ mod tests {
         assert_eq!(lines[0].kind, LineKind::Managed);
         assert!(rig.addons().join("GoldCap/Core/a.lua").exists());
         assert_eq!(rig.server.zip_requests(), 1, "the kept download is reused");
+    }
+
+    struct NoListing;
+
+    impl GameProcesses for NoListing {
+        fn executables(&self) -> std::io::Result<Vec<String>> {
+            Err(std::io::Error::other("tasklist is blocked"))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_process_list_that_cannot_be_read_waits_and_says_why() {
+        let rig = Rig::new();
+        rig.hand_made("0.22.0", true);
+        let before = tree(&rig.addons());
+        let lines = rig.run_with(&NoListing).await;
+        assert_eq!(lines[0].kind, LineKind::Waiting);
+        assert!(lines[0].error.as_deref().is_some_and(|e| e.contains("tasklist is blocked")), "{:?}", lines[0].error);
+        assert_eq!(tree(&rig.addons()), before);
+        let log = fs::read_to_string(rig.logger_file()).unwrap();
+        assert!(log.contains("tasklist is blocked"), "{log}");
+        // A game that is simply running carries no such reason.
+        let lines = rig.run(&["Wow.exe"]).await;
+        assert_eq!((lines[0].kind, lines[0].error.as_deref()), (LineKind::Waiting, None));
     }
 
     #[tokio::test]

@@ -134,21 +134,24 @@ fn parse_tasklist(out: &str) -> Vec<String> {
         .collect()
 }
 
-/// True when any WoW client runs. A listing that cannot be read also counts
-/// as running: nothing is swapped when it is unknown whether the game is open.
-pub fn wow_is_running(p: &dyn GameProcesses) -> bool {
-    let Ok(list) = p.executables() else { return true };
+/// Whether any WoW client runs, or why that cannot be told. Every caller
+/// treats `Err` as running: nothing is swapped when it is unknown whether the
+/// game is open, and the reason goes to the card instead of blaming the game.
+pub fn wow_is_running(p: &dyn GameProcesses) -> Result<bool, String> {
+    let list = p
+        .executables()
+        .map_err(|e| format!("the list of running programs cannot be read: {e}"))?;
     // A process list with nothing in it is a failed read, not a quiet machine.
     if list.is_empty() {
-        return true;
+        return Err("the list of running programs came back empty".to_string());
     }
-    list.iter().any(|entry| {
+    Ok(list.iter().any(|entry| {
         let lower = entry.trim().to_ascii_lowercase();
         let base = lower.rsplit(['/', '\\']).next().unwrap_or(&lower).trim();
         WOW_PROCESS_NAMES.contains(&base)
             || (base.starts_with("world of warcraft") && !base.contains("launcher"))
             || names_a_windows_client(&lower)
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -168,7 +171,7 @@ mod tests {
     }
 
     fn running(names: &[&'static str]) -> bool {
-        wow_is_running(&Fake(Ok(names.to_vec())))
+        wow_is_running(&Fake(Ok(names.to_vec()))).unwrap()
     }
 
     #[test]
@@ -207,8 +210,8 @@ mod tests {
     }
 
     #[test]
-    fn a_listing_that_fails_counts_as_running() {
-        assert!(wow_is_running(&Fake(Err(()))));
+    fn a_listing_that_fails_cannot_tell_and_says_why() {
+        assert!(wow_is_running(&Fake(Err(()))).unwrap_err().contains("no listing"));
     }
 
     #[test]
@@ -231,8 +234,8 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_listing_counts_as_running() {
-        assert!(running(&[]));
+    fn an_empty_listing_cannot_tell() {
+        assert!(wow_is_running(&Fake(Ok(vec![]))).is_err());
     }
 
     #[test]

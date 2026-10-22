@@ -140,6 +140,15 @@ export function addonCard(line, now) {
         tone: "idle",
       };
     case "waiting":
+      // An error here says why the Companion could not check the game, so the card does not blame the game.
+      if (line.error) {
+        return {
+          title: withVersion(""),
+          detail: `Addon ${line.availableVersion} is ready. The Companion cannot tell whether the game is open, so it waits.`,
+          tone: "idle",
+          error: line.error,
+        };
+      }
       return {
         title: withVersion(""),
         detail: `Addon ${line.availableVersion} is ready, it installs when you close the game.`,
