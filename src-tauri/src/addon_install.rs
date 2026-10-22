@@ -306,13 +306,18 @@ pub(crate) async fn run_once_with_key(
             },
         }
     }
-    let game_running = wanted && download_error.is_none() && wow_is_running(ctx.procs);
+    let ready = wanted && download_error.is_none();
+    let game_running = ready && wow_is_running(ctx.procs);
 
     let mut lines = Vec::new();
     let mut applied = Vec::new();
     for (t, folder_state) in targets.iter().zip(&folders) {
         let prev = state.lines.get(&key(t)).cloned();
-        let line = match plan(folder_state, taken(t), &available, game_running) {
+        // A client the name list does not know still holds its exe in this install.
+        let held = (ready && !game_running && matches!(plan(folder_state, taken(t), &available, false), Action::Apply(_)))
+            .then(|| ctx.procs.exe_in_use(&t.game_dir))
+            .flatten();
+        let line = match plan(folder_state, taken(t), &available, game_running || held.is_some()) {
             Action::Skip(kind) => {
                 match kind {
                     LineKind::Foreign => ctx.logger.info(&format!(
@@ -320,8 +325,9 @@ pub(crate) async fn run_once_with_key(
                         t.folder
                     )),
                     LineKind::Waiting => ctx.logger.info(&format!(
-                        "addon: {} update {available} waits for the game to close",
-                        t.folder
+                        "addon: {} update {available} waits for the game to close{}",
+                        t.folder,
+                        held.as_deref().map(|h| format!(" ({h})")).unwrap_or_default()
                     )),
                     _ => {}
                 }
@@ -385,7 +391,7 @@ pub(crate) async fn run_once_with_key(
 
 /// Looked at again right before the swap: the folder and the game as they are now.
 fn changed_since_checked(ctx: &Ctx<'_>, t: &Target, seen: &FolderState) -> bool {
-    wow_is_running(ctx.procs) || inspect(&t.addons_dir()) != *seen
+    wow_is_running(ctx.procs) || ctx.procs.exe_in_use(&t.game_dir).is_some() || inspect(&t.addons_dir()) != *seen
 }
 
 /// Unpack beside `AddOns` and swap in; the staging folder never outlives the
@@ -619,6 +625,25 @@ mod tests {
                 }
             }
             Ok(out)
+        }
+    }
+
+    /// Lists no client by name, but an exe in `dir` is held open from the
+    /// `from`th look on (0 is the first).
+    struct HeldExe {
+        dir: PathBuf,
+        from: usize,
+        looks: std::sync::atomic::AtomicUsize,
+    }
+
+    impl GameProcesses for HeldExe {
+        fn executables(&self) -> std::io::Result<Vec<String>> {
+            Ok(vec!["explorer.exe".to_string()])
+        }
+
+        fn exe_in_use(&self, game_dir: &Path) -> Option<String> {
+            let look = self.looks.fetch_add(1, Ordering::SeqCst);
+            (game_dir == self.dir && look >= self.from).then(|| "WowNewClient.exe is in use".to_string())
         }
     }
 
@@ -937,6 +962,32 @@ mod tests {
         let lines = rig.run(&[]).await;
         assert_eq!(lines[0].kind, LineKind::Managed);
         assert_eq!(rig.server.zip_requests(), 1, "the staged download is kept");
+    }
+
+    #[tokio::test]
+    async fn an_exe_held_in_the_game_folder_counts_as_the_game_running() {
+        let rig = Rig::new();
+        rig.hand_made("0.22.0", true);
+        let before = tree(&rig.addons());
+        let held = HeldExe { dir: rig.retail.clone(), from: 0, looks: Default::default() };
+        let lines = rig.run_with(&held).await;
+        assert_eq!(lines[0].kind, LineKind::Waiting);
+        assert_eq!(tree(&rig.addons()), before);
+        let log = fs::read_to_string(rig.logger_file()).unwrap();
+        assert!(log.contains("WowNewClient.exe is in use"), "{log}");
+        let lines = rig.run(&[]).await;
+        assert_eq!(lines[0].kind, LineKind::Managed);
+    }
+
+    #[tokio::test]
+    async fn an_exe_held_once_the_download_is_done_stops_the_swap() {
+        let rig = Rig::new();
+        rig.hand_made("0.22.0", true);
+        let before = tree(&rig.addons());
+        let held = HeldExe { dir: rig.retail.clone(), from: 1, looks: Default::default() };
+        let lines = rig.run_with(&held).await;
+        assert_eq!(lines[0].kind, LineKind::Waiting);
+        assert_eq!(tree(&rig.addons()), before);
     }
 
     #[tokio::test]
