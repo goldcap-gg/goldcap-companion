@@ -320,6 +320,16 @@ pub(crate) async fn run_once_with_key(
                 base_line(t, kind, folder_state, Some(&available), prev.as_ref())
             }
             Action::Apply(decision) => match (&release, &download_error) {
+                (Some(r), None) if changed_since_checked(ctx, t, folder_state) => {
+                    // The download can take minutes: a game that started or a folder
+                    // another installer touched meanwhile means nothing is swapped now.
+                    // The verified download stays in `pending` for the next pass.
+                    ctx.logger.info(&format!(
+                        "addon: {} the game or the GoldCap folder changed while the update was downloading, keeping {} staged for the next pass",
+                        t.folder, r.version
+                    ));
+                    base_line(t, LineKind::Waiting, folder_state, Some(&available), prev.as_ref())
+                }
                 (Some(r), None) => {
                     match apply(t, r, now) {
                         Ok(()) => {
@@ -362,6 +372,11 @@ pub(crate) async fn run_once_with_key(
     state.lines = lines.iter().map(|l| (l.dir.clone(), l.clone())).collect();
     save(&state, state_path, ctx.logger);
     lines
+}
+
+/// Looked at again right before the swap: the folder and the game as they are now.
+fn changed_since_checked(ctx: &Ctx<'_>, t: &Target, seen: &FolderState) -> bool {
+    wow_is_running(ctx.procs) || inspect(&t.addons_dir()) != *seen
 }
 
 /// Unpack beside `AddOns` and swap in; the staging folder never outlives the call.
@@ -560,6 +575,27 @@ mod tests {
         }
     }
 
+    /// Lists no game on the first look; on every later look it first runs `then`
+    /// and lists the game as running when `game_after` is set.
+    struct Flips {
+        looks: std::sync::atomic::AtomicUsize,
+        then: Box<dyn Fn() + Send + Sync>,
+        game_after: bool,
+    }
+
+    impl GameProcesses for Flips {
+        fn executables(&self) -> std::io::Result<Vec<String>> {
+            let mut out = vec!["explorer.exe".to_string()];
+            if self.looks.fetch_add(1, Ordering::SeqCst) > 0 {
+                (self.then)();
+                if self.game_after {
+                    out.push("Wow.exe".to_string());
+                }
+            }
+            Ok(out)
+        }
+    }
+
     struct Rig {
         _tmp: tempfile::TempDir,
         server: Server,
@@ -596,6 +632,10 @@ mod tests {
             self.retail.join("Interface/AddOns")
         }
 
+        fn logger_file(&self) -> PathBuf {
+            self.state_path.parent().unwrap().join(crate::logging::LOG_FILE_NAME)
+        }
+
         fn key(&self) -> String {
             self.addons().to_string_lossy().to_string()
         }
@@ -621,8 +661,11 @@ mod tests {
             // A real machine always lists some processes; an empty list means "unknown".
             let mut all = vec!["explorer.exe"];
             all.extend_from_slice(procs);
-            let procs = Procs(all);
-            let ctx = Ctx { client: &crate::sync::build_client(), procs: &procs, control: &self.control, logger: &self.logger };
+            self.run_with(&Procs(all)).await
+        }
+
+        async fn run_with(&self, procs: &dyn GameProcesses) -> Vec<AddonLine> {
+            let ctx = Ctx { client: &crate::sync::build_client(), procs, control: &self.control, logger: &self.logger };
             let src = Source { manifest_url: &format!("{}addon.json", self.server.base), url_prefix: URL_PREFIX, pubkey: TEST_PUB };
             run_once_with_key(&ctx, &src, &self.config, &self.state_path, 1_800_000_000).await
         }
@@ -788,6 +831,43 @@ mod tests {
         assert_eq!(lines[0].kind, LineKind::Managed);
         assert!(rig.addons().join("GoldCap/Core/a.lua").exists());
         assert_eq!(rig.server.zip_requests(), 1, "the kept download is reused");
+    }
+
+    #[tokio::test]
+    async fn a_game_that_starts_during_the_download_stops_the_swap_and_keeps_the_download() {
+        let rig = Rig::new();
+        rig.hand_made("0.22.0", true);
+        let before = tree(&rig.addons().join("GoldCap"));
+        let flips = Flips { looks: Default::default(), then: Box::new(|| {}), game_after: true };
+        let lines = rig.run_with(&flips).await;
+        assert_eq!(lines[0].kind, LineKind::Waiting);
+        assert_eq!(tree(&rig.addons().join("GoldCap")), before);
+        assert!(!names(&rig.addons()).iter().any(|n| n.contains(".old-") || n.starts_with(".goldcap-staging")));
+        let log = fs::read_to_string(rig.logger_file()).unwrap();
+        assert!(log.contains("changed while the update was downloading"), "{log}");
+        let lines = rig.run(&[]).await;
+        assert_eq!(lines[0].kind, LineKind::Managed);
+        assert_eq!(rig.server.zip_requests(), 1, "the staged download is kept");
+    }
+
+    #[tokio::test]
+    async fn a_folder_that_changes_during_the_download_is_not_swapped() {
+        let rig = Rig::new();
+        let addons = rig.addons();
+        // Another installer puts its own copy in while the zip comes down.
+        let then: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+            let d = addons.join("GoldCap");
+            fs::create_dir_all(&d).unwrap();
+            fs::write(d.join("GoldCap.toc"), "## Version: addon-v0.21.0\n").unwrap();
+            fs::write(d.join("theirs.lua"), "theirs").unwrap();
+        });
+        let flips = Flips { looks: Default::default(), then, game_after: false };
+        let lines = rig.run_with(&flips).await;
+        assert_eq!(lines[0].kind, LineKind::Waiting);
+        assert_eq!(fs::read(rig.addons().join("GoldCap/theirs.lua")).unwrap(), b"theirs");
+        assert!(!rig.addons().join("GoldCap/Core/a.lua").exists());
+        let log = fs::read_to_string(rig.logger_file()).unwrap();
+        assert!(log.contains("changed while the update was downloading"), "{log}");
     }
 
     #[tokio::test]
