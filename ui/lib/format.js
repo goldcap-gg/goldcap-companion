@@ -104,8 +104,17 @@ export function addonCard(line, now) {
         tone: "ok",
       };
     case "foreign":
+      // No readable version means a linked or development copy: handing it over
+      // could never do anything, so say why instead of offering the button.
+      if (!line.installedVersion) {
+        return {
+          title: withVersion(""),
+          detail: "GoldCap here is a linked or development copy, so the Companion leaves it alone.",
+          tone: "idle",
+        };
+      }
       return {
-        title: withVersion(""),
+        title: withVersion(line.installedVersion),
         detail: "GoldCap is kept up to date by another app",
         tone: "idle",
         action: { label: "Let the companion update it", dir: line.dir },

@@ -403,6 +403,8 @@ export function render(el, ctx) {
 
   async function takeOver(dir, button) {
     button.disabled = true;
+    const label = button.textContent;
+    button.textContent = "Handing it over…";
     try {
       await ctx.api.addonTakeOver(dir);
       if (disposed) return;
@@ -410,6 +412,7 @@ export function render(el, ctx) {
     } catch (e) {
       if (disposed) return;
       ctx.toast(String(e), true);
+      button.textContent = label;
       button.disabled = false;
     }
   }

@@ -386,8 +386,16 @@ fn save(state: &AddonState, path: &Path, logger: &Logger) {
 /// Hands one `Foreign` AddOns folder over to the Companion.
 pub fn mark_taken_over(state_path: &Path, dir: &str) -> Result<(), String> {
     let mut state = AddonState::load_from(state_path);
-    if state.lines.get(dir).map(|l| l.kind) != Some(LineKind::Foreign) {
-        return Err("that install is not kept by another app".to_string());
+    match state.lines.get(dir) {
+        Some(l) if l.kind == LineKind::Foreign && l.installed_version.is_some() => {}
+        Some(l) if l.kind == LineKind::Foreign => {
+            return Err("that folder is a linked or development copy, the Companion leaves it alone".to_string())
+        }
+        _ => return Err("that install is not kept by another app".to_string()),
+    }
+    // The card turns to "taken over" at once, before the next pass confirms it.
+    if let Some(l) = state.lines.get_mut(dir) {
+        l.kind = LineKind::TakenOver;
     }
     state.taken_over.insert(dir.to_string());
     state.save_to(state_path).map_err(|e| e.to_string())
@@ -886,5 +894,27 @@ mod tests {
         assert!(mark_taken_over(&rig.state_path, &key).is_ok());
         assert!(AddonState::load_from(&rig.state_path).taken_over.contains(&key));
         assert!(mark_taken_over(&rig.state_path, "/somewhere/else").is_err());
+    }
+
+    #[tokio::test]
+    async fn taking_over_turns_the_saved_card_to_taken_over_at_once() {
+        let rig = Rig::new();
+        rig.hand_made("0.20.0", false);
+        rig.run(&[]).await;
+        mark_taken_over(&rig.state_path, &rig.key()).unwrap();
+        let line = AddonState::load_from(&rig.state_path).lines[&rig.key()].clone();
+        assert_eq!(line.kind, LineKind::TakenOver);
+        assert_eq!(line.installed_version.as_deref(), Some("0.20.0"));
+    }
+
+    #[tokio::test]
+    async fn a_folder_with_no_readable_version_cannot_be_taken_over() {
+        let rig = Rig::new();
+        fs::create_dir_all(rig.addons().join("GoldCap")).unwrap();
+        let lines = rig.run(&[]).await;
+        assert_eq!(lines[0].kind, LineKind::Foreign);
+        assert!(lines[0].installed_version.is_none());
+        assert!(mark_taken_over(&rig.state_path, &rig.key()).is_err());
+        assert!(AddonState::load_from(&rig.state_path).taken_over.is_empty());
     }
 }

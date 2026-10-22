@@ -188,14 +188,20 @@ test("addonCard: managed without a time says it was installed", () => {
 });
 
 test("addonCard: foreign says another app keeps it", () => {
-  const c = addonCard(line({ kind: "foreign", game: "forever", folder: "_classic_beta_" }), NOW);
-  assert.equal(c.title, "WoW: Forever · GoldCap addon");
+  const c = addonCard(line({ kind: "foreign", game: "forever", folder: "_classic_beta_", installedVersion: "0.21.0" }), NOW);
+  assert.equal(c.title, "WoW: Forever · GoldCap addon 0.21.0");
   assert.equal(c.detail, "GoldCap is kept up to date by another app");
 });
 
 test("addonCard: foreign has the take-over action", () => {
-  const c = addonCard(line({ kind: "foreign" }), NOW);
+  const c = addonCard(line({ kind: "foreign", installedVersion: "0.21.0" }), NOW);
   assert.deepEqual(c.action, { label: "Let the companion update it", dir: line().dir });
+});
+
+test("addonCard: a foreign copy with no readable version has no button and says why", () => {
+  const c = addonCard(line({ kind: "foreign", installedVersion: null }), NOW);
+  assert.equal(c.action, undefined);
+  assert.match(c.detail, /linked or development copy/);
 });
 
 test("addonCard: taken over names the installed version", () => {
