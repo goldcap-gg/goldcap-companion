@@ -45,7 +45,8 @@ The complete list. Every address is ours, and nothing else is contacted.
 | `POST /v1/ledger/upload`, `/v1/live-observations`, `/v1/owned-lots`, `/v1/addon/item-names` | your own rows, from the addon's saved data |
 | `GET /v1/lists/companion`, `/v1/ledger/summary/companion` | what the window shows you |
 | `GET goldcap.gg/downloads/updater.json` | checking for a new version, every four hours — unless you turn that off in Settings and check with the button instead |
-| `GET goldcap.gg/downloads/addon/addon.json`, `addon.json.sig` and the addon's `.zip` | the GoldCap addon itself, when your AddOns folder has none or has the copy the Companion installed, every four hours, unless you turn "Install and update the GoldCap addon" off in Settings |
+| `GET goldcap.gg/downloads/addon/addon.json`, `addon.json.sig` | which GoldCap addon release is the newest, at start and every four hours, whoever looks after your copy and even before a game folder is set up; every two minutes while an update waits for the game to close or after one failed, then less often while it keeps failing. None of the addon requests are made while "Install and update the GoldCap addon" is off in Settings |
+| `GET goldcap.gg/downloads/addon/GoldCap-addon-v<version>.zip` | the GoldCap addon itself, only when an AddOns folder has none, has an older copy the Companion installed, or has one you handed over |
 
 Every `POST` in that list is refused by the app itself until you pair it, so an
 unpaired companion only ever reads. There is no usage tracking of any kind. The
@@ -53,11 +54,16 @@ only address it can open in your browser is `goldcap.gg`, and that limit is
 enforced by the app's own permissions file rather than by good intentions.
 
 On disk it writes three things: the price file in your `AddOns` folder, the
-`GoldCap` addon folder next to it (only where there is none, or where the Companion
-put it, and only while the game is closed), and its own settings and log in your
-user profile. A `GoldCap` folder that CurseForge, Wago or another app looks after
-is left alone unless you press "Let the Companion update it". It reads the GoldCap
-addon's saved variables. It never touches the game's memory or its process.
+`GoldCap` addon folder next to it (only where there is none, where the Companion
+put it or where you handed it over, and only while the game is closed), and its own
+settings and log in your user profile. A `GoldCap` folder that CurseForge, Wago,
+another app or you yourself put there is left alone unless you press "Let the
+Companion update it". It reads the GoldCap addon's saved variables. It never
+touches the game's memory or its process. To tell whether the game is open before
+it changes the addon, it lists the programs running (`tasklist` on Windows, `ps`
+on macOS and Linux), and on Windows it also asks whether the `.exe` files in the
+game folder are in use: Windows will not open a running program's file for
+writing. Nothing is written to them.
 
 On Windows the installer is an `.msi`. It installs the app into Program Files, so
 Windows asks for administrator rights once while it installs, and again when you
