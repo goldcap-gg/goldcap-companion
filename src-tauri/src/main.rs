@@ -3,6 +3,7 @@
 
 mod addon_files;
 mod addon_folder;
+mod addon_game;
 mod addon_manifest;
 mod autostart;
 mod commands;
