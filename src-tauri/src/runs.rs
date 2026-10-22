@@ -90,6 +90,39 @@ where
     Ok(raw.unwrap_or(false))
 }
 
+/// `lenient_flag` for a marker the site writes as `1` (a number keeps the
+/// wire short): `1` or `true` reads as true, anything else, absence included,
+/// as false.
+fn lenient_marker<'de, D>(d: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(match raw {
+        Some(serde_json::Value::Bool(b)) => b,
+        Some(serde_json::Value::Number(n)) => n.as_i64() == Some(1),
+        _ => false,
+    })
+}
+
+/// `lenient_names` for the selling rules a cap addresses by position
+/// (`caps[].r`): each slot is shaped on its own, and one that does not fit
+/// stays in its place as `None` instead of being dropped, so every later rule
+/// keeps its index.
+fn lenient_rules<'de, D>(d: D) -> Result<Vec<Option<WireRule>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(match raw {
+        Some(serde_json::Value::Array(items)) => items
+            .into_iter()
+            .map(|v| serde_json::from_value::<WireRule>(v).ok())
+            .collect(),
+        _ => Vec::new(),
+    })
+}
+
 /// `lenient_opt` for a list: each entry is shaped on its own, and one that
 /// does not fit is dropped by itself — a thousand caps must not vanish
 /// because the site once sent a `"i":"nope"`. A missing or non-list value
@@ -281,6 +314,38 @@ pub struct WireCap {
     /// (read as false), never the cap.
     #[serde(rename = "m", default, deserialize_with = "lenient_flag")]
     pub manual: bool,
+    /// The usual unit price of a followed group's member, copper. Absent on
+    /// an alert cap whose level is under the member's.
+    #[serde(rename = "u", default, deserialize_with = "lenient_opt_number")]
+    pub usual: Option<i64>,
+    /// 0-based index into `rules`, like `g`. Unreadable reads as no rule.
+    #[serde(rename = "r", default, deserialize_with = "lenient_opt")]
+    pub rule: Option<u32>,
+    /// True when the cap belongs to a group the player follows.
+    #[serde(rename = "k", default, deserialize_with = "lenient_marker")]
+    pub followed: bool,
+    /// The lowest unit price the rule allows for this member, copper.
+    #[serde(rename = "f", default, deserialize_with = "lenient_opt_number")]
+    pub floor: Option<i64>,
+}
+
+/// One selling rule of a followed group, as the addon posts by it. The
+/// optional parts read leniently; a rule whose name, play or hours cannot be
+/// read is `None` in its slot (see `lenient_rules`).
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct WireRule {
+    #[serde(rename = "n")]
+    pub name: String,
+    #[serde(rename = "p")]
+    pub play: String,
+    #[serde(rename = "d")]
+    pub hours: u32,
+    #[serde(rename = "q", default, deserialize_with = "lenient_opt")]
+    pub per_item: Option<u32>,
+    #[serde(rename = "fp", default, deserialize_with = "lenient_opt")]
+    pub floor_pct: Option<u32>,
+    #[serde(rename = "s", default, deserialize_with = "lenient_opt")]
+    pub step_pct: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -301,6 +366,9 @@ pub struct WireRuns {
     pub groups: Vec<String>,
     #[serde(default, deserialize_with = "lenient_vec")]
     pub caps: Vec<WireCap>,
+    /// Selling rules of the followed groups, indexed by `caps[].rule`.
+    #[serde(default, deserialize_with = "lenient_rules")]
+    pub rules: Vec<Option<WireRule>>,
 }
 
 /// A string the addon can put in front of a player, or nothing at all: an
@@ -354,13 +422,46 @@ fn render_craft(craft: &WireCraft) -> Option<String> {
     Some(out)
 }
 
+/// A selling rule as the addon reads it, or nothing at all: a rule with no
+/// name to show, a play the addon has no mode for, or a duration the auction
+/// house does not offer cannot be acted on. `q` is written only when 1 and
+/// `fp`/`s` only inside 1..=100, like the contract.
+fn render_rule(rule: &WireRule) -> Option<String> {
+    let name = shown_text(&rule.name)?;
+    if !["flip", "gather", "craft", "stock"].contains(&rule.play.as_str())
+        || ![12, 24, 48].contains(&rule.hours)
+    {
+        return None;
+    }
+    let mut out = format!(
+        "{{ n = '{}', p = '{}', d = {}",
+        escape_lua_string(name),
+        rule.play,
+        rule.hours
+    );
+    if rule.per_item == Some(1) {
+        out.push_str(", q = 1");
+    }
+    if let Some(fp) = rule.floor_pct.filter(|v| (1..=100).contains(v)) {
+        out.push_str(&format!(", fp = {fp}"));
+    }
+    if let Some(s) = rule.step_pct.filter(|v| (1..=100).contains(v)) {
+        out.push_str(&format!(", s = {s}"));
+    }
+    out.push_str(" }");
+    Some(out)
+}
+
 /// Renders `Runs.lua`'s contents: the addon-side buy list, keyed off the
 /// same short field names as the rest of `GoldCap_AppData` to keep the
 /// in-game table small. A line is `i`/`q`/`v`/`n`, plus `u`/`vu`/`ch`/`cp`
 /// when the site priced it (v2), `cc`/`rl`/`cr` for its cap, realm and
 /// craft (v3) and `minIlvl` for a gear member's floor (2026-09); a run adds
 /// `k`/`by`/`src` (v3). After `runs` come the alert groups' names
-/// (`groups`) and their caps (`caps`, each `i`/`c`/`l`/`g`/`m`). An
+/// (`groups`) and their caps (`caps`, each `i`/`c`/`l`/`g`/`m`, and for a followed group's
+/// member `u`/`r`/`k`/`f`, where `r` is 1-based in Lua though 0-based on the wire).
+/// The selling rules follow the caps as `rules`, only when a written cap
+/// points at one; a slot the addon cannot act on is written `false`. An
 /// optional key is left out when the site sent nothing usable for it,
 /// rather than written empty. `updatedAt` on each run is re-derived from its
 /// ISO timestamp the same way `LedgerSummary.lua`'s `sale_rows` does; an
@@ -499,6 +600,14 @@ pub fn render_runs_lua(runs: &WireRuns, generated_at: i64) -> Result<String, Str
             out.push_str(" }");
         }
         out.push_str(", caps = { ");
+        let rule_slot = |cap: &WireCap| {
+            cap.rule.filter(|r| {
+                runs.rules
+                    .get(*r as usize)
+                    .and_then(|slot| slot.as_ref())
+                    .is_some_and(|rule| render_rule(rule).is_some())
+            })
+        };
         let labelled = |g: &u32| {
             runs.groups
                 .get(*g as usize)
@@ -518,9 +627,41 @@ pub fn render_runs_lua(runs: &WireRuns, generated_at: i64) -> Result<String, Str
             if cap.manual {
                 out.push_str(", m = true");
             }
+            // Followed-group facts, in this order after `m`. Each is left out
+            // when absent so a cap without them renders the bytes it always
+            // did. `r` goes out 1-based, and only on a rule the addon can
+            // read (see `render_rule`).
+            if let Some(usual) = cap.usual.filter(|v| *v > 0) {
+                out.push_str(&format!(", u = {usual}"));
+            }
+            if let Some(r) = rule_slot(cap) {
+                out.push_str(&format!(", r = {}", r + 1));
+            }
+            if cap.followed {
+                out.push_str(", k = true");
+            }
+            if let Some(floor) = cap.floor.filter(|v| *v > 0) {
+                out.push_str(&format!(", f = {floor}"));
+            }
             out.push_str(" }");
         }
         out.push_str(" }");
+        // The rules ride with the caps that point at one, never as an empty
+        // table. Every slot is written so a cap's index stays valid; one the
+        // addon cannot act on is `false`, and no cap points at it.
+        if usable.iter().any(|c| rule_slot(c).is_some()) {
+            out.push_str(", rules = { ");
+            for (ri, rule) in runs.rules.iter().enumerate() {
+                if ri > 0 {
+                    out.push_str(", ");
+                }
+                match rule.as_ref().and_then(render_rule) {
+                    Some(r) => out.push_str(&r),
+                    None => out.push_str("false"),
+                }
+            }
+            out.push_str(" }");
+        }
     }
     out.push_str(" }\n");
     Ok(out)
@@ -670,6 +811,7 @@ mod tests {
             runs: vec![],
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
         }
     }
@@ -683,6 +825,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![WireRun {
                 code: "abcd2345".into(),
@@ -710,6 +853,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![WireRun {
                 code: "abcd2345".into(),
@@ -734,6 +878,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![WireRun {
                 code: "abcd2345".into(),
@@ -772,6 +917,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![WireRun {
                 code: "abcd2345".into(),
@@ -809,6 +955,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![],
         };
@@ -841,6 +988,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![],
         };
@@ -860,6 +1008,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![],
         };
@@ -877,6 +1026,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![WireRun {
                 code: "abcd2345".into(),
@@ -908,6 +1058,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![WireRun {
                 code: "abcd2345".into(),
@@ -935,6 +1086,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![],
         };
@@ -958,6 +1110,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![WireRun {
                 code: "abcd2345".into(),
@@ -995,6 +1148,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![WireRun {
                 code: "abcd2345".into(),
@@ -1027,6 +1181,7 @@ mod tests {
                 free_lines: 5,
                 groups: vec![],
                 caps: vec![],
+                rules: vec![],
                 game: None,
                 runs: vec![WireRun {
                     code: "abcd2345".into(),
@@ -1078,6 +1233,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![WireRun {
                 code: "abcd2345".into(),
@@ -1108,6 +1264,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![WireRun {
                 code: "abcd2345".into(),
@@ -1177,6 +1334,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![WireRun {
                 code: "abcd2345".into(),
@@ -1379,6 +1537,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![WireRun {
                 code: "a0000016".into(),
@@ -1414,6 +1573,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![WireRun {
                 code: "abcd2345".into(),
@@ -1472,6 +1632,7 @@ mod tests {
                 free_lines: 5,
                 groups: vec![],
                 caps: vec![],
+                rules: vec![],
                 game: None,
                 runs: vec![WireRun {
                     kind: kind.map(Into::into),
@@ -1494,6 +1655,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![WireRun {
                 shared_by: Some("   ".into()),
@@ -1519,6 +1681,7 @@ mod tests {
                 free_lines: 5,
                 groups: vec![],
                 caps: vec![],
+                rules: vec![],
                 game: None,
                 runs: vec![WireRun {
                     lines: vec![WireRunLine {
@@ -1552,6 +1715,7 @@ mod tests {
                 free_lines: 5,
                 groups: vec![],
                 caps: vec![],
+                rules: vec![],
                 game: None,
                 runs: vec![WireRun {
                     lines: vec![WireRunLine {
@@ -1624,6 +1788,7 @@ mod tests {
                 free_lines: 5,
                 groups: vec![],
                 caps: vec![],
+                rules: vec![],
                 game: None,
                 runs: vec![WireRun {
                     lines: vec![WireRunLine {
@@ -1645,6 +1810,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![WireRun {
                 lines: vec![WireRunLine {
@@ -1667,6 +1833,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![WireRun {
                 lines: vec![WireRunLine {
@@ -1701,6 +1868,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![WireRun {
                 shared_by: Some("O'Brien".into()),
@@ -1747,6 +1915,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![WireRun {
                 code: "a0000016".into(),
@@ -1777,6 +1946,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![
                 WireRun {
@@ -1901,7 +2071,7 @@ mod tests {
         let parsed: WireRuns = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.groups, vec!["Transmog".to_string(), "Ore".to_string()]);
         assert_eq!(parsed.caps.len(), 2);
-        assert_eq!(parsed.caps[0], WireCap { item_id: 212345, cap: 1_500_000, min_ilvl: 610, group: Some(0), manual: true });
+        assert_eq!(parsed.caps[0], WireCap { item_id: 212345, cap: 1_500_000, min_ilvl: 610, group: Some(0), manual: true, usual: None, rule: None, followed: false, floor: None });
         assert!(!parsed.caps[1].manual);
     }
 
@@ -2014,8 +2184,8 @@ mod tests {
         let mut runs = v3_empty();
         runs.groups = vec!["Transmog".into(), "O'Ore".into()];
         runs.caps = vec![
-            WireCap { item_id: 212345, cap: 1_500_000, min_ilvl: 610, group: Some(0), manual: true },
-            WireCap { item_id: 190311, cap: 4200, min_ilvl: 0, group: Some(1), manual: false },
+            WireCap { item_id: 212345, cap: 1_500_000, min_ilvl: 610, group: Some(0), manual: true, usual: None, rule: None, followed: false, floor: None },
+            WireCap { item_id: 190311, cap: 4200, min_ilvl: 0, group: Some(1), manual: false, usual: None, rule: None, followed: false, floor: None },
         ];
         let lua = render_runs_lua(&runs, 1_700_000_000).unwrap();
         assert!(lua.ends_with(", groups = { 'Transmog', 'O\\'Ore' }, caps = { { i = 212345, c = 1500000, l = 610, g = 1, m = true }, { i = 190311, c = 4200, g = 2 } } }\n"), "{lua}");
@@ -2026,10 +2196,10 @@ mod tests {
         let mut runs = v3_empty();
         runs.groups = vec!["G".into()];
         runs.caps = vec![
-            WireCap { item_id: 0, cap: 100, min_ilvl: 0, group: Some(0), manual: false },     // no item
-            WireCap { item_id: 5, cap: 0, min_ilvl: 0, group: Some(0), manual: false },       // no price
-            WireCap { item_id: 6, cap: 100, min_ilvl: 0, group: Some(9), manual: false },     // group index off the end → kept, without g
-            WireCap { item_id: 7, cap: 100, min_ilvl: 0, group: Some(0), manual: false },
+            WireCap { item_id: 0, cap: 100, min_ilvl: 0, group: Some(0), manual: false, usual: None, rule: None, followed: false, floor: None },     // no item
+            WireCap { item_id: 5, cap: 0, min_ilvl: 0, group: Some(0), manual: false, usual: None, rule: None, followed: false, floor: None },       // no price
+            WireCap { item_id: 6, cap: 100, min_ilvl: 0, group: Some(9), manual: false, usual: None, rule: None, followed: false, floor: None },     // group index off the end → kept, without g
+            WireCap { item_id: 7, cap: 100, min_ilvl: 0, group: Some(0), manual: false, usual: None, rule: None, followed: false, floor: None },
         ];
         let lua = render_runs_lua(&runs, 1_700_000_000).unwrap();
         assert!(lua.contains("caps = { { i = 6, c = 100 }, { i = 7, c = 100, g = 1 } }"), "{lua}");
@@ -2039,7 +2209,7 @@ mod tests {
     fn only_unusable_caps_means_no_caps_key_at_all() {
         let mut runs = v3_empty();
         runs.groups = vec!["G".into()];
-        runs.caps = vec![WireCap { item_id: 0, cap: 0, min_ilvl: 0, group: Some(0), manual: false }];
+        runs.caps = vec![WireCap { item_id: 0, cap: 0, min_ilvl: 0, group: Some(0), manual: false, usual: None, rule: None, followed: false, floor: None }];
         let lua = render_runs_lua(&runs, 1_700_000_000).unwrap();
         assert!(!lua.contains("caps") && !lua.contains("groups"), "{lua}");
     }
@@ -2051,8 +2221,8 @@ mod tests {
         let mut runs = v3_empty();
         runs.groups = vec!["Transmog".into()];
         runs.caps = vec![
-            WireCap { item_id: 212345, cap: 1_500_000, min_ilvl: 610, group: Some(0), manual: true },
-            WireCap { item_id: 190311, cap: 4200, min_ilvl: 0, group: Some(0), manual: false },
+            WireCap { item_id: 212345, cap: 1_500_000, min_ilvl: 610, group: Some(0), manual: true, usual: None, rule: None, followed: false, floor: None },
+            WireCap { item_id: 190311, cap: 4200, min_ilvl: 0, group: Some(0), manual: false, usual: None, rule: None, followed: false, floor: None },
         ];
         let lua_source = render_runs_lua(&runs, 1_700_000_000).unwrap();
 
@@ -2232,5 +2402,154 @@ mod tests {
         let request = seen.recv().unwrap();
         assert!(request.starts_with("GET /v1/lists/companion?game=forever&market=us-beta-x-horde "), "{request}");
         assert!(request.to_ascii_lowercase().contains("authorization: bearer tok"));
+    }
+
+    #[test]
+    fn a_follow_cap_reads_u_r_k_f() {
+        let json = r#"{"i":5,"c":800,"l":0,"g":1,"m":false,"u":1000,"r":0,"k":1,"f":700}"#;
+        let cap: WireCap = serde_json::from_str(json).unwrap();
+        assert_eq!(cap.usual, Some(1000));
+        assert_eq!(cap.rule, Some(0));
+        assert!(cap.followed);
+        assert_eq!(cap.floor, Some(700));
+    }
+
+    #[test]
+    fn unreadable_follow_fields_read_as_absent_and_keep_the_cap() {
+        let json = r#"{"i":5,"c":800,"u":"x","r":-1,"k":"yes","f":null}"#;
+        let cap: WireCap = serde_json::from_str(json).unwrap();
+        assert_eq!(cap.item_id, 5);
+        assert_eq!(cap.cap, 800);
+        assert_eq!(cap.usual, None);
+        assert_eq!(cap.rule, None);
+        assert!(!cap.followed);
+        assert_eq!(cap.floor, None);
+    }
+
+    #[test]
+    fn an_unreadable_rule_keeps_its_slot() {
+        let json = r#"{"v":3,"generatedAt":"2026-09-22T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[],"rules":[{"n":"A","p":"flip","d":48,"q":1,"fp":70,"s":5},7,{"n":"B","p":"gather","d":24,"fp":80}]}"#;
+        let parsed: WireRuns = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.rules.len(), 3);
+        assert_eq!(parsed.rules[1], None);
+        assert_eq!(parsed.rules[2].as_ref().unwrap().name, "B");
+        let first = parsed.rules[0].as_ref().unwrap();
+        assert_eq!(first.per_item, Some(1));
+        assert_eq!(first.step_pct, Some(5));
+        assert_eq!(first.floor_pct, Some(70));
+    }
+
+    #[test]
+    fn a_payload_without_rules_reads_no_rules() {
+        let json = r#"{"v":3,"generatedAt":"2026-09-22T10:00:00.000Z","plan":"free","freeLines":5,"runs":[]}"#;
+        let parsed: WireRuns = serde_json::from_str(json).unwrap();
+        assert!(parsed.rules.is_empty());
+    }
+
+    #[test]
+    fn caps_without_follow_fields_render_exactly_as_before() {
+        let json = r#"{"v":3,"generatedAt":"2026-09-22T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[],"groups":["Consumables"],"caps":[{"i":7,"c":600,"l":610,"g":0,"m":true},{"i":12,"c":400,"g":0}]}"#;
+        let parsed: WireRuns = serde_json::from_str(json).unwrap();
+        let lua = render_runs_lua(&parsed, 1_700_000_000).unwrap();
+        assert_eq!(
+            lua,
+            "GoldCap_AppRuns = { v = 3, generatedAt = 1700000000, plan = 'pro', freeLines = 5, runs = {  }, groups = { 'Consumables' }, caps = { { i = 7, c = 600, l = 610, g = 1, m = true }, { i = 12, c = 400, g = 1 } } }\n"
+        );
+    }
+
+    #[test]
+    fn follow_fields_render_in_order_after_m() {
+        let json = r#"{"v":3,"generatedAt":"2026-09-22T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[],"groups":["G"],"caps":[{"i":5,"c":800,"l":0,"g":0,"m":false,"u":1000,"r":0,"k":1,"f":700}],"rules":[{"n":"A","p":"flip","d":48}]}"#;
+        let parsed: WireRuns = serde_json::from_str(json).unwrap();
+        let lua = render_runs_lua(&parsed, 1_700_000_000).unwrap();
+        assert!(lua.contains("{ i = 5, c = 800, g = 1, u = 1000, r = 1, k = true, f = 700 }"), "{lua}");
+        let with_m = r#"{"v":3,"generatedAt":"2026-09-22T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[],"caps":[{"i":5,"c":800,"m":true,"u":1000,"k":true,"f":0,"r":4}],"rules":[]}"#;
+        let parsed: WireRuns = serde_json::from_str(with_m).unwrap();
+        let lua = render_runs_lua(&parsed, 1_700_000_000).unwrap();
+        // r points at no rule, f is 0: both stay out; m comes before u.
+        assert!(lua.contains("{ i = 5, c = 800, m = true, u = 1000, k = true }"), "{lua}");
+        assert!(!lua.contains("rules"), "{lua}");
+    }
+
+    #[test]
+    fn rules_render_after_caps_only_when_a_cap_points_at_one() {
+        let json = r#"{"v":3,"generatedAt":"2026-09-22T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[],"caps":[{"i":5,"c":800,"u":1000,"k":1}],"rules":[{"n":"A","p":"flip","d":48}]}"#;
+        let parsed: WireRuns = serde_json::from_str(json).unwrap();
+        let lua = render_runs_lua(&parsed, 1_700_000_000).unwrap();
+        assert!(!lua.contains("rules ="), "{lua}");
+        let with_r = json.replace(r#""k":1}"#, r#""k":1,"r":0}"#);
+        let parsed: WireRuns = serde_json::from_str(&with_r).unwrap();
+        let lua = render_runs_lua(&parsed, 1_700_000_000).unwrap();
+        assert!(
+            lua.ends_with(", caps = { { i = 5, c = 800, u = 1000, r = 1, k = true } }, rules = { { n = 'A', p = 'flip', d = 48 } } }\n"),
+            "{lua}"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_rule_slot_renders_false_and_no_cap_points_at_it() {
+        use mlua::{Lua, LuaOptions, StdLib};
+
+        let json = r#"{"v":3,"generatedAt":"2026-09-22T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[],"caps":[{"i":1,"c":100,"r":0},{"i":2,"c":100,"r":1},{"i":3,"c":100,"r":2}],"rules":[{"n":"A","p":"flip","d":48},{"n":"bad","p":"farm","d":24},{"n":"B","p":"gather","d":24,"fp":80}]}"#;
+        let parsed: WireRuns = serde_json::from_str(json).unwrap();
+        let src = render_runs_lua(&parsed, 1_700_000_000).unwrap();
+        let lua = Lua::new_with(StdLib::NONE, LuaOptions::default()).unwrap();
+        lua.load(&src).exec().unwrap();
+        let r1: i64 = lua.load("return GoldCap_AppRuns.caps[1].r").eval().unwrap();
+        let r2: Option<i64> = lua.load("return GoldCap_AppRuns.caps[2].r").eval().unwrap();
+        let r3: i64 = lua.load("return GoldCap_AppRuns.caps[3].r").eval().unwrap();
+        assert_eq!((r1, r2, r3), (1, None, 3));
+        let slot2: bool = lua.load("return GoldCap_AppRuns.rules[2]").eval().unwrap();
+        assert!(!slot2);
+        let b: String = lua.load("return GoldCap_AppRuns.rules[3].n").eval().unwrap();
+        assert_eq!(b, "B");
+    }
+
+    #[test]
+    fn a_rule_renders_only_what_the_addon_can_act_on() {
+        let json = r#"{"v":3,"generatedAt":"2026-09-22T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[],"caps":[{"i":1,"c":100,"r":0},{"i":2,"c":100,"r":1},{"i":3,"c":100,"r":2}],"rules":[{"n":"A","p":"craft","d":12,"q":2,"fp":0,"s":101},{"n":"  ","p":"flip","d":12},{"n":"C","p":"stock","d":36}]}"#;
+        let parsed: WireRuns = serde_json::from_str(json).unwrap();
+        let lua = render_runs_lua(&parsed, 1_700_000_000).unwrap();
+        assert!(lua.ends_with(", rules = { { n = 'A', p = 'craft', d = 12 }, false, false } }\n"), "{lua}");
+        assert!(lua.contains("caps = { { i = 1, c = 100, r = 1 }, { i = 2, c = 100 }, { i = 3, c = 100 } }"), "{lua}");
+    }
+
+    #[test]
+    fn a_new_payload_keeps_every_old_field_in_lua() {
+        use mlua::{Lua, LuaOptions, StdLib};
+
+        let plain = r#"{"v":3,"generatedAt":"2026-09-22T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[],"groups":["Transmog"],"caps":[{"i":212345,"c":1500000,"l":610,"g":0,"m":true}]}"#;
+        let fresh = r#"{"v":3,"generatedAt":"2026-09-22T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[],"groups":["Transmog"],"caps":[{"i":212345,"c":1500000,"l":610,"g":0,"m":true,"u":2000000,"r":0,"k":1,"f":1400000}],"rules":[{"n":"Transmog: Plate","p":"flip","d":48,"q":1,"fp":70,"s":5}]}"#;
+        let load = |json: &str| {
+            let parsed: WireRuns = serde_json::from_str(json).unwrap();
+            let lua = Lua::new_with(StdLib::NONE, LuaOptions::default()).unwrap();
+            lua.load(render_runs_lua(&parsed, 1_700_000_000).unwrap()).exec().unwrap();
+            lua
+        };
+        let (old, new) = (load(plain), load(fresh));
+        for expr in [
+            "return GoldCap_AppRuns.caps[1].c",
+            "return GoldCap_AppRuns.caps[1].l",
+            "return GoldCap_AppRuns.caps[1].g",
+        ] {
+            let a: i64 = old.load(expr).eval().unwrap();
+            let b: i64 = new.load(expr).eval().unwrap();
+            assert_eq!(a, b, "{expr}");
+        }
+        let (a, b): (String, String) = (
+            old.load("return GoldCap_AppRuns.groups[1]").eval().unwrap(),
+            new.load("return GoldCap_AppRuns.groups[1]").eval().unwrap(),
+        );
+        assert_eq!(a, b);
+        let u: i64 = new.load("return GoldCap_AppRuns.caps[1].u").eval().unwrap();
+        let k: bool = new.load("return GoldCap_AppRuns.caps[1].k").eval().unwrap();
+        let f: i64 = new.load("return GoldCap_AppRuns.caps[1].f").eval().unwrap();
+        assert_eq!((u, k, f), (2_000_000, true, 1_400_000));
+        let p: String = new.load("return GoldCap_AppRuns.rules[1].p").eval().unwrap();
+        let d: i64 = new.load("return GoldCap_AppRuns.rules[1].d").eval().unwrap();
+        let q: i64 = new.load("return GoldCap_AppRuns.rules[1].q").eval().unwrap();
+        let fp: i64 = new.load("return GoldCap_AppRuns.rules[1].fp").eval().unwrap();
+        let st: i64 = new.load("return GoldCap_AppRuns.rules[1].s").eval().unwrap();
+        assert_eq!((p.as_str(), d, q, fp, st), ("flip", 48, 1, 70, 5));
     }
 }

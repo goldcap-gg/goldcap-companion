@@ -9,6 +9,7 @@ data.
 - The Companion can now put the GoldCap addon into your game for you. If there is no GoldCap addon in your AddOns folder, it installs it, and it keeps that copy up to date. It only does this while World of Warcraft is closed.
 - If CurseForge, Wago or another app already looks after your GoldCap addon, the Companion leaves it alone and the Status window says so. A button there lets you hand it over to the Companion.
 - Settings has a checkbox, Install and update the GoldCap addon, on by default.
+- Groups you follow on goldcap.gg now reach the GoldCap addon: their deal prices for DEALS and their selling rules for SELL.
 
 ## 1.19.1 (2026-10-13)
 
