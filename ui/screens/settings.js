@@ -543,8 +543,9 @@ export function render(el, ctx) {
       await persist({ addonInstall: addonInstallBox.checked });
       if (disposed) return;
       paintAddonInstall();
-      // Turning it on should not wait for the next scheduled look.
-      if (addonInstallBox.checked) ctx.api.addonCheckNow().catch(() => {});
+      // Either way the cards should not wait for the next scheduled look: on
+      // starts the install, off makes no request and only rewrites the cards.
+      ctx.api.addonCheckNow().catch(() => {});
     });
     addonInstall.append(addonInstallBox, document.createTextNode("Install and update the GoldCap addon"));
     const addonInstallHint = document.createElement("p");
