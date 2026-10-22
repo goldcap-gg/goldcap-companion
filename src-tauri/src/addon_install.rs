@@ -311,6 +311,8 @@ pub(crate) async fn run_once_with_key(
 
     let mut lines = Vec::new();
     let mut applied = Vec::new();
+    // Real paths of the AddOns folders this pass put the release in.
+    let mut in_place: Vec<PathBuf> = Vec::new();
     for (t, folder_state) in targets.iter().zip(&folders) {
         let prev = state.lines.get(&key(t)).cloned();
         // A client the name list does not know still holds its exe in this install.
@@ -334,6 +336,16 @@ pub(crate) async fn run_once_with_key(
                 base_line(t, kind, folder_state, Some(&available), prev.as_ref())
             }
             Action::Apply(decision) => match (&release, &download_error) {
+                (Some(r), None) if already_in_place(t, r, &in_place) => {
+                    // This install reaches the AddOns folder another one just got
+                    // the release in, through a link: nothing is left to do.
+                    ctx.logger.info(&format!(
+                        "addon: {} GoldCap {} is in place, its AddOns folder is shared with another install",
+                        t.folder, r.version
+                    ));
+                    applied.push(key(t));
+                    managed_line(t, folder_state, &available, prev.as_ref(), decision, r, now)
+                }
                 (Some(r), None) if changed_since_checked(ctx, t, folder_state) => {
                     // The download can take minutes: a game that started or a folder
                     // another installer touched meanwhile means nothing is swapped now.
@@ -347,14 +359,12 @@ pub(crate) async fn run_once_with_key(
                 (Some(r), None) => {
                     match apply(t, r, now) {
                         Ok(()) => {
-                            let change = if decision == Decision::Install { Change::Installed } else { Change::Updated };
                             ctx.logger.info(&format!("addon: {} GoldCap {} is in place", t.folder, r.version));
                             applied.push(key(t));
-                            let mut l = base_line(t, LineKind::Managed, folder_state, Some(&available), prev.as_ref());
-                            l.installed_version = Some(r.version.to_string());
-                            l.updated_at = Some(now);
-                            l.last_change = Some(change);
-                            l
+                            if let Ok(real) = t.addons_dir().canonicalize() {
+                                in_place.push(real);
+                            }
+                            managed_line(t, folder_state, &available, prev.as_ref(), decision, r, now)
                         }
                         Err(e) => {
                             ctx.logger.error(&format!("addon: {} GoldCap not changed: {e}", t.folder));
@@ -387,6 +397,29 @@ pub(crate) async fn run_once_with_key(
     state.lines = lines.iter().map(|l| (l.dir.clone(), l.clone())).collect();
     save(&state, state_path, ctx.logger);
     lines
+}
+
+/// True when `t`'s AddOns folder is, through a link, one this pass already put
+/// `r` in, and it still holds exactly that.
+fn already_in_place(t: &Target, r: &VerifiedRelease, in_place: &[PathBuf]) -> bool {
+    t.addons_dir().canonicalize().is_ok_and(|real| in_place.contains(&real))
+        && inspect(&t.addons_dir()) == FolderState::Ours(r.version)
+}
+
+fn managed_line(
+    t: &Target,
+    folder_state: &FolderState,
+    available: &Version,
+    prev: Option<&AddonLine>,
+    decision: Decision,
+    r: &VerifiedRelease,
+    now: i64,
+) -> AddonLine {
+    let mut l = base_line(t, LineKind::Managed, folder_state, Some(available), prev);
+    l.installed_version = Some(r.version.to_string());
+    l.updated_at = Some(now);
+    l.last_change = Some(if decision == Decision::Install { Change::Installed } else { Change::Updated });
+    l
 }
 
 /// Looked at again right before the swap: the folder and the game as they are now.
@@ -1038,6 +1071,28 @@ mod tests {
         assert!(!rig.addons().join("GoldCap/Core/a.lua").exists());
         let log = fs::read_to_string(rig.logger_file()).unwrap();
         assert!(log.contains("changed while the update was downloading"), "{log}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn two_installs_sharing_one_addons_folder_are_both_kept_after_one_pass() {
+        let mut rig = Rig::new();
+        let root = rig.retail.parent().unwrap().to_path_buf();
+        let beta = root.join("_classic_beta_/Interface");
+        fs::create_dir_all(&beta).unwrap();
+        fs::create_dir_all(rig.addons()).unwrap();
+        std::os::unix::fs::symlink(rig.addons(), beta.join("AddOns")).unwrap();
+        rig.config.forever_enabled = true;
+        rig.config.forever_root_path = root.to_string_lossy().to_string();
+        let lines = rig.run(&[]).await;
+        assert_eq!(lines.len(), 2);
+        for l in &lines {
+            assert_eq!((l.kind, l.last_change), (LineKind::Managed, Some(Change::Installed)), "{}", l.folder);
+            assert_eq!(l.installed_version.as_deref(), Some("0.23.0"), "{}", l.folder);
+        }
+        assert_eq!(names(&rig.addons()), vec!["GoldCap"]);
+        let log = fs::read_to_string(rig.logger_file()).unwrap();
+        assert!(!log.contains("changed while the update was downloading"), "{log}");
     }
 
     #[tokio::test]
