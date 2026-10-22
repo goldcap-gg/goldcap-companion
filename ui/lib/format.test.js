@@ -187,15 +187,25 @@ test("addonCard: managed without a time says it was installed", () => {
   assert.equal(c.detail, "Installed by the Companion.");
 });
 
-test("addonCard: foreign says another app keeps it", () => {
-  const c = addonCard(line({ kind: "foreign", game: "forever", folder: "_classic_beta_", installedVersion: "0.21.0" }), NOW);
+test("addonCard: foreign says another app or a manual install looks after it", () => {
+  const c = addonCard(
+    line({ kind: "foreign", game: "forever", folder: "_classic_beta_", installedVersion: "0.21.0", availableVersion: "0.21.0" }),
+    NOW,
+  );
   assert.equal(c.title, "WoW: Forever · GoldCap addon 0.21.0");
-  assert.equal(c.detail, "GoldCap is kept up to date by another app");
+  assert.equal(c.detail, "Another app or a manual install looks after GoldCap here, so the Companion leaves it alone.");
 });
 
-test("addonCard: foreign has the take-over action", () => {
+test("addonCard: foreign behind the latest release says which one is out", () => {
+  const c = addonCard(line({ kind: "foreign", installedVersion: "0.9.0", availableVersion: "0.23.0" }), NOW);
+  assert.equal(c.detail, "Another app or a manual install looks after GoldCap here. Addon 0.23.0 is out.");
+  const ahead = addonCard(line({ kind: "foreign", installedVersion: "0.24.0", availableVersion: "0.23.0" }), NOW);
+  assert.doesNotMatch(ahead.detail, /is out/);
+});
+
+test("addonCard: foreign has the take-over action, naming the Companion as every other line does", () => {
   const c = addonCard(line({ kind: "foreign", installedVersion: "0.21.0" }), NOW);
-  assert.deepEqual(c.action, { label: "Let the companion update it", dir: line().dir });
+  assert.deepEqual(c.action, { label: "Let the Companion update it", dir: line().dir });
 });
 
 test("addonCard: a foreign copy with no readable version has no button and says why", () => {

@@ -56,7 +56,7 @@ On disk it writes three things: the price file in your `AddOns` folder, the
 `GoldCap` addon folder next to it (only where there is none, or where the Companion
 put it, and only while the game is closed), and its own settings and log in your
 user profile. A `GoldCap` folder that CurseForge, Wago or another app looks after
-is left alone unless you press "Let the companion update it". It reads the GoldCap
+is left alone unless you press "Let the Companion update it". It reads the GoldCap
 addon's saved variables. It never touches the game's memory or its process.
 
 On Windows the installer is an `.msi`. It installs the app into Program Files, so

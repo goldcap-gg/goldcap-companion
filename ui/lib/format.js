@@ -86,6 +86,16 @@ export function foreverImpactLines(g) {
   };
 }
 
+// True when version `a` ("1.2.3") is older than `b`, compared number by number.
+function olderThan(a, b) {
+  const pa = String(a).split(".").map(Number);
+  const pb = String(b).split(".").map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) < (pb[i] || 0);
+  }
+  return false;
+}
+
 // The Status window's card for the GoldCap addon in one game install, from the Rust side's
 // `AddonLine`: `{ title, detail, tone, error?, action? }`, or null when the Companion is not
 // managing the addon there (the setting is off), so no card is drawn. `action` exists only for an
@@ -113,11 +123,15 @@ export function addonCard(line, now) {
           tone: "idle",
         };
       }
+      // A copy installed by hand is updated by nothing, so this never claims another app keeps it current.
       return {
         title: withVersion(line.installedVersion),
-        detail: "GoldCap is kept up to date by another app",
+        detail:
+          line.availableVersion && olderThan(line.installedVersion, line.availableVersion)
+            ? `Another app or a manual install looks after GoldCap here. Addon ${line.availableVersion} is out.`
+            : "Another app or a manual install looks after GoldCap here, so the Companion leaves it alone.",
         tone: "idle",
-        action: { label: "Let the companion update it", dir: line.dir },
+        action: { label: "Let the Companion update it", dir: line.dir },
       };
     case "takenOver":
       return {
