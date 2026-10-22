@@ -58,6 +58,10 @@ fn default_auto_update() -> bool {
     true
 }
 
+fn default_addon_install() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
@@ -121,6 +125,12 @@ pub struct Config {
     /// on, so an existing install keeps updating the way it always has.
     #[serde(default = "default_auto_update")]
     pub auto_update: bool,
+    /// Install the GoldCap addon where it is missing and keep the copy the
+    /// Companion installed up to date (`addon_install.rs`). On by default, and a
+    /// config written before this existed reads as on. Off means no request for
+    /// the addon at all.
+    #[serde(default = "default_addon_install")]
+    pub addon_install: bool,
     /// Long-lived upload token from pairing with goldcap.gg. Empty until the
     /// player pairs; an empty token disables upload entirely rather than
     /// failing a tick, so an unpaired companion still syncs prices normally.
@@ -145,6 +155,7 @@ impl Default for Config {
             interval_minutes: default_interval_minutes(),
             launch_at_startup: default_launch_at_startup(),
             auto_update: default_auto_update(),
+            addon_install: default_addon_install(),
             companion_token: String::new(),
         }
     }
@@ -975,6 +986,7 @@ mod tests {
             interval_minutes: 45,
             launch_at_startup: true,
             auto_update: false,
+            addon_install: false,
             companion_token: "tok".into(),
         };
         cfg.save_to(&path).unwrap();

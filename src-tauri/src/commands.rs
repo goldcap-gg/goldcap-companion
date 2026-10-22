@@ -194,6 +194,10 @@ pub fn get_status(state: State<AppState>) -> crate::status::StatusSnapshot {
     let mut snapshot = crate::status::build(&config, &status, &health, crate::luafile::now_unix());
     if let Some(dir) = state.config_path.parent() {
         snapshot.games = crate::forever::ForeverState::load_from(&dir.join(crate::forever::STATE_FILE_NAME)).games;
+        snapshot.addons = crate::addon_install::AddonState::load_from(&dir.join(crate::addon_install::STATE_FILE_NAME))
+            .lines
+            .into_values()
+            .collect();
     }
     snapshot
 }

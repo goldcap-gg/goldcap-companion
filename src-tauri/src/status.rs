@@ -54,6 +54,9 @@ pub struct StatusSnapshot {
     pub market_ts: Option<i64>,
     pub version: String,
     pub games: Vec<crate::forever::GameStatus>,
+    /// Who looks after the GoldCap addon in each game install; filled from the
+    /// addon install's state file by `get_status`.
+    pub addons: Vec<crate::addon_install::AddonLine>,
 }
 
 fn unix(at: SystemTime) -> Option<i64> {
@@ -188,6 +191,7 @@ pub fn build(
         market_ts: status.region.map(|r| r.ts),
         version: env!("CARGO_PKG_VERSION").to_string(),
         games: Vec::new(),
+        addons: Vec::new(),
     }
 }
 

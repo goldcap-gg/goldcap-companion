@@ -4,6 +4,7 @@
 mod addon_files;
 mod addon_folder;
 mod addon_game;
+mod addon_install;
 mod addon_manifest;
 mod autostart;
 mod commands;
@@ -82,6 +83,8 @@ fn main() {
             commands::update_ready,
             commands::check_for_updates,
             commands::install_update,
+            addon_install::addon_check_now,
+            addon_install::addon_take_over,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -138,11 +141,13 @@ fn main() {
             });
             app.manage(tray_handles);
             app.manage(updater::UpdaterState::default());
+            app.manage(addon_install::AddonControl::default());
 
             // Cloned now, before `logger` itself is moved into the sync
             // loop's spawn below — the updater loop's spawn further down
             // needs its own owned handle.
             let updater_logger = logger.clone();
+            let logger_for_addon = logger.clone();
 
             let client = sync::build_client();
             let sync_refresh_handle = handle.clone();
@@ -174,6 +179,10 @@ fn main() {
                 handle.clone(),
                 updater_logger,
             ));
+
+            // Puts the addon into the game folders that have none, and keeps
+            // the copy it installed current, while the game is closed.
+            tauri::async_runtime::spawn(addon_install::run_loop(handle.clone(), logger_for_addon));
 
             // A tray-only app has nowhere to put a first-run wizard: without
             // this, a brand-new install shows an icon and nothing else.

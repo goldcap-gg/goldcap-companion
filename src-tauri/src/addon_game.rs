@@ -18,7 +18,7 @@ pub const WOW_PROCESS_NAMES: &[&str] = &[
     "world of warcraft classic",
 ];
 
-pub trait GameProcesses {
+pub trait GameProcesses: Sync {
     /// Process executable names or paths, one per process.
     fn executables(&self) -> io::Result<Vec<String>>;
 }
