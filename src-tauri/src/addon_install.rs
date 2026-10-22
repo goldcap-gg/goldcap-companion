@@ -1,5 +1,5 @@
 use crate::addon_files::{recover, staging_dir, swap_steps, unpack};
-use crate::addon_folder::{decide, inspect, Decision, FolderState};
+use crate::addon_folder::{decide, inspect, toc_version, Decision, FolderState};
 use crate::addon_game::{wow_is_running, GameProcesses, SystemProcesses};
 use crate::addon_manifest::{
     check_payload, updater_pubkey, verify_manifest, AddonManifest, Version, VerifiedRelease, MANIFEST_URL,
@@ -414,12 +414,24 @@ fn apply_steps(
     let result = std::fs::create_dir_all(&staging)
         .map_err(|e| format!("could not create a staging folder: {e}"))
         .and_then(|_| unpack(&release.zip, &staging))
+        .and_then(|_| toc_matches(&staging.join("GoldCap"), &release.version))
         .and_then(|_| swap_steps(&addons, &staging.join("GoldCap"), &release.version, now, hook));
     let _ = std::fs::remove_dir_all(&staging);
     if result.is_err() {
         recover(&addons);
     }
     result
+}
+
+/// The marker records the manifest's version and `inspect` compares it with
+/// the TOC's. A release whose TOC says anything else would be installed and
+/// then read as another app's copy, never to be updated again.
+fn toc_matches(addon_dir: &Path, version: &Version) -> Result<(), String> {
+    match toc_version(addon_dir) {
+        Some(v) if v == *version => Ok(()),
+        Some(v) => Err(format!("the release's TOC says {v}, its manifest {version}")),
+        None => Err(format!("the release's TOC has no version, its manifest says {version}")),
+    }
 }
 
 fn save(state: &AddonState, path: &Path, logger: &Logger) {
@@ -821,6 +833,24 @@ mod tests {
         assert!(r.unwrap_err().contains("held by a scanner"));
         assert_eq!(tree(&rig.addons().join("GoldCap")), before);
         assert_eq!(names(&rig.addons()), vec!["GoldCap"]);
+    }
+
+    #[test]
+    fn a_release_whose_toc_disagrees_with_its_manifest_is_refused() {
+        // The fixture zip's TOC says 0.23.0; this manifest says 0.24.0.
+        let mut release = release_0_23();
+        release.version = v(0, 24, 0);
+        let rig = Rig::new();
+        rig.hand_made("0.22.0", true);
+        let before = tree(&rig.addons());
+        let t = &targets(&rig.config)[0];
+        let e = apply(t, &release, 1_800_000_000).unwrap_err();
+        assert!(e.contains("0.23.0") && e.contains("0.24.0"), "{e}");
+        assert_eq!(tree(&rig.addons()), before);
+        // A first install leaves nothing behind either.
+        let rig = Rig::new();
+        assert!(apply(&targets(&rig.config)[0], &release, 1_800_000_000).is_err());
+        assert!(names(&rig.addons()).is_empty());
     }
 
     #[cfg(unix)]
