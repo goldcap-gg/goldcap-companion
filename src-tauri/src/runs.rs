@@ -336,6 +336,10 @@ pub struct WireCap {
 pub struct WireRule {
     #[serde(rename = "n")]
     pub name: String,
+    /// The followed group's slug, its identity across languages and renames.
+    /// A missing or non-string `id` is `None`; the rule is still read.
+    #[serde(rename = "id", default, deserialize_with = "lenient_opt")]
+    pub id: Option<String>,
     #[serde(rename = "p")]
     pub play: String,
     #[serde(rename = "d")]
@@ -422,10 +426,17 @@ fn render_craft(craft: &WireCraft) -> Option<String> {
     Some(out)
 }
 
+/// A group slug the addon accepts as a key: `^[a-z0-9_-]{1,80}$`.
+fn is_group_id(id: &str) -> bool {
+    (1..=80).contains(&id.len())
+        && id.bytes().all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-'))
+}
+
 /// A selling rule as the addon reads it, or nothing at all: a rule with no
 /// name to show, a play the addon has no mode for, or a duration the auction
-/// house does not offer cannot be acted on. `q` is written only when 1 and
-/// `fp`/`s` only inside 1..=100, like the contract.
+/// house does not offer cannot be acted on. Keys: `n`, `id` (only when 1 to
+/// 80 characters of `a-z`, `0-9`, `_`, `-`), `p`, `d`; `q` is written only
+/// when 1 and `fp`/`s` only inside 1..=100, like the contract.
 fn render_rule(rule: &WireRule) -> Option<String> {
     let name = shown_text(&rule.name)?;
     if !["flip", "gather", "craft", "stock"].contains(&rule.play.as_str())
@@ -433,8 +444,14 @@ fn render_rule(rule: &WireRule) -> Option<String> {
     {
         return None;
     }
+    let id = rule
+        .id
+        .as_deref()
+        .filter(|id| is_group_id(id))
+        .map(|id| format!(", id = '{}'", escape_lua_string(id)))
+        .unwrap_or_default();
     let mut out = format!(
-        "{{ n = '{}', p = '{}', d = {}",
+        "{{ n = '{}'{id}, p = '{}', d = {}",
         escape_lua_string(name),
         rule.play,
         rule.hours
@@ -2512,6 +2529,40 @@ mod tests {
         let lua = render_runs_lua(&parsed, 1_700_000_000).unwrap();
         assert!(lua.ends_with(", rules = { { n = 'A', p = 'craft', d = 12 }, false, false } }\n"), "{lua}");
         assert!(lua.contains("caps = { { i = 1, c = 100, r = 1 }, { i = 2, c = 100 }, { i = 3, c = 100 } }"), "{lua}");
+    }
+
+    fn rule_lua(rule_json: &str) -> String {
+        let json = format!(
+            r#"{{"v":3,"generatedAt":"2026-09-22T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[],"caps":[{{"i":1,"c":100,"r":0}}],"rules":[{rule_json}]}}"#
+        );
+        let parsed: WireRuns = serde_json::from_str(&json).unwrap();
+        render_runs_lua(&parsed, 1_700_000_000).unwrap()
+    }
+
+    #[test]
+    fn a_rule_id_renders_right_after_the_name() {
+        let lua = rule_lua(r#"{"n":"Herbs","id":"herbs","p":"gather","d":24,"fp":80}"#);
+        assert!(lua.contains("{ n = 'Herbs', id = 'herbs', p = 'gather', d = 24, fp = 80 }"), "{lua}");
+        let lua = rule_lua(r#"{"n":"Mine","id":"u_abcdefghij12","p":"flip","d":48}"#);
+        assert!(lua.contains("{ n = 'Mine', id = 'u_abcdefghij12', p = 'flip', d = 48 }"), "{lua}");
+    }
+
+    #[test]
+    fn a_rule_id_of_the_wrong_shape_is_left_out_and_the_rule_stays() {
+        let long = "a".repeat(81);
+        for bad in ["Herbs", "he'rbs", "he rbs", "", long.as_str()] {
+            let lua = rule_lua(&format!(r#"{{"n":"A","id":"{bad}","p":"flip","d":48}}"#));
+            assert!(lua.contains("rules = { { n = 'A', p = 'flip', d = 48 } }"), "{bad}: {lua}");
+        }
+        let edge = "a".repeat(80);
+        let lua = rule_lua(&format!(r#"{{"n":"A","id":"{edge}","p":"flip","d":48}}"#));
+        assert!(lua.contains(&format!("id = '{edge}'")), "{lua}");
+    }
+
+    #[test]
+    fn a_non_string_rule_id_still_reads_the_rule() {
+        let lua = rule_lua(r#"{"n":"A","id":7,"p":"flip","d":48}"#);
+        assert!(lua.contains("rules = { { n = 'A', p = 'flip', d = 48 } }"), "{lua}");
     }
 
     #[test]
