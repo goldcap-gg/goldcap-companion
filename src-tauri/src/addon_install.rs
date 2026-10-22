@@ -275,7 +275,7 @@ pub(crate) async fn run_once_with_key(
 
     // Download first, so an update waiting for the game is already on disk.
     let mut release: Option<VerifiedRelease> = None;
-    let mut download_failed = false;
+    let mut download_error: Option<String> = None;
     if wanted {
         let kept = ctx
             .control
@@ -293,12 +293,12 @@ pub(crate) async fn run_once_with_key(
                 }
                 Err(e) => {
                     ctx.logger.error(&format!("addon: download not used: {e}"));
-                    download_failed = true;
+                    download_error = Some(e);
                 }
             },
         }
     }
-    let game_running = wanted && !download_failed && wow_is_running(ctx.procs);
+    let game_running = wanted && download_error.is_none() && wow_is_running(ctx.procs);
 
     let mut lines = Vec::new();
     let mut applied = Vec::new();
@@ -319,8 +319,8 @@ pub(crate) async fn run_once_with_key(
                 }
                 base_line(t, kind, folder_state, Some(&available), prev.as_ref())
             }
-            Action::Apply(decision) => match (&release, download_failed) {
-                (Some(r), false) => {
+            Action::Apply(decision) => match (&release, &download_error) {
+                (Some(r), None) => {
                     match apply(t, r, now) {
                         Ok(()) => {
                             let change = if decision == Decision::Install { Change::Installed } else { Change::Updated };
@@ -340,11 +340,14 @@ pub(crate) async fn run_once_with_key(
                         }
                     }
                 }
-                // The download was refused; the log says why and the line stays as it was.
-                _ => match prev {
-                    Some(p) => p,
-                    None => continue,
-                },
+                // The zip was not downloaded or did not match the signed manifest.
+                // A manifest that cannot be read stays silent, but a player
+                // waiting for an install or update is told why it did not happen.
+                (_, err) => {
+                    let mut l = base_line(t, LineKind::Failed, folder_state, Some(&available), prev.as_ref());
+                    l.error = Some(err.clone().unwrap_or_else(|| "the download is not available".to_string()));
+                    l
+                }
             },
         };
         lines.push(line);
@@ -789,9 +792,20 @@ mod tests {
         bad[last] ^= 0xff;
         rig.server.set(ZIP_PATH, &bad);
         let lines = rig.run(&[]).await;
-        assert!(lines.iter().all(|l| l.kind != LineKind::Failed));
+        assert_eq!(lines[0].kind, LineKind::Failed);
+        assert!(lines[0].error.is_some());
         assert_eq!(tree(&rig.addons()), before);
         assert_eq!(names(&rig.addons()), vec!["GoldCap"]);
+    }
+
+    #[tokio::test]
+    async fn a_missing_zip_on_a_first_install_shows_failed_with_the_reason() {
+        let rig = Rig::new();
+        rig.server.set(ZIP_PATH, b"");
+        let lines = rig.run(&[]).await;
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].kind, LineKind::Failed);
+        assert!(lines[0].error.as_deref().is_some_and(|e| !e.is_empty()));
     }
 
     #[tokio::test]
@@ -837,9 +851,8 @@ mod tests {
         fs::set_permissions(rig.addons(), fs::Permissions::from_mode(0o555)).unwrap();
         let lines = rig.run(&[]).await;
         fs::set_permissions(rig.addons(), fs::Permissions::from_mode(0o755)).unwrap();
-        if lines[0].kind == LineKind::Failed {
-            assert!(lines[0].error.is_some());
-        }
+        assert_eq!(lines[0].kind, LineKind::Failed);
+        assert!(lines[0].error.is_some());
         assert_eq!(tree(&rig.addons()), before);
         assert_eq!(names(&rig.addons()), vec!["GoldCap"]);
     }
