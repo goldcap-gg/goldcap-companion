@@ -1,6 +1,7 @@
 // Tray-only companion app: no console window on Windows release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod addon_files;
 mod addon_folder;
 mod addon_manifest;
 mod autostart;
