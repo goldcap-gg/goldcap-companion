@@ -4,7 +4,7 @@
 //! `GoldCap`, `GoldCap.old-*` and `.goldcap-staging-*` inside the folder it is
 //! given.
 
-use crate::addon_folder::{write_marker, MARKER_NAME};
+use crate::addon_folder::{inspect, write_marker, FolderState, MARKER_NAME};
 use crate::addon_manifest::Version;
 use std::fs;
 use std::io::{self, Cursor, Read};
@@ -97,14 +97,38 @@ pub fn unpack(zip: &[u8], dest: &Path) -> Result<(), String> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SwapStep {
+    WriteMarker,
     MoveOldAside,
     MoveNewIn,
-    WriteMarker,
     DeleteOld,
 }
 
-/// `staged_top` is `<staging>/GoldCap`. Old folder aside, new one in, marker,
-/// old one deleted; any failure before the delete puts everything back.
+/// Runs `f` up to `attempts` times, waiting `wait` between tries. A virus
+/// scanner or an indexer holding a freshly unpacked file makes a Windows
+/// rename fail for a moment.
+fn retry<T>(attempts: u32, wait: std::time::Duration, mut f: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    let mut left = attempts.max(1);
+    loop {
+        match f() {
+            Ok(v) => return Ok(v),
+            Err(e) if left <= 1 => return Err(e),
+            Err(_) => {
+                left -= 1;
+                std::thread::sleep(wait);
+            }
+        }
+    }
+}
+
+fn rename_retry(from: &Path, to: &Path) -> io::Result<()> {
+    let attempts = if cfg!(windows) { 5 } else { 1 };
+    retry(attempts, std::time::Duration::from_millis(200), || fs::rename(from, to))
+}
+
+/// `staged_top` is `<staging>/GoldCap`. The marker goes into the staged folder
+/// first, so after any crash `GoldCap` is either the old folder or the new one,
+/// each with its marker. Then old aside, new in, old deleted; a failure before
+/// the delete puts the old folder back.
 pub fn swap_in(addons_dir: &Path, staged_top: &Path, version: &Version, now: i64) -> Result<(), String> {
     swap_steps(addons_dir, staged_top, version, now, &|_| Ok(()))
 }
@@ -120,26 +144,19 @@ fn swap_steps(
     let aside = addons_dir.join(format!("{OLD_PREFIX}{now}"));
     let had_old = fs::symlink_metadata(&live).is_ok();
 
+    hook(SwapStep::WriteMarker)
+        .and_then(|_| write_marker(staged_top, version, now))
+        .map_err(|e| format!("could not write the marker: {e}"))?;
     if had_old {
         hook(SwapStep::MoveOldAside)
-            .and_then(|_| fs::rename(&live, &aside))
+            .and_then(|_| rename_retry(&live, &aside))
             .map_err(|e| format!("could not move the old addon aside: {e}"))?;
     }
-    let rollback = |new_in: bool| {
-        if new_in {
-            let _ = fs::remove_dir_all(&live);
-        }
+    if let Err(e) = hook(SwapStep::MoveNewIn).and_then(|_| rename_retry(staged_top, &live)) {
         if had_old {
-            let _ = fs::rename(&aside, &live);
+            let _ = rename_retry(&aside, &live);
         }
-    };
-    if let Err(e) = hook(SwapStep::MoveNewIn).and_then(|_| fs::rename(staged_top, &live)) {
-        rollback(false);
         return Err(format!("could not move the new addon in: {e}"));
-    }
-    if let Err(e) = hook(SwapStep::WriteMarker).and_then(|_| write_marker(&live, version, now)) {
-        rollback(true);
-        return Err(format!("could not write the marker: {e}"));
     }
     // The swap has succeeded; a folder that cannot be deleted now is a
     // leftover the next `recover` removes.
@@ -172,7 +189,9 @@ pub fn recover(addons_dir: &Path) {
             }
         }
     }
-    if fs::symlink_metadata(&live).is_ok() {
+    // A backup is deleted only when the live folder is a complete copy of
+    // ours: it may be the only one.
+    if matches!(inspect(addons_dir), FolderState::Ours(_)) {
         for (_, p) in olds {
             let _ = fs::remove_dir_all(p);
         }
@@ -185,7 +204,6 @@ pub fn recover(addons_dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::addon_folder::{inspect, FolderState};
     use std::fs;
     use std::io::{Cursor, Write};
     use zip::write::SimpleFileOptions;
@@ -390,6 +408,80 @@ mod tests {
             assert_eq!(tree(&addons.join("GoldCap")), before, "{failing:?}");
             assert!(!addons.join("GoldCap.old-100").exists(), "{failing:?}");
         }
+    }
+
+    /// A crash leaves the disk as it was after a step. Rebuilds that state, runs
+    /// `recover` and expects a whole folder with its marker.
+    #[test]
+    fn a_crash_after_each_swap_step_recovers_to_a_whole_marked_folder() {
+        let new = FolderState::Ours(v(0, 23, 0));
+        let old = FolderState::Ours(v(0, 22, 0));
+        // (steps done before the crash, expected version after recover)
+        for (done, expected) in [(1, &old), (2, &old), (3, &new), (4, &new)] {
+            let (_t, addons) = setup();
+            let staged = staging_dir(&addons, 100).join("GoldCap");
+            let live = addons.join("GoldCap");
+            let aside = addons.join("GoldCap.old-100");
+            if done >= 1 {
+                write_marker(&staged, &v(0, 23, 0), 100).unwrap();
+            }
+            if done >= 2 {
+                fs::rename(&live, &aside).unwrap();
+            }
+            if done >= 3 {
+                fs::rename(&staged, &live).unwrap();
+            }
+            if done >= 4 {
+                fs::remove_dir_all(&aside).unwrap();
+            }
+            recover(&addons);
+            assert_eq!(&inspect(&addons), expected, "crash after step {done}");
+            assert!(!aside.exists(), "crash after step {done}");
+            assert!(!staging_dir(&addons, 100).exists(), "crash after step {done}");
+        }
+    }
+
+    #[test]
+    fn recover_keeps_the_backup_when_the_live_folder_is_not_ours() {
+        let (_t, addons) = setup();
+        fs::rename(addons.join("GoldCap"), addons.join("GoldCap.old-50")).unwrap();
+        fs::create_dir_all(addons.join("GoldCap/Core")).unwrap();
+        fs::write(addons.join("GoldCap/Core/half.lua"), "x").unwrap();
+        recover(&addons);
+        assert!(addons.join("GoldCap.old-50/GoldCap.toc").exists());
+        assert!(addons.join("GoldCap/Core/half.lua").exists());
+    }
+
+    #[test]
+    fn the_new_folder_carries_its_marker_before_it_is_moved_in() {
+        let (_t, addons) = setup();
+        let staged = staging_dir(&addons, 100).join("GoldCap");
+        let seen = std::cell::Cell::new(false);
+        swap_steps(&addons, &staged, &v(0, 23, 0), 100, &|s| {
+            if s == SwapStep::MoveOldAside {
+                seen.set(staged.join(MARKER_NAME).is_file());
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert!(seen.get());
+    }
+
+    #[test]
+    fn retry_tries_again_and_gives_up_after_the_last_attempt() {
+        let n = std::cell::Cell::new(0);
+        let r = retry(5, std::time::Duration::ZERO, || {
+            n.set(n.get() + 1);
+            if n.get() < 3 { Err(io::Error::other("busy")) } else { Ok(n.get()) }
+        });
+        assert_eq!(r.unwrap(), 3);
+        n.set(0);
+        let r: io::Result<()> = retry(4, std::time::Duration::ZERO, || {
+            n.set(n.get() + 1);
+            Err(io::Error::other("busy"))
+        });
+        assert!(r.is_err());
+        assert_eq!(n.get(), 4);
     }
 
     #[test]
