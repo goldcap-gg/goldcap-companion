@@ -166,3 +166,10 @@ export function addonCard(line, now) {
       return null;
   }
 }
+
+// True when one of an addon check's lines installed the addon at or after `since` (unix
+// seconds, taken before the check). A line keeps its last change from earlier checks, so the
+// wizard run a second time must not announce an install it did not make.
+export function addonInstalledSince(lines, since) {
+  return lines.some((l) => l.lastChange === "installed" && (l.updatedAt ?? 0) >= since);
+}

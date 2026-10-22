@@ -11,6 +11,7 @@ import {
   foreverMarketLine,
   foreverImpactLines,
   addonCard,
+  addonInstalledSince,
 } from "./format.js";
 
 const NOW = 1_785_600_000;
@@ -247,6 +248,15 @@ test("addonCard: failed says the Companion tries again and carries the error", (
 test("addonCard: a failed first install says installed, not updated", () => {
   const c = addonCard(line({ kind: "failed", installedVersion: null, error: "timed out" }), NOW);
   assert.equal(c.detail, "The addon could not be installed this time. The Companion will try again.");
+});
+
+test("addonInstalledSince: only an install from this check counts", () => {
+  const since = NOW - 5;
+  assert.equal(addonInstalledSince([line({ lastChange: "installed", updatedAt: NOW })], since), true);
+  // Installed on an earlier pass: a wizard run again must not announce it again.
+  assert.equal(addonInstalledSince([line({ lastChange: "installed", updatedAt: NOW - 3600 })], since), false);
+  assert.equal(addonInstalledSince([line({ lastChange: "updated", updatedAt: NOW })], since), false);
+  assert.equal(addonInstalledSince([], since), false);
 });
 
 test("addonCard: no card when the companion does not manage the addon", () => {
