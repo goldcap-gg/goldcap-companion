@@ -14,6 +14,12 @@ pub const WOW_PROCESS_NAMES: &[&str] = &[
     "wowclassic.exe",
     "wowclassicb.exe",
     "wowclassict.exe",
+    "wow-arm64.exe",
+    "wowb-arm64.exe",
+    "wowt-arm64.exe",
+    "wowclassic-arm64.exe",
+    "wowclassicb-arm64.exe",
+    "wowclassict-arm64.exe",
     "world of warcraft",
     "world of warcraft classic",
 ];
@@ -64,9 +70,14 @@ fn parse_tasklist(out: &str) -> Vec<String> {
 /// as running: nothing is swapped when it is unknown whether the game is open.
 pub fn wow_is_running(p: &dyn GameProcesses) -> bool {
     let Ok(list) = p.executables() else { return true };
+    // A process list with nothing in it is a failed read, not a quiet machine.
+    if list.is_empty() {
+        return true;
+    }
     list.iter().any(|entry| {
         let base = entry.rsplit(['/', '\\']).next().unwrap_or(entry).trim().to_ascii_lowercase();
         WOW_PROCESS_NAMES.contains(&base.as_str())
+            || (base.starts_with("world of warcraft") && !base.contains("launcher"))
     })
 }
 
@@ -127,6 +138,30 @@ mod tests {
     #[test]
     fn a_listing_that_fails_counts_as_running() {
         assert!(wow_is_running(&Fake(Err(()))));
+    }
+
+    #[test]
+    fn any_macos_binary_named_world_of_warcraft_counts() {
+        assert!(running(&["/Applications/World of Warcraft/_classic_beta_/World of Warcraft Classic Beta.app/Contents/MacOS/World of Warcraft Classic Beta"]));
+        assert!(running(&["World of Warcraft Test"]));
+        assert!(running(&["world of warcraft classic ptr"]));
+    }
+
+    #[test]
+    fn launchers_with_the_game_name_are_not_the_game() {
+        assert!(!running(&["World of Warcraft Launcher", "world of warcraft classic launcher"]));
+    }
+
+    #[test]
+    fn windows_arm64_and_test_clients() {
+        for n in ["Wow-ARM64.exe", "WowB-ARM64.exe", "WowT-ARM64.exe", "WowClassic-ARM64.exe", "WowClassicB-ARM64.exe", "WowClassicT-ARM64.exe", "WowB.exe", "WowT.exe", "WowClassicT.exe"] {
+            assert!(running(&[n]), "{n}");
+        }
+    }
+
+    #[test]
+    fn an_empty_listing_counts_as_running() {
+        assert!(running(&[]));
     }
 
     #[test]

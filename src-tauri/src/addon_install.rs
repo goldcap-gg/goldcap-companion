@@ -607,7 +607,10 @@ mod tests {
         }
 
         async fn run(&self, procs: &[&'static str]) -> Vec<AddonLine> {
-            let procs = Procs(procs.to_vec());
+            // A real machine always lists some processes; an empty list means "unknown".
+            let mut all = vec!["explorer.exe"];
+            all.extend_from_slice(procs);
+            let procs = Procs(all);
             let ctx = Ctx { client: &crate::sync::build_client(), procs: &procs, control: &self.control, logger: &self.logger };
             let src = Source { manifest_url: &format!("{}addon.json", self.server.base), url_prefix: URL_PREFIX, pubkey: TEST_PUB };
             run_once_with_key(&ctx, &src, &self.config, &self.state_path, 1_800_000_000).await
