@@ -10,6 +10,7 @@ import {
   foreverCrowdLine,
   foreverMarketLine,
   foreverImpactLines,
+  addonCard,
 } from "./format.js";
 
 const NOW = 1_785_600_000;
@@ -158,4 +159,65 @@ test("foreverImpactLines groups digits and names a market without a faction by i
   assert.equal(lines.label, "prices updated on Classic Beta PvE 2");
   assert.equal(lines.sub, "1\u2009200 of them nobody else had in the last 24 hours.");
   assert.equal(foreverImpactLines({ impact: impact({ updated: 1, onlyYours: 1, faction: undefined }) }).big, "1");
+});
+
+const line = (over) => ({
+  dir: "C:\\WoW\\_retail_\\Interface\\AddOns",
+  folder: "_retail_",
+  game: "retail",
+  kind: "managed",
+  installedVersion: "0.22.0",
+  availableVersion: "0.22.0",
+  updatedAt: null,
+  lastChange: null,
+  error: null,
+  ...over,
+});
+
+test("addonCard: managed says when the Companion last updated it", () => {
+  const c = addonCard(line({ updatedAt: NOW - 240, lastChange: "updated" }), NOW);
+  assert.equal(c.title, "Retail · GoldCap addon 0.22.0");
+  assert.equal(c.detail, "Kept up to date by the Companion. Updated 4 min ago.");
+  assert.equal(c.tone, "ok");
+  assert.equal(c.action, undefined);
+});
+
+test("addonCard: managed without a time says it was installed", () => {
+  const c = addonCard(line(), NOW);
+  assert.equal(c.detail, "Installed by the Companion.");
+});
+
+test("addonCard: foreign says another app keeps it", () => {
+  const c = addonCard(line({ kind: "foreign", game: "forever", folder: "_classic_beta_" }), NOW);
+  assert.equal(c.title, "WoW: Forever · GoldCap addon");
+  assert.equal(c.detail, "GoldCap is kept up to date by another app");
+});
+
+test("addonCard: foreign has the take-over action", () => {
+  const c = addonCard(line({ kind: "foreign" }), NOW);
+  assert.deepEqual(c.action, { label: "Let the companion update it", dir: line().dir });
+});
+
+test("addonCard: taken over names the installed version", () => {
+  const c = addonCard(line({ kind: "takenOver", installedVersion: "0.21.0" }), NOW);
+  assert.equal(c.title, "Retail · GoldCap addon 0.21.0");
+  assert.equal(c.detail, "The Companion will update it with the next release.");
+  assert.equal(c.action, undefined);
+});
+
+test("addonCard: waiting names the version that is ready", () => {
+  const c = addonCard(line({ kind: "waiting", installedVersion: null, availableVersion: "0.23.0" }), NOW);
+  assert.equal(c.title, "Retail · GoldCap addon");
+  assert.equal(c.detail, "Addon 0.23.0 is ready, it installs when you close the game.");
+});
+
+test("addonCard: failed points to CurseForge and Wago and carries the error", () => {
+  const c = addonCard(line({ kind: "failed", error: "could not move the new addon in: denied" }), NOW);
+  assert.equal(c.detail, "The addon could not be updated. You can still get it from CurseForge or Wago.");
+  assert.equal(c.error, "could not move the new addon in: denied");
+  assert.equal(c.tone, "broken");
+});
+
+test("addonCard: no card when the companion does not manage the addon", () => {
+  assert.equal(addonCard(line({ kind: "off" }), NOW), null);
 });

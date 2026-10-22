@@ -1,4 +1,4 @@
-import { relativeTime, countdown, groupDigits, foreverScanLine, foreverCrowdLine, foreverMarketLine, foreverImpactLines } from "../lib/format.js";
+import { relativeTime, countdown, groupDigits, foreverScanLine, foreverCrowdLine, foreverMarketLine, foreverImpactLines, addonCard } from "../lib/format.js";
 import { brandMarkSvg } from "../lib/brandMark.js";
 
 const POLL_MS = 5000;
@@ -184,6 +184,45 @@ function foreverCard(g) {
   return { card, scanEl: scan, crowdEl: crowd };
 }
 
+// One card for the GoldCap addon in a game install: who looks after it, and for an addon another
+// app keeps, the button that hands it over. `onTakeOver` runs after the Rust side has recorded it.
+function addonCardEl(c, onTakeOver) {
+  const card = document.createElement("div");
+  card.className = "card";
+
+  const head = document.createElement("div");
+  head.className = "row";
+  const dot = document.createElement("span");
+  dot.className = c.tone === "ok" ? "dot dot-ok" : c.tone === "broken" ? "dot dot-broken" : "dot dot-idle";
+  const title = document.createElement("span");
+  title.className = "stage-title";
+  title.textContent = c.title;
+  head.append(dot, title);
+  card.append(head);
+
+  const detail = document.createElement("p");
+  detail.className = "stage-detail";
+  detail.textContent = c.detail;
+  card.append(detail);
+
+  if (c.error) {
+    const error = document.createElement("p");
+    error.className = "stage-error mono";
+    error.textContent = c.error;
+    card.append(error);
+  }
+
+  if (c.action) {
+    const button = document.createElement("button");
+    button.className = "btn";
+    button.type = "button";
+    button.textContent = c.action.label;
+    button.addEventListener("click", () => onTakeOver(c.action.dir, button));
+    card.append(button);
+  }
+  return card;
+}
+
 export function render(el, ctx) {
   el.classList.add("screen-status");
 
@@ -225,6 +264,11 @@ export function render(el, ctx) {
   const foreverCards = document.createElement("div");
   foreverCards.className = "stack";
 
+  // One card per game install whose GoldCap addon the Companion looks at, rebuilt with the
+  // snapshot like the Forever cards above.
+  const addonCards = document.createElement("div");
+  addonCards.className = "stack";
+
   const meta = document.createElement("p");
   meta.className = "meta dim";
 
@@ -247,7 +291,7 @@ export function render(el, ctx) {
   // version line stay fully visible either way.
   const scroll = document.createElement("div");
   scroll.className = "status-scroll";
-  scroll.append(hero, foreverCards, retailCard, meta);
+  scroll.append(hero, foreverCards, retailCard, addonCards, meta);
 
   el.append(top, scroll, action, foot);
 
@@ -308,6 +352,14 @@ export function render(el, ctx) {
     foreverDetails = cards;
     foreverCards.replaceChildren(...cards.map(({ card }) => card));
 
+    const now = Math.floor(Date.now() / 1000);
+    addonCards.replaceChildren(
+      ...(snapshot.addons ?? [])
+        .map((line) => addonCard(line, now))
+        .filter(Boolean)
+        .map((c) => addonCardEl(c, takeOver)),
+    );
+
     action.textContent = snapshot.syncing ? "Syncing…" : "Sync now";
     action.disabled = snapshot.syncing || !snapshot.configured;
 
@@ -347,6 +399,19 @@ export function render(el, ctx) {
       : left
         ? `Next sync in ${left}`
         : "";
+  }
+
+  async function takeOver(dir, button) {
+    button.disabled = true;
+    try {
+      await ctx.api.addonTakeOver(dir);
+      if (disposed) return;
+      await refresh();
+    } catch (e) {
+      if (disposed) return;
+      ctx.toast(String(e), true);
+      button.disabled = false;
+    }
   }
 
   async function refresh() {

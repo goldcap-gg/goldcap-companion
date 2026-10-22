@@ -534,6 +534,28 @@ export function render(el, ctx) {
       autoUpdateBox.checked = Boolean(config.autoUpdate);
     }
 
+    const addonInstall = document.createElement("label");
+    addonInstall.className = "checkbox-row";
+    const addonInstallBox = document.createElement("input");
+    addonInstallBox.type = "checkbox";
+    addonInstallBox.id = "settings-addon-install";
+    addonInstallBox.addEventListener("change", async () => {
+      await persist({ addonInstall: addonInstallBox.checked });
+      if (disposed) return;
+      paintAddonInstall();
+      // Turning it on should not wait for the next scheduled look.
+      if (addonInstallBox.checked) ctx.api.addonCheckNow().catch(() => {});
+    });
+    addonInstall.append(addonInstallBox, document.createTextNode("Install and update the GoldCap addon"));
+    const addonInstallHint = document.createElement("p");
+    addonInstallHint.className = "hint";
+    addonInstallHint.textContent = "A copy that CurseForge, Wago or another app manages is left alone.";
+    sync.append(addonInstall, addonInstallHint);
+
+    function paintAddonInstall() {
+      addonInstallBox.checked = config.addonInstall !== false;
+    }
+
     // Works whichever way the box above is set — it is the way to update for
     // someone who turned the background check off. A found update shows up
     // in the bar above the screens, same as one the background check found.
@@ -563,6 +585,7 @@ export function render(el, ctx) {
     paintInterval();
     paintStartup();
     paintAutoUpdate();
+    paintAddonInstall();
   }
 
   // ---- account -----------------------------------------------------------

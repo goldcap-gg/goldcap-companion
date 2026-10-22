@@ -85,3 +85,51 @@ export function foreverImpactLines(g) {
     sub: i.onlyYours > 0 ? `${groupDigits(i.onlyYours)} of them nobody else had in the last 24 hours.` : "",
   };
 }
+
+// The Status window's card for the GoldCap addon in one game install, from the Rust side's
+// `AddonLine`: `{ title, detail, tone, error?, action? }`, or null when the Companion is not
+// managing the addon there (the setting is off), so no card is drawn. `action` exists only for an
+// addon another app keeps: the button that hands it over.
+export function addonCard(line, now) {
+  if (line.kind === "off") return null;
+  const game = line.game === "forever" ? "WoW: Forever" : "Retail";
+  const withVersion = (version) => `${game} · GoldCap addon${version ? ` ${version}` : ""}`;
+  switch (line.kind) {
+    case "managed":
+      return {
+        title: withVersion(line.installedVersion),
+        detail: line.updatedAt
+          ? `Kept up to date by the Companion. Updated ${relativeTime(line.updatedAt, now)}.`
+          : "Installed by the Companion.",
+        tone: "ok",
+      };
+    case "foreign":
+      return {
+        title: withVersion(""),
+        detail: "GoldCap is kept up to date by another app",
+        tone: "idle",
+        action: { label: "Let the companion update it", dir: line.dir },
+      };
+    case "takenOver":
+      return {
+        title: withVersion(line.installedVersion),
+        detail: "The Companion will update it with the next release.",
+        tone: "idle",
+      };
+    case "waiting":
+      return {
+        title: withVersion(""),
+        detail: `Addon ${line.availableVersion} is ready, it installs when you close the game.`,
+        tone: "idle",
+      };
+    case "failed":
+      return {
+        title: withVersion(""),
+        detail: "The addon could not be updated. You can still get it from CurseForge or Wago.",
+        tone: "broken",
+        error: line.error ?? "",
+      };
+    default:
+      return null;
+  }
+}

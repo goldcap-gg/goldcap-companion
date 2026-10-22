@@ -14,6 +14,7 @@ const configured = {
   intervalMinutes: 30,
   launchAtStartup: true,
   autoUpdate: true,
+  addonInstall: true,
   companionToken: "tok",
 };
 
@@ -414,3 +415,29 @@ export const FIXTURES = {
     },
   },
 };
+
+// One snapshot per kind of addon card, on top of the retail-only player.
+const addonLine = (over) => ({
+  dir: "C:\\Program Files (x86)\\World of Warcraft\\_retail_\\Interface\\AddOns",
+  folder: "_retail_", game: "retail", kind: "managed",
+  installedVersion: "0.22.0", availableVersion: "0.22.0",
+  updatedAt: NOW - 3600, lastChange: "updated", error: null,
+  ...over,
+});
+const withAddons = (addons) => ({
+  config: configured,
+  status: { ...FIXTURES["retail-only: status"].status, addons },
+});
+FIXTURES["addon: kept by the companion"] = withAddons([addonLine({})]);
+FIXTURES["addon: installed just now"] = withAddons([addonLine({ updatedAt: null, lastChange: "installed" })]);
+FIXTURES["addon: kept by another app"] = withAddons([addonLine({ kind: "foreign", installedVersion: "0.20.0", updatedAt: null, lastChange: null })]);
+FIXTURES["addon: handed over"] = withAddons([addonLine({ kind: "takenOver", installedVersion: "0.22.0", updatedAt: null, lastChange: null })]);
+FIXTURES["addon: waiting for the game to close"] = withAddons([addonLine({ kind: "waiting", availableVersion: "0.23.0" })]);
+FIXTURES["addon: could not be updated"] = withAddons([addonLine({ kind: "failed", error: "could not move the new addon in: Access is denied. (os error 5)" })]);
+FIXTURES["addon: retail and forever"] = withAddons([
+  addonLine({}),
+  addonLine({ dir: "C:\\Program Files (x86)\\World of Warcraft\\_classic_beta_\\Interface\\AddOns", folder: "_classic_beta_", game: "forever", kind: "foreign", installedVersion: "0.21.0", updatedAt: null }),
+]);
+
+// Every older snapshot predates the addon install and carries none.
+for (const f of Object.values(FIXTURES)) f.status.addons ??= [];
