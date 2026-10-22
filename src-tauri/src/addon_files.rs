@@ -1,8 +1,8 @@
 //! Putting an addon release on disk: a hostile-zip-safe unpack into a staging
 //! folder beside `AddOns`, a swap by rename that rolls back on any failure, and
 //! the cleanup of what a crash left behind. Nothing here touches anything but
-//! `GoldCap`, `GoldCap.old-*` and `.goldcap-staging-*` inside the folder it is
-//! given.
+//! `GoldCap`, the `GoldCap.old-<ten digits>` a swap makes and
+//! `.goldcap-staging-*` inside the folder it is given.
 
 use crate::addon_folder::{inspect, write_marker, FolderState, MARKER_NAME};
 use crate::addon_manifest::Version;
@@ -23,6 +23,19 @@ const EXECUTABLE_EXTENSIONS: [&str; 11] =
 /// Same filesystem as `AddOns`, so the swap's renames never cross a volume.
 pub fn staging_dir(addons_dir: &Path, now: i64) -> PathBuf {
     addons_dir.join(format!("{STAGING_PREFIX}{now}"))
+}
+
+/// Where a swap moves the old `GoldCap`: the prefix and the time as exactly
+/// ten digits. Only a name of this form is the Companion's own backup.
+pub fn aside_dir(addons_dir: &Path, now: i64) -> PathBuf {
+    addons_dir.join(format!("{OLD_PREFIX}{:010}", now.clamp(0, 9_999_999_999)))
+}
+
+/// The time in a name `aside_dir` makes; `None` for anything else, such as a
+/// player's own `GoldCap.old-backup`.
+fn aside_time(name: &str) -> Option<i64> {
+    let ts = name.strip_prefix(OLD_PREFIX)?;
+    (ts.len() == 10 && ts.bytes().all(|b| b.is_ascii_digit())).then(|| ts.parse().ok())?
 }
 
 fn is_executable_name(name: &str) -> bool {
@@ -139,7 +152,7 @@ pub fn swap_steps(
     hook: &dyn Fn(SwapStep) -> io::Result<()>,
 ) -> Result<(), String> {
     let live = addons_dir.join(TOP);
-    let aside = addons_dir.join(format!("{OLD_PREFIX}{now}"));
+    let aside = aside_dir(addons_dir, now);
     let had_old = fs::symlink_metadata(&live).is_ok();
 
     hook(SwapStep::WriteMarker)
@@ -165,6 +178,7 @@ pub fn swap_steps(
 }
 
 /// After a crash: restore a `GoldCap` moved aside, then delete leftovers.
+/// Only folders a swap made are touched, never another `GoldCap.old-...`.
 pub fn recover(addons_dir: &Path) {
     let Ok(read) = fs::read_dir(addons_dir) else { return };
     let mut olds: Vec<(i64, PathBuf)> = Vec::new();
@@ -172,8 +186,10 @@ pub fn recover(addons_dir: &Path) {
     for entry in read.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         let path = entry.path();
-        if let Some(ts) = name.strip_prefix(OLD_PREFIX) {
-            olds.push((ts.parse().unwrap_or(0), path));
+        if name.starts_with(OLD_PREFIX) {
+            if let Some(ts) = aside_time(&name).filter(|_| fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir())) {
+                olds.push((ts, path));
+            }
         } else if name.starts_with(STAGING_PREFIX) && path.is_dir() {
             stagings.push(path);
         }
@@ -390,7 +406,7 @@ mod tests {
         assert_eq!(inspect(&addons), FolderState::Ours(v(0, 23, 0)));
         assert!(!addons.join("GoldCap/Core/old.lua").exists());
         assert!(addons.join("GoldCap/Core/a.lua").exists());
-        assert!(!addons.join("GoldCap.old-100").exists());
+        assert!(!aside_dir(&addons, 100).exists());
     }
 
     #[test]
@@ -408,7 +424,7 @@ mod tests {
             });
             assert!(r.unwrap_err().contains("disk says no"), "{failing:?}");
             assert_eq!(tree(&addons.join("GoldCap")), before, "{failing:?}");
-            assert!(!addons.join("GoldCap.old-100").exists(), "{failing:?}");
+            assert!(!aside_dir(&addons, 100).exists(), "{failing:?}");
         }
     }
 
@@ -423,7 +439,7 @@ mod tests {
             let (_t, addons) = setup();
             let staged = staging_dir(&addons, 100).join("GoldCap");
             let live = addons.join("GoldCap");
-            let aside = addons.join("GoldCap.old-100");
+            let aside = aside_dir(&addons, 100);
             if done >= 1 {
                 write_marker(&staged, &v(0, 23, 0), 100).unwrap();
             }
@@ -446,11 +462,11 @@ mod tests {
     #[test]
     fn recover_keeps_the_backup_when_the_live_folder_is_not_ours() {
         let (_t, addons) = setup();
-        fs::rename(addons.join("GoldCap"), addons.join("GoldCap.old-50")).unwrap();
+        fs::rename(addons.join("GoldCap"), aside_dir(&addons, 50)).unwrap();
         fs::create_dir_all(addons.join("GoldCap/Core")).unwrap();
         fs::write(addons.join("GoldCap/Core/half.lua"), "x").unwrap();
         recover(&addons);
-        assert!(addons.join("GoldCap.old-50/GoldCap.toc").exists());
+        assert!(aside_dir(&addons, 50).join("GoldCap.toc").exists());
         assert!(addons.join("GoldCap/Core/half.lua").exists());
     }
 
@@ -504,31 +520,57 @@ mod tests {
     #[test]
     fn recover_restores_a_folder_moved_aside_by_a_crash() {
         let (_t, addons) = setup();
-        fs::rename(addons.join("GoldCap"), addons.join("GoldCap.old-50")).unwrap();
+        fs::rename(addons.join("GoldCap"), aside_dir(&addons, 50)).unwrap();
         recover(&addons);
         assert_eq!(inspect(&addons), FolderState::Ours(v(0, 22, 0)));
-        assert!(!addons.join("GoldCap.old-50").exists());
+        assert!(!aside_dir(&addons, 50).exists());
         assert!(!staging_dir(&addons, 100).exists());
     }
 
     #[test]
     fn recover_restores_the_newest_when_there_are_several() {
         let (_t, addons) = setup();
-        fs::rename(addons.join("GoldCap"), addons.join("GoldCap.old-90")).unwrap();
-        fs::create_dir_all(addons.join("GoldCap.old-9")).unwrap();
+        fs::rename(addons.join("GoldCap"), aside_dir(&addons, 90)).unwrap();
+        fs::create_dir_all(aside_dir(&addons, 9)).unwrap();
         recover(&addons);
         assert_eq!(inspect(&addons), FolderState::Ours(v(0, 22, 0)));
-        assert!(!addons.join("GoldCap.old-9").exists());
+        assert!(!aside_dir(&addons, 9).exists());
     }
 
     #[test]
     fn recover_deletes_leftovers_when_goldcap_exists() {
         let (_t, addons) = setup();
-        fs::create_dir_all(addons.join("GoldCap.old-50")).unwrap();
+        fs::create_dir_all(aside_dir(&addons, 50)).unwrap();
         recover(&addons);
-        assert!(!addons.join("GoldCap.old-50").exists());
+        assert!(!aside_dir(&addons, 50).exists());
         assert!(!staging_dir(&addons, 100).exists());
         assert!(addons.join("GoldCap/Core/old.lua").exists());
+    }
+
+    #[test]
+    fn recover_never_touches_a_players_own_backup() {
+        let theirs = [
+            "GoldCap.old-backup",
+            "GoldCap.old-2024",
+            "GoldCap.old-1",
+            "GoldCap.old-17000000000",
+            "GoldCap.old-1700000000-mine",
+            "GoldCap.old-",
+        ];
+        let (_t, addons) = setup();
+        for name in theirs {
+            fs::create_dir_all(addons.join(name)).unwrap();
+            fs::write(addons.join(name).join("keep.lua"), "mine").unwrap();
+        }
+        // Next to a folder the Companion installed, where its own backups are deleted.
+        recover(&addons);
+        // And with no `GoldCap` at all, where its own backup would be put back.
+        fs::remove_dir_all(addons.join("GoldCap")).unwrap();
+        recover(&addons);
+        assert!(!addons.join("GoldCap").exists());
+        for name in theirs {
+            assert_eq!(fs::read(addons.join(name).join("keep.lua")).unwrap(), b"mine", "{name}");
+        }
     }
 
     #[test]

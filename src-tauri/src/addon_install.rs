@@ -1098,7 +1098,7 @@ mod tests {
     async fn a_crash_leftover_is_restored_before_anything_else() {
         let rig = Rig::new();
         rig.hand_made("0.23.0", true);
-        fs::rename(rig.addons().join("GoldCap"), rig.addons().join("GoldCap.old-5")).unwrap();
+        fs::rename(rig.addons().join("GoldCap"), crate::addon_files::aside_dir(&rig.addons(), 1_799_000_000)).unwrap();
         let lines = rig.run(&[]).await;
         assert_eq!(lines[0].kind, LineKind::Managed);
         assert_eq!(names(&rig.addons()), vec!["GoldCap"]);
