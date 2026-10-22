@@ -4,6 +4,10 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
+## 1.20.0 (unreleased)
+
+- Groups you follow on goldcap.gg now reach the GoldCap addon: their deal prices for DEALS and their selling rules for SELL.
+
 ## 1.19.1 (2026-10-13)
 
 - On Linux the Companion also finds World of Warcraft in the Steam that Ubuntu's App Center
