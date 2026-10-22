@@ -90,6 +90,39 @@ where
     Ok(raw.unwrap_or(false))
 }
 
+/// `lenient_flag` for a marker the site writes as `1` (a number keeps the
+/// wire short): `1` or `true` reads as true, anything else, absence included,
+/// as false.
+fn lenient_marker<'de, D>(d: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(match raw {
+        Some(serde_json::Value::Bool(b)) => b,
+        Some(serde_json::Value::Number(n)) => n.as_i64() == Some(1),
+        _ => false,
+    })
+}
+
+/// `lenient_names` for the selling rules a cap addresses by position
+/// (`caps[].r`): each slot is shaped on its own, and one that does not fit
+/// stays in its place as `None` instead of being dropped, so every later rule
+/// keeps its index.
+fn lenient_rules<'de, D>(d: D) -> Result<Vec<Option<WireRule>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(match raw {
+        Some(serde_json::Value::Array(items)) => items
+            .into_iter()
+            .map(|v| serde_json::from_value::<WireRule>(v).ok())
+            .collect(),
+        _ => Vec::new(),
+    })
+}
+
 /// `lenient_opt` for a list: each entry is shaped on its own, and one that
 /// does not fit is dropped by itself — a thousand caps must not vanish
 /// because the site once sent a `"i":"nope"`. A missing or non-list value
@@ -281,6 +314,38 @@ pub struct WireCap {
     /// (read as false), never the cap.
     #[serde(rename = "m", default, deserialize_with = "lenient_flag")]
     pub manual: bool,
+    /// The usual unit price of a followed group's member, copper. Absent on
+    /// an alert cap whose level is under the member's.
+    #[serde(rename = "u", default, deserialize_with = "lenient_opt_number")]
+    pub usual: Option<i64>,
+    /// 0-based index into `rules`, like `g`. Unreadable reads as no rule.
+    #[serde(rename = "r", default, deserialize_with = "lenient_opt")]
+    pub rule: Option<u32>,
+    /// True when the cap belongs to a group the player follows.
+    #[serde(rename = "k", default, deserialize_with = "lenient_marker")]
+    pub followed: bool,
+    /// The lowest unit price the rule allows for this member, copper.
+    #[serde(rename = "f", default, deserialize_with = "lenient_opt_number")]
+    pub floor: Option<i64>,
+}
+
+/// One selling rule of a followed group, as the addon posts by it. The
+/// optional parts read leniently; a rule whose name, play or hours cannot be
+/// read is `None` in its slot (see `lenient_rules`).
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct WireRule {
+    #[serde(rename = "n")]
+    pub name: String,
+    #[serde(rename = "p")]
+    pub play: String,
+    #[serde(rename = "d")]
+    pub hours: u32,
+    #[serde(rename = "q", default, deserialize_with = "lenient_opt")]
+    pub per_item: Option<u32>,
+    #[serde(rename = "fp", default, deserialize_with = "lenient_opt")]
+    pub floor_pct: Option<u32>,
+    #[serde(rename = "s", default, deserialize_with = "lenient_opt")]
+    pub step_pct: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -301,6 +366,9 @@ pub struct WireRuns {
     pub groups: Vec<String>,
     #[serde(default, deserialize_with = "lenient_vec")]
     pub caps: Vec<WireCap>,
+    /// Selling rules of the followed groups, indexed by `caps[].rule`.
+    #[serde(default, deserialize_with = "lenient_rules")]
+    pub rules: Vec<Option<WireRule>>,
 }
 
 /// A string the addon can put in front of a player, or nothing at all: an
@@ -670,6 +738,7 @@ mod tests {
             runs: vec![],
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
         }
     }
@@ -683,6 +752,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![WireRun {
                 code: "abcd2345".into(),
@@ -710,6 +780,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![WireRun {
                 code: "abcd2345".into(),
@@ -734,6 +805,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![WireRun {
                 code: "abcd2345".into(),
@@ -772,6 +844,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![WireRun {
                 code: "abcd2345".into(),
@@ -809,6 +882,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![],
         };
@@ -841,6 +915,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![],
         };
@@ -860,6 +935,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![],
         };
@@ -877,6 +953,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![WireRun {
                 code: "abcd2345".into(),
@@ -908,6 +985,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![WireRun {
                 code: "abcd2345".into(),
@@ -935,6 +1013,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![],
         };
@@ -958,6 +1037,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![WireRun {
                 code: "abcd2345".into(),
@@ -995,6 +1075,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![WireRun {
                 code: "abcd2345".into(),
@@ -1027,6 +1108,7 @@ mod tests {
                 free_lines: 5,
                 groups: vec![],
                 caps: vec![],
+                rules: vec![],
                 game: None,
                 runs: vec![WireRun {
                     code: "abcd2345".into(),
@@ -1078,6 +1160,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![WireRun {
                 code: "abcd2345".into(),
@@ -1108,6 +1191,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![WireRun {
                 code: "abcd2345".into(),
@@ -1177,6 +1261,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![WireRun {
                 code: "abcd2345".into(),
@@ -1379,6 +1464,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![WireRun {
                 code: "a0000016".into(),
@@ -1414,6 +1500,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![WireRun {
                 code: "abcd2345".into(),
@@ -1472,6 +1559,7 @@ mod tests {
                 free_lines: 5,
                 groups: vec![],
                 caps: vec![],
+                rules: vec![],
                 game: None,
                 runs: vec![WireRun {
                     kind: kind.map(Into::into),
@@ -1494,6 +1582,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![WireRun {
                 shared_by: Some("   ".into()),
@@ -1519,6 +1608,7 @@ mod tests {
                 free_lines: 5,
                 groups: vec![],
                 caps: vec![],
+                rules: vec![],
                 game: None,
                 runs: vec![WireRun {
                     lines: vec![WireRunLine {
@@ -1552,6 +1642,7 @@ mod tests {
                 free_lines: 5,
                 groups: vec![],
                 caps: vec![],
+                rules: vec![],
                 game: None,
                 runs: vec![WireRun {
                     lines: vec![WireRunLine {
@@ -1624,6 +1715,7 @@ mod tests {
                 free_lines: 5,
                 groups: vec![],
                 caps: vec![],
+                rules: vec![],
                 game: None,
                 runs: vec![WireRun {
                     lines: vec![WireRunLine {
@@ -1645,6 +1737,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![WireRun {
                 lines: vec![WireRunLine {
@@ -1667,6 +1760,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![WireRun {
                 lines: vec![WireRunLine {
@@ -1701,6 +1795,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![WireRun {
                 shared_by: Some("O'Brien".into()),
@@ -1747,6 +1842,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![WireRun {
                 code: "a0000016".into(),
@@ -1777,6 +1873,7 @@ mod tests {
             free_lines: 5,
             groups: vec![],
             caps: vec![],
+            rules: vec![],
             game: None,
             runs: vec![
                 WireRun {
@@ -1901,7 +1998,7 @@ mod tests {
         let parsed: WireRuns = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.groups, vec!["Transmog".to_string(), "Ore".to_string()]);
         assert_eq!(parsed.caps.len(), 2);
-        assert_eq!(parsed.caps[0], WireCap { item_id: 212345, cap: 1_500_000, min_ilvl: 610, group: Some(0), manual: true });
+        assert_eq!(parsed.caps[0], WireCap { item_id: 212345, cap: 1_500_000, min_ilvl: 610, group: Some(0), manual: true, usual: None, rule: None, followed: false, floor: None });
         assert!(!parsed.caps[1].manual);
     }
 
@@ -2014,8 +2111,8 @@ mod tests {
         let mut runs = v3_empty();
         runs.groups = vec!["Transmog".into(), "O'Ore".into()];
         runs.caps = vec![
-            WireCap { item_id: 212345, cap: 1_500_000, min_ilvl: 610, group: Some(0), manual: true },
-            WireCap { item_id: 190311, cap: 4200, min_ilvl: 0, group: Some(1), manual: false },
+            WireCap { item_id: 212345, cap: 1_500_000, min_ilvl: 610, group: Some(0), manual: true, usual: None, rule: None, followed: false, floor: None },
+            WireCap { item_id: 190311, cap: 4200, min_ilvl: 0, group: Some(1), manual: false, usual: None, rule: None, followed: false, floor: None },
         ];
         let lua = render_runs_lua(&runs, 1_700_000_000).unwrap();
         assert!(lua.ends_with(", groups = { 'Transmog', 'O\\'Ore' }, caps = { { i = 212345, c = 1500000, l = 610, g = 1, m = true }, { i = 190311, c = 4200, g = 2 } } }\n"), "{lua}");
@@ -2026,10 +2123,10 @@ mod tests {
         let mut runs = v3_empty();
         runs.groups = vec!["G".into()];
         runs.caps = vec![
-            WireCap { item_id: 0, cap: 100, min_ilvl: 0, group: Some(0), manual: false },     // no item
-            WireCap { item_id: 5, cap: 0, min_ilvl: 0, group: Some(0), manual: false },       // no price
-            WireCap { item_id: 6, cap: 100, min_ilvl: 0, group: Some(9), manual: false },     // group index off the end → kept, without g
-            WireCap { item_id: 7, cap: 100, min_ilvl: 0, group: Some(0), manual: false },
+            WireCap { item_id: 0, cap: 100, min_ilvl: 0, group: Some(0), manual: false, usual: None, rule: None, followed: false, floor: None },     // no item
+            WireCap { item_id: 5, cap: 0, min_ilvl: 0, group: Some(0), manual: false, usual: None, rule: None, followed: false, floor: None },       // no price
+            WireCap { item_id: 6, cap: 100, min_ilvl: 0, group: Some(9), manual: false, usual: None, rule: None, followed: false, floor: None },     // group index off the end → kept, without g
+            WireCap { item_id: 7, cap: 100, min_ilvl: 0, group: Some(0), manual: false, usual: None, rule: None, followed: false, floor: None },
         ];
         let lua = render_runs_lua(&runs, 1_700_000_000).unwrap();
         assert!(lua.contains("caps = { { i = 6, c = 100 }, { i = 7, c = 100, g = 1 } }"), "{lua}");
@@ -2039,7 +2136,7 @@ mod tests {
     fn only_unusable_caps_means_no_caps_key_at_all() {
         let mut runs = v3_empty();
         runs.groups = vec!["G".into()];
-        runs.caps = vec![WireCap { item_id: 0, cap: 0, min_ilvl: 0, group: Some(0), manual: false }];
+        runs.caps = vec![WireCap { item_id: 0, cap: 0, min_ilvl: 0, group: Some(0), manual: false, usual: None, rule: None, followed: false, floor: None }];
         let lua = render_runs_lua(&runs, 1_700_000_000).unwrap();
         assert!(!lua.contains("caps") && !lua.contains("groups"), "{lua}");
     }
@@ -2051,8 +2148,8 @@ mod tests {
         let mut runs = v3_empty();
         runs.groups = vec!["Transmog".into()];
         runs.caps = vec![
-            WireCap { item_id: 212345, cap: 1_500_000, min_ilvl: 610, group: Some(0), manual: true },
-            WireCap { item_id: 190311, cap: 4200, min_ilvl: 0, group: Some(0), manual: false },
+            WireCap { item_id: 212345, cap: 1_500_000, min_ilvl: 610, group: Some(0), manual: true, usual: None, rule: None, followed: false, floor: None },
+            WireCap { item_id: 190311, cap: 4200, min_ilvl: 0, group: Some(0), manual: false, usual: None, rule: None, followed: false, floor: None },
         ];
         let lua_source = render_runs_lua(&runs, 1_700_000_000).unwrap();
 
@@ -2232,5 +2329,47 @@ mod tests {
         let request = seen.recv().unwrap();
         assert!(request.starts_with("GET /v1/lists/companion?game=forever&market=us-beta-x-horde "), "{request}");
         assert!(request.to_ascii_lowercase().contains("authorization: bearer tok"));
+    }
+
+    #[test]
+    fn a_follow_cap_reads_u_r_k_f() {
+        let json = r#"{"i":5,"c":800,"l":0,"g":1,"m":false,"u":1000,"r":0,"k":1,"f":700}"#;
+        let cap: WireCap = serde_json::from_str(json).unwrap();
+        assert_eq!(cap.usual, Some(1000));
+        assert_eq!(cap.rule, Some(0));
+        assert!(cap.followed);
+        assert_eq!(cap.floor, Some(700));
+    }
+
+    #[test]
+    fn unreadable_follow_fields_read_as_absent_and_keep_the_cap() {
+        let json = r#"{"i":5,"c":800,"u":"x","r":-1,"k":"yes","f":null}"#;
+        let cap: WireCap = serde_json::from_str(json).unwrap();
+        assert_eq!(cap.item_id, 5);
+        assert_eq!(cap.cap, 800);
+        assert_eq!(cap.usual, None);
+        assert_eq!(cap.rule, None);
+        assert!(!cap.followed);
+        assert_eq!(cap.floor, None);
+    }
+
+    #[test]
+    fn an_unreadable_rule_keeps_its_slot() {
+        let json = r#"{"v":3,"generatedAt":"2026-09-22T10:00:00.000Z","plan":"pro","freeLines":5,"runs":[],"rules":[{"n":"A","p":"flip","d":48,"q":1,"fp":70,"s":5},7,{"n":"B","p":"gather","d":24,"fp":80}]}"#;
+        let parsed: WireRuns = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.rules.len(), 3);
+        assert_eq!(parsed.rules[1], None);
+        assert_eq!(parsed.rules[2].as_ref().unwrap().name, "B");
+        let first = parsed.rules[0].as_ref().unwrap();
+        assert_eq!(first.per_item, Some(1));
+        assert_eq!(first.step_pct, Some(5));
+        assert_eq!(first.floor_pct, Some(70));
+    }
+
+    #[test]
+    fn a_payload_without_rules_reads_no_rules() {
+        let json = r#"{"v":3,"generatedAt":"2026-09-22T10:00:00.000Z","plan":"free","freeLines":5,"runs":[]}"#;
+        let parsed: WireRuns = serde_json::from_str(json).unwrap();
+        assert!(parsed.rules.is_empty());
     }
 }
