@@ -1,6 +1,6 @@
 use crate::addon_files::{recover, staging_dir, swap_steps, unpack};
 use crate::addon_folder::{decide, inspect, toc_version, Decision, FolderState};
-use crate::addon_game::{wow_is_running, GameProcesses, SystemProcesses};
+use crate::addon_game::{runs_from, wow_is_running, GameProcesses, SystemProcesses};
 use crate::addon_manifest::{
     check_payload, updater_pubkey, verify_manifest, AddonManifest, Version, VerifiedRelease, MANIFEST_URL,
     URL_PREFIX,
@@ -318,11 +318,15 @@ pub(crate) async fn run_once_with_key(
     let mut in_place: Vec<PathBuf> = Vec::new();
     for (t, folder_state) in targets.iter().zip(&folders) {
         let prev = state.lines.get(&key(t)).cloned();
-        // A client the name list does not know still holds its exe in this install.
-        let held = (ready && !game_running && matches!(plan(folder_state, taken(t), &available, false), Action::Apply(_)))
-            .then(|| ctx.procs.exe_in_use(&t.game_dir))
-            .flatten();
-        let line = match plan(folder_state, taken(t), &available, game_running || held.is_some()) {
+        // A client the name list does not know still runs from this install's folder.
+        let held = if ready && !game_running && matches!(plan(folder_state, taken(t), &available, false), Action::Apply(_)) {
+            runs_from(ctx.procs, &t.game_dir)
+        } else {
+            Ok(None)
+        };
+        let unclear = cannot_tell.clone().or_else(|| held.clone().err());
+        let held = held.ok().flatten();
+        let line = match plan(folder_state, taken(t), &available, game_running || held.is_some() || unclear.is_some()) {
             Action::Skip(kind) => {
                 match kind {
                     LineKind::Foreign => ctx.logger.info(&format!(
@@ -332,13 +336,13 @@ pub(crate) async fn run_once_with_key(
                     LineKind::Waiting => ctx.logger.info(&format!(
                         "addon: {} update {available} waits for the game to close{}",
                         t.folder,
-                        held.as_deref().or(cannot_tell.as_deref()).map(|h| format!(" ({h})")).unwrap_or_default()
+                        held.as_deref().or(unclear.as_deref()).map(|h| format!(" ({h})")).unwrap_or_default()
                     )),
                     _ => {}
                 }
                 let mut l = base_line(t, kind, folder_state, Some(&available), prev.as_ref());
                 if kind == LineKind::Waiting {
-                    l.error = cannot_tell.clone();
+                    l.error = unclear;
                 }
                 l
             }
@@ -432,7 +436,7 @@ fn managed_line(
 /// Looked at again right before the swap: the folder and the game as they are now.
 fn changed_since_checked(ctx: &Ctx<'_>, t: &Target, seen: &FolderState) -> bool {
     wow_is_running(ctx.procs) != Ok(false)
-        || ctx.procs.exe_in_use(&t.game_dir).is_some()
+        || runs_from(ctx.procs, &t.game_dir) != Ok(None)
         || inspect(&t.addons_dir()) != *seen
 }
 
@@ -682,22 +686,38 @@ mod tests {
         }
     }
 
-    /// Lists no client by name, but an exe in `dir` is held open from the
-    /// `from`th look on (0 is the first).
-    struct HeldExe {
+    /// Lists no client by name, but a program runs from `dir` from the
+    /// `from`th look at the programs' paths on (0 is the first).
+    struct RunsFrom {
         dir: PathBuf,
         from: usize,
         looks: std::sync::atomic::AtomicUsize,
     }
 
-    impl GameProcesses for HeldExe {
+    impl GameProcesses for RunsFrom {
         fn executables(&self) -> std::io::Result<Vec<String>> {
             Ok(vec!["explorer.exe".to_string()])
         }
 
-        fn exe_in_use(&self, game_dir: &Path) -> Option<String> {
-            let look = self.looks.fetch_add(1, Ordering::SeqCst);
-            (game_dir == self.dir && look >= self.from).then(|| "WowNewClient.exe is in use".to_string())
+        fn image_paths(&self) -> std::io::Result<Vec<String>> {
+            let mut out = vec![r"C:\Windows\explorer.exe".to_string()];
+            if self.looks.fetch_add(1, Ordering::SeqCst) >= self.from {
+                out.push(self.dir.join("WowNewClient.exe").to_string_lossy().to_string());
+            }
+            Ok(out)
+        }
+    }
+
+    /// Lists no client by name, and the programs' paths cannot be read.
+    struct NoPaths;
+
+    impl GameProcesses for NoPaths {
+        fn executables(&self) -> std::io::Result<Vec<String>> {
+            Ok(vec!["explorer.exe".to_string()])
+        }
+
+        fn image_paths(&self) -> std::io::Result<Vec<String>> {
+            Err(std::io::Error::other("process enumeration is blocked"))
         }
     }
 
@@ -1061,29 +1081,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_exe_held_in_the_game_folder_counts_as_the_game_running() {
+    async fn a_program_running_from_the_game_folder_counts_as_the_game_running() {
         let rig = Rig::new();
         rig.hand_made("0.22.0", true);
         let before = tree(&rig.addons());
-        let held = HeldExe { dir: rig.retail.clone(), from: 0, looks: Default::default() };
-        let lines = rig.run_with(&held).await;
-        assert_eq!(lines[0].kind, LineKind::Waiting);
+        let runs = RunsFrom { dir: rig.retail.clone(), from: 0, looks: Default::default() };
+        let lines = rig.run_with(&runs).await;
+        assert_eq!((lines[0].kind, lines[0].error.as_deref()), (LineKind::Waiting, None));
         assert_eq!(tree(&rig.addons()), before);
         let log = fs::read_to_string(rig.logger_file()).unwrap();
-        assert!(log.contains("WowNewClient.exe is in use"), "{log}");
+        assert!(log.contains("WowNewClient.exe runs from the game folder"), "{log}");
         let lines = rig.run(&[]).await;
         assert_eq!(lines[0].kind, LineKind::Managed);
     }
 
     #[tokio::test]
-    async fn an_exe_held_once_the_download_is_done_stops_the_swap() {
+    async fn a_program_started_from_the_game_folder_once_the_download_is_done_stops_the_swap() {
         let rig = Rig::new();
         rig.hand_made("0.22.0", true);
         let before = tree(&rig.addons());
-        let held = HeldExe { dir: rig.retail.clone(), from: 1, looks: Default::default() };
-        let lines = rig.run_with(&held).await;
+        let runs = RunsFrom { dir: rig.retail.clone(), from: 1, looks: Default::default() };
+        let lines = rig.run_with(&runs).await;
         assert_eq!(lines[0].kind, LineKind::Waiting);
         assert_eq!(tree(&rig.addons()), before);
+    }
+
+    #[tokio::test]
+    async fn a_program_in_another_folder_does_not_hold_the_update() {
+        let rig = Rig::new();
+        rig.hand_made("0.22.0", true);
+        let runs = RunsFrom { dir: rig.retail.join("Utils"), from: 0, looks: Default::default() };
+        let lines = rig.run_with(&runs).await;
+        assert_eq!(lines[0].kind, LineKind::Managed);
+    }
+
+    #[tokio::test]
+    async fn programs_whose_paths_cannot_be_read_wait_and_say_why() {
+        let rig = Rig::new();
+        rig.hand_made("0.22.0", true);
+        let before = tree(&rig.addons());
+        let lines = rig.run_with(&NoPaths).await;
+        assert_eq!(lines[0].kind, LineKind::Waiting);
+        assert!(lines[0].error.as_deref().is_some_and(|e| e.contains("process enumeration is blocked")), "{:?}", lines[0].error);
+        assert_eq!(tree(&rig.addons()), before);
+        let log = fs::read_to_string(rig.logger_file()).unwrap();
+        assert!(log.contains("process enumeration is blocked"), "{log}");
     }
 
     #[tokio::test]

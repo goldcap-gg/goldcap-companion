@@ -59,11 +59,11 @@ put it or where you handed it over, and only while the game is closed), and its 
 settings and log in your user profile. A `GoldCap` folder that CurseForge, Wago,
 another app or you yourself put there is left alone unless you press "Let the
 Companion update it". It reads the GoldCap addon's saved variables. It never
-touches the game's memory or its process. To tell whether the game is open before
-it changes the addon, it lists the programs running (`tasklist` on Windows, `ps`
-on macOS and Linux), and on Windows it also asks whether the `.exe` files in the
-game folder are in use: Windows will not open a running program's file for
-writing. Nothing is written to them.
+reads or changes the game's memory. To tell whether the game is open before it
+changes the addon, it lists the programs running (`tasklist` on Windows, `ps` on
+macOS and Linux), and on Windows it also asks Windows where each running program
+was started from, the path Task Manager shows: a program started from the game
+folder counts as the game, whatever its name. It opens no game file to find out.
 
 On Windows the installer is an `.msi`. It installs the app into Program Files, so
 Windows asks for administrator rights once while it installs, and again when you

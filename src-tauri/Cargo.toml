@@ -36,6 +36,9 @@ tauri-plugin-autostart = "2"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"
+# The running programs' paths for the game check in addon_game.rs. Already in
+# the lock through tokio, winreg and tray-icon: this adds no crate.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
 
 # macOS already funnels a relaunch into the running process (RunEvent::Reopen
 # in main.rs); Windows and Linux start a second one. See main.rs for why that
