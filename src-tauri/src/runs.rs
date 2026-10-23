@@ -340,6 +340,14 @@ pub struct WireRule {
     /// A missing or non-string `id` is `None`; the rule is still read.
     #[serde(rename = "id", default, deserialize_with = "lenient_opt")]
     pub id: Option<String>,
+    /// For a subgroup: the parent group's slug, its name, and the subgroup's
+    /// own short label. Each reads as `None` when missing or not a string.
+    #[serde(rename = "pi", default, deserialize_with = "lenient_opt")]
+    pub parent_id: Option<String>,
+    #[serde(rename = "pn", default, deserialize_with = "lenient_opt")]
+    pub parent_name: Option<String>,
+    #[serde(rename = "cn", default, deserialize_with = "lenient_opt")]
+    pub child_name: Option<String>,
     #[serde(rename = "p")]
     pub play: String,
     #[serde(rename = "d")]
@@ -434,9 +442,10 @@ fn is_group_id(id: &str) -> bool {
 
 /// A selling rule as the addon reads it, or nothing at all: a rule with no
 /// name to show, a play the addon has no mode for, or a duration the auction
-/// house does not offer cannot be acted on. Keys: `n`, `id` (only when 1 to
-/// 80 characters of `a-z`, `0-9`, `_`, `-`), `p`, `d`; `q` is written only
-/// when 1 and `fp`/`s` only inside 1..=100, like the contract.
+/// house does not offer cannot be acted on. Keys: `n`, `id` and `pi` (only
+/// when 1 to 80 characters of `a-z`, `0-9`, `_`, `-`), `pn` and `cn` (only
+/// when not blank), `p`, `d`; `q` is written only when 1 and `fp`/`s` only
+/// inside 1..=100, like the contract.
 fn render_rule(rule: &WireRule) -> Option<String> {
     let name = shown_text(&rule.name)?;
     if !["flip", "gather", "craft", "stock"].contains(&rule.play.as_str())
@@ -450,8 +459,26 @@ fn render_rule(rule: &WireRule) -> Option<String> {
         .filter(|id| is_group_id(id))
         .map(|id| format!(", id = '{}'", escape_lua_string(id)))
         .unwrap_or_default();
+    let parent_id = rule
+        .parent_id
+        .as_deref()
+        .filter(|id| is_group_id(id))
+        .map(|id| format!(", pi = '{}'", escape_lua_string(id)))
+        .unwrap_or_default();
+    let parent_name = rule
+        .parent_name
+        .as_deref()
+        .and_then(shown_text)
+        .map(|n| format!(", pn = '{}'", escape_lua_string(n)))
+        .unwrap_or_default();
+    let child_name = rule
+        .child_name
+        .as_deref()
+        .and_then(shown_text)
+        .map(|n| format!(", cn = '{}'", escape_lua_string(n)))
+        .unwrap_or_default();
     let mut out = format!(
-        "{{ n = '{}'{id}, p = '{}', d = {}",
+        "{{ n = '{}'{id}{parent_id}{parent_name}{child_name}, p = '{}', d = {}",
         escape_lua_string(name),
         rule.play,
         rule.hours
@@ -2563,6 +2590,58 @@ mod tests {
     fn a_non_string_rule_id_still_reads_the_rule() {
         let lua = rule_lua(r#"{"n":"A","id":7,"p":"flip","d":48}"#);
         assert!(lua.contains("rules = { { n = 'A', p = 'flip', d = 48 } }"), "{lua}");
+    }
+
+    #[test]
+    fn a_subgroups_parent_keys_render_in_order_right_after_the_id() {
+        let lua = rule_lua(
+            r#"{"n":"Mining","id":"mining","pi":"herbs","pn":"Herbs","cn":"Ore","p":"gather","d":24,"fp":80}"#,
+        );
+        assert!(
+            lua.contains("{ n = 'Mining', id = 'mining', pi = 'herbs', pn = 'Herbs', cn = 'Ore', p = 'gather', d = 24, fp = 80 }"),
+            "{lua}"
+        );
+    }
+
+    #[test]
+    fn a_malformed_parent_key_is_left_out_and_the_rest_stays() {
+        let long = "a".repeat(81);
+        for bad in ["Herbs", "he'rbs", "he rbs", "", long.as_str()] {
+            let lua = rule_lua(&format!(
+                r#"{{"n":"A","id":"a","pi":"{bad}","pn":"P","cn":"C","p":"flip","d":48}}"#
+            ));
+            assert!(
+                lua.contains("{ n = 'A', id = 'a', pn = 'P', cn = 'C', p = 'flip', d = 48 }"),
+                "{bad}: {lua}"
+            );
+        }
+        for blank in [r#""""#, r#""  ""#, "7", "null"] {
+            let lua = rule_lua(&format!(
+                r#"{{"n":"A","id":"a","pi":"p","pn":{blank},"cn":{blank},"p":"flip","d":48}}"#
+            ));
+            assert!(lua.contains("{ n = 'A', id = 'a', pi = 'p', p = 'flip', d = 48 }"), "{blank}: {lua}");
+        }
+    }
+
+    #[test]
+    fn a_parent_name_with_a_quote_and_a_newline_round_trips_through_lua() {
+        use mlua::{Lua, LuaOptions, StdLib};
+
+        let lua_src = rule_lua(
+            r#"{"n":"A","pi":"p","pn":"Bob's\n\"Herbs\"","cn":"it's\nore","p":"flip","d":48}"#,
+        );
+        let lua = Lua::new_with(StdLib::NONE, LuaOptions::default()).unwrap();
+        lua.load(lua_src).exec().unwrap();
+        let pn: String = lua.load("return GoldCap_AppRuns.rules[1].pn").eval().unwrap();
+        let cn: String = lua.load("return GoldCap_AppRuns.rules[1].cn").eval().unwrap();
+        assert_eq!(pn, "Bob's\n\"Herbs\"");
+        assert_eq!(cn, "it's\nore");
+    }
+
+    #[test]
+    fn a_rule_without_parent_keys_renders_as_before() {
+        let lua = rule_lua(r#"{"n":"Herbs","id":"herbs","p":"gather","d":24,"fp":80}"#);
+        assert!(lua.contains("rules = { { n = 'Herbs', id = 'herbs', p = 'gather', d = 24, fp = 80 } }"), "{lua}");
     }
 
     #[test]
