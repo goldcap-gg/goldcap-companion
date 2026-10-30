@@ -753,8 +753,10 @@ mod tests {
             }
         }
 
+        // Joined as addons_dir() joins it: the state keys a folder by this path as a string, and on
+        // Windows "Interface/AddOns" in one join keeps its slash where the Companion's key has a backslash.
         fn addons(&self) -> PathBuf {
-            self.retail.join("Interface/AddOns")
+            self.retail.join("Interface").join("AddOns")
         }
 
         fn logger_file(&self) -> PathBuf {
