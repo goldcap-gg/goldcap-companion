@@ -34,3 +34,7 @@ export const updateReady = () => invoke("update_ready");
 export const installUpdate = () => invoke("install_update");
 /** Check right now; the update that is waiting, or null when up to date. */
 export const checkForUpdates = () => invoke("check_for_updates");
+/** Install or update the GoldCap addon now; the line for each game install. */
+export const addonCheckNow = () => invoke("addon_check_now");
+/** Hand the addon in one AddOns folder (a line's `dir`) over to the Companion. */
+export const addonTakeOver = (dir) => invoke("addon_take_over", { dir });

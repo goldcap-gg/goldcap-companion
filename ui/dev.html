@@ -89,6 +89,11 @@
           },
           openAccountPage: () => delay(),
           checkForUpdates: () => delay(f.update ?? null),
+          addonCheckNow: () => delay(f.status.addons ?? []),
+          addonTakeOver: (dir) => {
+            for (const l of f.status.addons ?? []) if (l.dir === dir) l.kind = "takenOver";
+            return delay();
+          },
         };
       }
 

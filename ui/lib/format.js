@@ -85,3 +85,91 @@ export function foreverImpactLines(g) {
     sub: i.onlyYours > 0 ? `${groupDigits(i.onlyYours)} of them nobody else had in the last 24 hours.` : "",
   };
 }
+
+// True when version `a` ("1.2.3") is older than `b`, compared number by number.
+function olderThan(a, b) {
+  const pa = String(a).split(".").map(Number);
+  const pb = String(b).split(".").map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) < (pb[i] || 0);
+  }
+  return false;
+}
+
+// The Status window's card for the GoldCap addon in one game install, from the Rust side's
+// `AddonLine`: `{ title, detail, tone, error?, action? }`, or null when the Companion is not
+// managing the addon there (the setting is off), so no card is drawn. `action` exists only for an
+// addon another app keeps: the button that hands it over.
+export function addonCard(line, now) {
+  if (line.kind === "off") return null;
+  const game = line.game === "forever" ? "WoW: Forever" : "Retail";
+  const withVersion = (version) => `${game} · GoldCap addon${version ? ` ${version}` : ""}`;
+  switch (line.kind) {
+    case "managed":
+      return {
+        title: withVersion(line.installedVersion),
+        detail: line.updatedAt
+          ? `Kept up to date by the Companion. Updated ${relativeTime(line.updatedAt, now)}.`
+          : "Installed by the Companion.",
+        tone: "ok",
+      };
+    case "foreign":
+      // No readable version means a linked or development copy: handing it over
+      // could never do anything, so say why instead of offering the button.
+      if (!line.installedVersion) {
+        return {
+          title: withVersion(""),
+          detail: "GoldCap here is a linked or development copy, so the Companion leaves it alone.",
+          tone: "idle",
+        };
+      }
+      // A copy installed by hand is updated by nothing, so this never claims another app keeps it current.
+      return {
+        title: withVersion(line.installedVersion),
+        detail:
+          line.availableVersion && olderThan(line.installedVersion, line.availableVersion)
+            ? `Another app or a manual install looks after GoldCap here. Addon ${line.availableVersion} is out.`
+            : "Another app or a manual install looks after GoldCap here, so the Companion leaves it alone.",
+        tone: "idle",
+        action: { label: "Let the Companion update it", dir: line.dir },
+      };
+    case "takenOver":
+      return {
+        title: withVersion(line.installedVersion),
+        detail: "The Companion will update it with the next release.",
+        tone: "idle",
+      };
+    case "waiting":
+      // An error here says why the Companion could not check the game, so the card does not blame the game.
+      if (line.error) {
+        return {
+          title: withVersion(""),
+          detail: `Addon ${line.availableVersion} is ready. The Companion cannot tell whether the game is open, so it waits.`,
+          tone: "idle",
+          error: line.error,
+        };
+      }
+      return {
+        title: withVersion(""),
+        detail: `Addon ${line.availableVersion} is ready, it installs when you close the game.`,
+        tone: "idle",
+      };
+    case "failed":
+      // The Companion looks again in two minutes, then less often while it keeps failing.
+      return {
+        title: withVersion(""),
+        detail: `The addon could not be ${line.installedVersion ? "updated" : "installed"} this time. The Companion will try again.`,
+        tone: "broken",
+        error: line.error ?? "",
+      };
+    default:
+      return null;
+  }
+}
+
+// True when one of an addon check's lines installed the addon at or after `since` (unix
+// seconds, taken before the check). A line keeps its last change from earlier checks, so the
+// wizard run a second time must not announce an install it did not make.
+export function addonInstalledSince(lines, since) {
+  return lines.some((l) => l.lastChange === "installed" && (l.updatedAt ?? 0) >= since);
+}

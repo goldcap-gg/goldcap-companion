@@ -1,6 +1,6 @@
 [package]
 name = "goldcap-companion"
-version = "1.19.1"
+version = "1.20.0"
 description = "GoldCap companion — automatic price sync for the GoldCap WoW addon"
 edition = "2021"
 rust-version = "1.77"
@@ -24,12 +24,24 @@ notify = "8"
 # Blizzard's to change. The VM is built with NO stdlib and the file is loaded
 # as data, so nothing in it can reach the filesystem or the network.
 mlua = { version = "0.11", features = ["lua54", "vendored"] }
+# The addon install: the same minisign key the self-updater uses verifies a
+# small manifest, the zip is checked against the hash in it and unpacked here.
+minisign-verify = "0.2"
+base64 = "0.22"
+sha2 = "0.10"
+zip = { version = "4", default-features = false, features = ["deflate-flate2"] }
+# zip's "deflate-flate2" names no deflate backend. On macOS and Linux another crate's flate2
+# happened to bring miniz_oxide in; on Windows nothing did and flate2 refused to compile.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-autostart = "2"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"
+# The running programs' paths for the game check in addon_game.rs. Already in
+# the lock through tokio, winreg and tray-icon: this adds no crate.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
 
 # macOS already funnels a relaunch into the running process (RunEvent::Reopen
 # in main.rs); Windows and Linux start a second one. See main.rs for why that

@@ -10,6 +10,8 @@ import {
   foreverCrowdLine,
   foreverMarketLine,
   foreverImpactLines,
+  addonCard,
+  addonInstalledSince,
 } from "./format.js";
 
 const NOW = 1_785_600_000;
@@ -158,4 +160,105 @@ test("foreverImpactLines groups digits and names a market without a faction by i
   assert.equal(lines.label, "prices updated on Classic Beta PvE 2");
   assert.equal(lines.sub, "1\u2009200 of them nobody else had in the last 24 hours.");
   assert.equal(foreverImpactLines({ impact: impact({ updated: 1, onlyYours: 1, faction: undefined }) }).big, "1");
+});
+
+const line = (over) => ({
+  dir: "C:\\WoW\\_retail_\\Interface\\AddOns",
+  folder: "_retail_",
+  game: "retail",
+  kind: "managed",
+  installedVersion: "0.22.0",
+  availableVersion: "0.22.0",
+  updatedAt: null,
+  lastChange: null,
+  error: null,
+  ...over,
+});
+
+test("addonCard: managed says when the Companion last updated it", () => {
+  const c = addonCard(line({ updatedAt: NOW - 240, lastChange: "updated" }), NOW);
+  assert.equal(c.title, "Retail · GoldCap addon 0.22.0");
+  assert.equal(c.detail, "Kept up to date by the Companion. Updated 4 min ago.");
+  assert.equal(c.tone, "ok");
+  assert.equal(c.action, undefined);
+});
+
+test("addonCard: managed without a time says it was installed", () => {
+  const c = addonCard(line(), NOW);
+  assert.equal(c.detail, "Installed by the Companion.");
+});
+
+test("addonCard: foreign says another app or a manual install looks after it", () => {
+  const c = addonCard(
+    line({ kind: "foreign", game: "forever", folder: "_classic_beta_", installedVersion: "0.21.0", availableVersion: "0.21.0" }),
+    NOW,
+  );
+  assert.equal(c.title, "WoW: Forever · GoldCap addon 0.21.0");
+  assert.equal(c.detail, "Another app or a manual install looks after GoldCap here, so the Companion leaves it alone.");
+});
+
+test("addonCard: foreign behind the latest release says which one is out", () => {
+  const c = addonCard(line({ kind: "foreign", installedVersion: "0.9.0", availableVersion: "0.23.0" }), NOW);
+  assert.equal(c.detail, "Another app or a manual install looks after GoldCap here. Addon 0.23.0 is out.");
+  const ahead = addonCard(line({ kind: "foreign", installedVersion: "0.24.0", availableVersion: "0.23.0" }), NOW);
+  assert.doesNotMatch(ahead.detail, /is out/);
+});
+
+test("addonCard: foreign has the take-over action, naming the Companion as every other line does", () => {
+  const c = addonCard(line({ kind: "foreign", installedVersion: "0.21.0" }), NOW);
+  assert.deepEqual(c.action, { label: "Let the Companion update it", dir: line().dir });
+});
+
+test("addonCard: a foreign copy with no readable version has no button and says why", () => {
+  const c = addonCard(line({ kind: "foreign", installedVersion: null }), NOW);
+  assert.equal(c.action, undefined);
+  assert.match(c.detail, /linked or development copy/);
+});
+
+test("addonCard: taken over names the installed version", () => {
+  const c = addonCard(line({ kind: "takenOver", installedVersion: "0.21.0" }), NOW);
+  assert.equal(c.title, "Retail · GoldCap addon 0.21.0");
+  assert.equal(c.detail, "The Companion will update it with the next release.");
+  assert.equal(c.action, undefined);
+});
+
+test("addonCard: waiting names the version that is ready", () => {
+  const c = addonCard(line({ kind: "waiting", installedVersion: null, availableVersion: "0.23.0" }), NOW);
+  assert.equal(c.title, "Retail · GoldCap addon");
+  assert.equal(c.detail, "Addon 0.23.0 is ready, it installs when you close the game.");
+});
+
+test("addonCard: waiting because the game cannot be checked says so, not that the game is open", () => {
+  const c = addonCard(
+    line({ kind: "waiting", installedVersion: null, availableVersion: "0.23.0", error: "the list of running programs cannot be read: denied" }),
+    NOW,
+  );
+  assert.equal(c.detail, "Addon 0.23.0 is ready. The Companion cannot tell whether the game is open, so it waits.");
+  assert.equal(c.error, "the list of running programs cannot be read: denied");
+  assert.equal(c.tone, "idle");
+});
+
+test("addonCard: failed says the Companion tries again and carries the error", () => {
+  const c = addonCard(line({ kind: "failed", error: "could not move the new addon in: denied" }), NOW);
+  assert.equal(c.detail, "The addon could not be updated this time. The Companion will try again.");
+  assert.equal(c.error, "could not move the new addon in: denied");
+  assert.equal(c.tone, "broken");
+});
+
+test("addonCard: a failed first install says installed, not updated", () => {
+  const c = addonCard(line({ kind: "failed", installedVersion: null, error: "timed out" }), NOW);
+  assert.equal(c.detail, "The addon could not be installed this time. The Companion will try again.");
+});
+
+test("addonInstalledSince: only an install from this check counts", () => {
+  const since = NOW - 5;
+  assert.equal(addonInstalledSince([line({ lastChange: "installed", updatedAt: NOW })], since), true);
+  // Installed on an earlier pass: a wizard run again must not announce it again.
+  assert.equal(addonInstalledSince([line({ lastChange: "installed", updatedAt: NOW - 3600 })], since), false);
+  assert.equal(addonInstalledSince([line({ lastChange: "updated", updatedAt: NOW })], since), false);
+  assert.equal(addonInstalledSince([], since), false);
+});
+
+test("addonCard: no card when the companion does not manage the addon", () => {
+  assert.equal(addonCard(line({ kind: "off" }), NOW), null);
 });

@@ -1,4 +1,4 @@
-import { formatPairCode } from "../lib/format.js";
+import { formatPairCode, addonInstalledSince } from "../lib/format.js";
 
 // The install path and, when the game folders resolve to exactly one, the
 // realm all come out of the game's own files — see detect() below. Step 0
@@ -589,6 +589,14 @@ export function render(el, ctx) {
       } catch {
         // The Status screen reports a failed sync properly; nothing useful to
         // add here, and it must not block leaving the wizard.
+      }
+      // The addon goes in now, where this install has none, instead of at the next scheduled look.
+      try {
+        const since = Math.floor(Date.now() / 1000);
+        const lines = await ctx.api.addonCheckNow();
+        if (addonInstalledSince(lines, since)) ctx.toast("GoldCap addon: installed");
+      } catch {
+        // Settings and the Status window carry the addon's state; nothing to add here.
       }
       ctx.show("status");
     }

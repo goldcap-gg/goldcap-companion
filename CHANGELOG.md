@@ -4,6 +4,13 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
+## 1.20.0 (2026-10-30)
+
+- The Companion can now put the GoldCap addon into your game for you. If there is no GoldCap addon in your AddOns folder, it installs it, and it keeps that copy up to date. It only does this while World of Warcraft is closed.
+- If CurseForge, Wago or another app already looks after your GoldCap addon, or you put it in by hand, the Companion leaves it alone and the Status window says so, with the newest version when yours is older. A button there lets you hand it over to the Companion.
+- Settings has a checkbox, Install and update the GoldCap addon, on by default.
+- Groups you follow on goldcap.gg now reach the GoldCap addon: their deal prices for DEALS and their selling rules for SELL.
+
 ## 1.19.1 (2026-10-13)
 
 - On Linux the Companion also finds World of Warcraft in the Steam that Ubuntu's App Center
