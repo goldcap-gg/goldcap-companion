@@ -9,7 +9,9 @@ use std::path::Path;
 use std::process::Command;
 
 /// Executable base names (lowercase) of every WoW client: retail, Forever
-/// (beta, test) and the macOS app's own binary.
+/// (beta, test) and the macOS app's own binary. The live Forever client
+/// (`_forever_`) ships the same `Wow.exe`/`Wow-ARM64.exe` and
+/// `World of Warcraft.app` as retail (its install manifest, build 1.60.1.70755).
 pub const WOW_PROCESS_NAMES: &[&str] = &[
     "wow.exe",
     "wowb.exe",
@@ -255,6 +257,13 @@ mod tests {
     #[test]
     fn forever_beta_exe_any_case() {
         assert!(running(&["WOWCLASSICB.EXE"]));
+    }
+
+    #[test]
+    fn the_live_forever_client_counts() {
+        assert!(running(&["C:\\Program Files (x86)\\World of Warcraft\\_forever_\\Wow.exe"]));
+        assert!(running(&["C:\\Program Files (x86)\\World of Warcraft\\_forever_\\Wow-ARM64.exe"]));
+        assert!(running(&["/Applications/World of Warcraft/_forever_/World of Warcraft.app/Contents/MacOS/World of Warcraft"]));
     }
 
     #[test]

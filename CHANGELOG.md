@@ -4,6 +4,10 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
+## 1.20.1 (unreleased)
+
+- WoW: Forever: the Companion now finds the game folder Battle.net installs for the launch on its own, even before you have played there, and puts the GoldCap addon into it.
+
 ## 1.20.0 (2026-10-30)
 
 - The Companion can now put the GoldCap addon into your game for you. If there is no GoldCap addon in your AddOns folder, it installs it, and it keeps that copy up to date. It only does this while World of Warcraft is closed.

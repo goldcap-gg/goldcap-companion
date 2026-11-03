@@ -85,11 +85,11 @@ pub struct Config {
     /// Forever, since the two games can live on entirely different drives.
     #[serde(default)]
     pub wow_retail_path: String,
-    /// The WoW folder that holds the Forever client — `_classic_beta_` today,
-    /// or any folder the addon has stamped a Forever passport into (see
-    /// `games.rs`). Not the game folder itself: the folder's exact name is
-    /// Blizzard's to change, so this is one level up, the same way
-    /// `games::discover`/`sync_forever` need it. Independent of
+    /// The WoW folder that holds the Forever client — `_forever_` since launch
+    /// (`_classic_beta_` in the beta), or any folder the addon has stamped a
+    /// Forever passport into (see `games.rs`). Not the game folder itself:
+    /// the folder's exact name is Blizzard's to change, so this is one level
+    /// up, the same way `games::discover`/`sync_forever` need it. Independent of
     /// `wow_retail_path` — a player can have Retail on one drive and Forever
     /// on another. A config written before this field existed gets one
     /// migrated in from the old shared `wowRootPath` (or, failing that,

@@ -975,6 +975,39 @@ mod tests {
         assert_eq!(targets(&config).len(), 1);
     }
 
+    // Launch day on one WoW root: `_retail_` and a fresh `_forever_` side by side, the Forever
+    // root being that same WoW root. `_forever_` is the Forever target; `_retail_` stays the one
+    // Retail target and is never a Forever one.
+    #[test]
+    fn a_fresh_forever_folder_beside_retail_is_a_forever_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("_retail_")).unwrap();
+        fs::create_dir_all(root.join("_forever_")).unwrap();
+        let mut config = Config {
+            retail_enabled: true,
+            forever_enabled: true,
+            wow_retail_path: root.join("_retail_").to_string_lossy().to_string(),
+            forever_root_path: root.to_string_lossy().to_string(),
+            ..Config::default()
+        };
+        let summary = |c: &Config| -> Vec<(GameKind, String, PathBuf)> {
+            targets(c).into_iter().map(|t| (t.game, t.folder.clone(), t.addons_dir())).collect()
+        };
+        assert_eq!(
+            summary(&config),
+            vec![
+                (GameKind::Retail, "_retail_".to_string(), root.join("_retail_/Interface/AddOns")),
+                (GameKind::Forever, "_forever_".to_string(), root.join("_forever_/Interface/AddOns")),
+            ]
+        );
+        config.forever_enabled = false;
+        assert_eq!(
+            summary(&config),
+            vec![(GameKind::Retail, "_retail_".to_string(), root.join("_retail_/Interface/AddOns"))]
+        );
+    }
+
     // run_once, end to end against the local server.
 
     #[tokio::test]
