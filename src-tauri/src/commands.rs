@@ -38,8 +38,9 @@ pub fn detect_installs() -> crate::games::GameDetection {
 
 /// Settings' "Change…" for the WoW: Forever folder and the wizard's own "Change…"/"Choose
 /// folder…" for it: a native folder picker, accepting any folder that actually holds a WoW game
-/// folder (`_retail_`, `_classic_beta_`, …) — unlike `pick_wow_path`, it does not require
-/// `_retail_` specifically, since Forever's own client folder name isn't fixed.
+/// folder (`_retail_`, `_forever_`, …), or such a game folder itself, which stands for its parent
+/// (`games::picked_forever_root`) — unlike `pick_wow_path`, it does not require `_retail_`
+/// specifically, since Forever's own client folder name isn't fixed.
 #[tauri::command]
 pub async fn pick_forever_root(app: AppHandle) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
@@ -53,13 +54,13 @@ pub async fn pick_forever_root(app: AppHandle) -> Result<Option<String>, String>
         return Ok(None); // cancelled
     };
     let path = folder.into_path().map_err(|e| e.to_string())?;
-    if !crate::games::has_game_folder(&path) {
-        return Err(format!(
+    match crate::games::picked_forever_root(&path) {
+        Some(root) => Ok(Some(root.to_string_lossy().into_owned())),
+        None => Err(format!(
             "No World of Warcraft install found under {}. Pick the folder that holds your Forever client",
             path.display()
-        ));
+        )),
     }
-    Ok(Some(path.to_string_lossy().into_owned()))
 }
 
 /// Backs the wizard's and Settings' game lists for one already-known root: which games exist

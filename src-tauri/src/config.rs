@@ -1074,6 +1074,27 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    // The retail picker (`pick_wow_path`) is untouched by the Forever picker taking a game folder
+    // for its parent: beside `_forever_` it still answers `_retail_` only, and a picked
+    // `_forever_` is no retail install.
+    #[test]
+    fn the_retail_picker_still_wants_retail_beside_a_forever_folder() {
+        let dir =
+            std::env::temp_dir().join(format!("goldcap-companion-norm-f-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let base = dir.join("World of Warcraft");
+        fs::create_dir_all(base.join("_forever_")).unwrap();
+
+        assert_eq!(normalize_retail_dir(&base), None);
+        assert_eq!(normalize_retail_dir(&base.join("_forever_")), None);
+        fs::create_dir_all(base.join("_retail_")).unwrap();
+        assert_eq!(normalize_retail_dir(&base), Some(base.join("_retail_")));
+        assert_eq!(normalize_retail_dir(&base.join("_retail_")), Some(base.join("_retail_")));
+        assert_eq!(normalize_retail_dir(&base.join("_forever_")), None);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn a_default_config_is_not_complete() {
         assert!(!Config::default().is_complete());

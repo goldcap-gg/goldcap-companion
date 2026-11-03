@@ -12,6 +12,7 @@ import {
   foreverImpactLines,
   addonCard,
   addonInstalledSince,
+  foreverRootPatch,
 } from "./format.js";
 
 const NOW = 1_785_600_000;
@@ -257,6 +258,26 @@ test("addonInstalledSince: only an install from this check counts", () => {
   assert.equal(addonInstalledSince([line({ lastChange: "installed", updatedAt: NOW - 3600 })], since), false);
   assert.equal(addonInstalledSince([line({ lastChange: "updated", updatedAt: NOW })], since), false);
   assert.equal(addonInstalledSince([], since), false);
+});
+
+test("foreverRootPatch: a detected root is used and the picker never opens", async () => {
+  let picked = 0;
+  const pick = async () => (picked++, "/picked");
+  const patch = await foreverRootPatch(async () => ({ foreverRootPath: "/wow" }), pick);
+  assert.deepEqual(patch, { foreverRootPath: "/wow", foreverEnabled: true });
+  assert.equal(picked, 0);
+});
+
+test("foreverRootPatch: the picker opens only when detection finds nothing or fails", async () => {
+  const pick = async () => "/picked";
+  const want = { foreverRootPath: "/picked", foreverEnabled: true };
+  assert.deepEqual(await foreverRootPatch(async () => ({ foreverRootPath: "" }), pick), want);
+  assert.deepEqual(await foreverRootPatch(async () => { throw new Error("no"); }, pick), want);
+  assert.equal(await foreverRootPatch(async () => ({}), async () => null), null, "picker cancelled");
+  await assert.rejects(
+    foreverRootPatch(async () => ({}), async () => { throw new Error("No World of Warcraft install found"); }),
+    /No World of Warcraft install found/,
+  );
 });
 
 test("addonCard: no card when the companion does not manage the addon", () => {

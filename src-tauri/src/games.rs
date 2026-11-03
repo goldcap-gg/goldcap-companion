@@ -44,15 +44,24 @@ pub fn has_game_folder(root: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// A registry/common-path candidate as `_retail_` itself (Blizzard's `InstallPath` sometimes
-/// points straight at it) normalized to its parent — the shape every root-hunting function here
-/// wants, since a folder is classified by what lives *under* it.
+/// A candidate that is a game folder itself (`…/_retail_`, `…/_forever_`: Blizzard's
+/// `InstallPath` or an uninstall entry may point straight at one, and a player may pick one)
+/// normalized to its parent — the shape every root-hunting function here wants, since a folder
+/// is classified by what lives *under* it. A folder that holds game folders is a root whatever
+/// its own name.
 fn normalize_root_candidate(c: PathBuf) -> PathBuf {
-    if c.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("_retail_")) {
-        c.parent().map(Path::to_path_buf).unwrap_or(c)
-    } else {
-        c
+    let is_game_dir = c.file_name().is_some_and(|n| is_game_folder(&n.to_string_lossy()));
+    match c.parent() {
+        Some(parent) if is_game_dir && !has_game_folder(&c) => parent.to_path_buf(),
+        _ => c,
     }
+}
+
+/// The Forever root for a folder the player picked (`pick_forever_root`): the folder itself when
+/// it holds a game folder, its parent when it is one (`…/_forever_`). None when neither is.
+pub fn picked_forever_root(picked: &Path) -> Option<PathBuf> {
+    let root = normalize_root_candidate(picked.to_path_buf());
+    has_game_folder(&root).then_some(root)
 }
 
 /// WoW: Forever's own root: exactly `config.forever_root_path`, the way `sync_once` (sync.rs)
@@ -461,8 +470,25 @@ mod tests {
         fs::create_dir_all(r.join("_forever_")).unwrap();
         let missing = r.join("not-here");
         assert_eq!(first_forever_root(vec![missing, r.clone()]), Some(r.clone()));
-        // A candidate that names `_retail_` itself stands for its parent.
+        // A candidate that names a game folder itself stands for its parent.
         assert_eq!(first_forever_root(vec![r.join("_retail_")]), Some(r.clone()));
+        assert_eq!(first_forever_root(vec![r.join("_forever_")]), Some(r.clone()));
+        fs::remove_dir_all(&r).ok();
+    }
+
+    #[test]
+    fn a_picked_forever_folder_stands_for_its_parent() {
+        let r = root("picked-forever-root");
+        fs::create_dir_all(r.join("_retail_")).unwrap();
+        fs::create_dir_all(r.join("_forever_")).unwrap();
+        fs::create_dir_all(r.join("Data")).unwrap();
+        assert_eq!(picked_forever_root(&r), Some(r.clone()));
+        assert_eq!(picked_forever_root(&r.join("_forever_")), Some(r.clone()));
+        assert_eq!(picked_forever_root(&r.join("Data")), None);
+        // A root that holds game folders is a root, whatever its own name.
+        let named = r.join("_games_");
+        fs::create_dir_all(named.join("_forever_")).unwrap();
+        assert_eq!(picked_forever_root(&named), Some(named.clone()));
         fs::remove_dir_all(&r).ok();
     }
 

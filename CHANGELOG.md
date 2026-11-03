@@ -6,7 +6,8 @@ data.
 
 ## 1.20.1 (unreleased)
 
-- WoW: Forever: the Companion now finds the game folder Battle.net installs for the launch on its own, even before you have played there, and puts the GoldCap addon into it.
+- WoW: Forever: the Companion now finds the game folder Battle.net installs for the launch on its own, even before you have played there, and puts the GoldCap addon into it. Ticking WoW: Forever in Settings finds it the same way, and choosing the `_forever_` folder itself in the folder picker now works too.
+- The first time you log out of WoW: Forever, the Companion picks the game up within a minute, without a restart.
 
 ## 1.20.0 (2026-10-30)
 

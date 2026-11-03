@@ -20,6 +20,10 @@ use crate::logging::Logger;
 /// fails and the interval retries — but pointless.
 pub const DEBOUNCE: Duration = Duration::from_secs(3);
 
+/// How often the watcher looks for a WoW: Forever install it does not watch yet: a first login
+/// there writes its first passport, and that save must not wait out the interval poll.
+const RESCAN: Duration = if cfg!(test) { Duration::from_millis(200) } else { Duration::from_secs(60) };
+
 /// True for any path shaped `…/SavedVariables/GoldCap.lua`, the file
 /// `savedvars::saved_variables_paths` enumerates per account.
 pub fn is_goldcap_savedvars(path: &Path) -> bool {
@@ -87,6 +91,28 @@ pub fn account_roots(config: &Config) -> Vec<PathBuf> {
     roots
 }
 
+/// (path, modified, length) of each GoldCap.lua in the game folders under the Forever root,
+/// outside the configured `_retail_`. Cheap enough for every RESCAN: only a change here runs
+/// `account_roots` again, which opens the files.
+fn forever_stamps(config: &Config) -> Vec<(PathBuf, Option<std::time::SystemTime>, u64)> {
+    let Some(root) = crate::games::forever_root(config) else { return Vec::new() };
+    let retail = PathBuf::from(config.wow_retail_path.trim());
+    let mut stamps: Vec<_> = std::fs::read_dir(&root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| crate::games::is_game_folder(&e.file_name().to_string_lossy()) && e.path() != retail)
+        .flat_map(|e| crate::savedvars::saved_variables_paths(&e.path()))
+        .map(|f| {
+            let meta = std::fs::metadata(&f).ok();
+            let modified = meta.as_ref().and_then(|m| m.modified().ok());
+            (f, modified, meta.map_or(0, |m| m.len()))
+        })
+        .collect();
+    stamps.sort();
+    stamps
+}
+
 /// The pair of paths that decide which account folders are watched — Retail's and Forever's own
 /// root, independently, since either can change without the other (the two-drives case). Used
 /// only to detect "did anything `account_roots` cares about change", not persisted.
@@ -100,7 +126,8 @@ fn watch_key(config: &Config) -> (String, String) {
 /// Watches `<wow_retail_path>/WTF/Account` and every WoW: Forever install's own account folder,
 /// and fires `trigger_tx` (the same channel as the tray's "Sync now") after a debounced
 /// SavedVariables write. Rebuilds the watcher whenever the config's Retail path OR Forever root
-/// changes. Lives for the whole app run.
+/// changes, and when a Forever install it does not watch yet shows up (that one also syncs at
+/// once). Lives for the whole app run.
 pub async fn run_loop(
     mut config_rx: watch::Receiver<Config>,
     trigger_tx: mpsc::Sender<()>,
@@ -108,13 +135,17 @@ pub async fn run_loop(
 ) {
     loop {
         let key = watch_key(&config_rx.borrow());
+        let roots = account_roots(&config_rx.borrow());
+        let mut stamps = forever_stamps(&config_rx.borrow());
+        let mut rescan = tokio::time::interval_at(tokio::time::Instant::now() + RESCAN, RESCAN);
+        let mut events_open = true;
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<PathBuf>();
 
         // Held for their Drop: dropping the watchers (on config change) stops
         // the notify threads watching the old paths.
-        let _watchers: Vec<RecommendedWatcher> = account_roots(&config_rx.borrow())
-            .into_iter()
-            .filter_map(|root| build_watcher(root, event_tx.clone(), &logger))
+        let _watchers: Vec<RecommendedWatcher> = roots
+            .iter()
+            .filter_map(|root| build_watcher(root.clone(), event_tx.clone(), &logger))
             .collect();
         // Each watcher above holds its own clone; this original must go too, or
         // `event_rx.recv()` never sees the channel close when every watch failed (or there was
@@ -139,28 +170,37 @@ pub async fn run_loop(
                         return; // config sender dropped — app shutting down
                     }
                     let new_key = watch_key(&config_rx.borrow());
-                    if new_key == key {
+                    if new_key == key && events_open {
                         // A settings save that didn't touch either game's WoW path must
                         // not tear down the watcher or discard a pending debounce.
                         continue;
                     }
                     break; // rebuild the watcher against the (new) paths
                 }
-                received = event_rx.recv() => {
+                received = event_rx.recv(), if events_open => {
                     match received {
                         Some(_) => debounce.on_event(Instant::now()),
-                        None => {
-                            // notify thread died; interval remains as
-                            // fallback. Park until the config changes.
-                            let _ = config_rx.changed().await;
-                            break;
-                        }
+                        // notify thread died (or nothing is watched); interval remains as
+                        // fallback. The next config save, or a new Forever install, rebuilds.
+                        None => events_open = false,
                     }
                 }
                 _ = tokio::time::sleep_until(sleep_until.into()) => {
                     if debounce.on_deadline(Instant::now()) {
                         logger.info("savedvars changed, syncing");
                         let _ = trigger_tx.try_send(());
+                    }
+                }
+                _ = rescan.tick() => {
+                    let config = config_rx.borrow().clone();
+                    let now = forever_stamps(&config);
+                    if now != stamps {
+                        stamps = now;
+                        if account_roots(&config).iter().any(|r| !roots.contains(r)) {
+                            logger.info("new WoW: Forever install, syncing");
+                            let _ = trigger_tx.try_send(());
+                            break; // rebuild, watching it too
+                        }
                     }
                 }
             }
@@ -357,6 +397,45 @@ mod tests {
         std::fs::remove_dir_all(root.join("_classic_beta_")).unwrap();
         assert_eq!(account_roots(&config), vec![root.join("_retail_").join("WTF").join("Account")]);
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    // Launch day: `_forever_` gets its first passport while the Companion runs (a first login).
+    // That first save syncs without waiting out the interval, and later saves are watched. A
+    // retail passport outside `_retail_` is still neither watched nor synced.
+    #[tokio::test]
+    async fn a_new_forever_install_is_synced_and_watched_without_a_restart() {
+        let root = std::env::temp_dir().join(format!("goldcap-watcher-new-forever-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("_forever_")).unwrap();
+        let ptr = root.join("_ptr_").join("WTF").join("Account").join("A").join("SavedVariables");
+        std::fs::create_dir_all(&ptr).unwrap();
+        let logger_dir = root.join("log");
+        std::fs::create_dir_all(&logger_dir).unwrap();
+        let logger = Arc::new(Logger::new(&logger_dir).unwrap());
+        let config = Config { forever_root_path: root.to_string_lossy().into_owned(), ..Config::default() };
+        let (_config_tx, config_rx) = watch::channel(config);
+        let (trigger_tx, mut trigger_rx) = mpsc::channel(4);
+        let handle = tokio::spawn(run_loop(config_rx, trigger_tx, logger));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        std::fs::write(ptr.join("GoldCap.lua"), r#"GoldCapDB = { client = { interface = 120100, build = "12.1.0.1" } }"#).unwrap();
+        let other = tokio::time::timeout(Duration::from_secs(1), trigger_rx.recv()).await;
+
+        let sv = root.join("_forever_").join("WTF").join("Account").join("A").join("SavedVariables");
+        std::fs::create_dir_all(&sv).unwrap();
+        let forever = r#"GoldCapDB = { client = { interface = 16001, build = "1.60.1.70755" } }"#;
+        std::fs::write(sv.join("GoldCap.lua"), forever).unwrap();
+        let first = tokio::time::timeout(Duration::from_secs(5), trigger_rx.recv()).await;
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        std::fs::write(sv.join("GoldCap.lua"), format!("{forever}\n")).unwrap();
+        let second = tokio::time::timeout(Duration::from_secs(10), trigger_rx.recv()).await;
+
+        handle.abort();
+        std::fs::remove_dir_all(&root).ok();
+        assert!(other.is_err(), "a retail passport outside _retail_ must not sync");
+        assert!(matches!(first, Ok(Some(()))), "the new Forever install's first save did not sync");
+        assert!(matches!(second, Ok(Some(()))), "the new Forever install is not watched");
     }
 
     // I2: before this fix, `event_tx` stayed alive in `run_loop` after the watchers were built
