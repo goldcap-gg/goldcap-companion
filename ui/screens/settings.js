@@ -1,4 +1,4 @@
-import { formatPairCode } from "../lib/format.js";
+import { formatPairCode, foreverRootPatch } from "../lib/format.js";
 
 const PRESET_INTERVALS = [15, 30, 60];
 
@@ -143,7 +143,8 @@ export function render(el, ctx) {
   // entry (retail's folder box never rebuilds), unlike the Retail realm group which really is
   // structural (see paintAccount's own note on the same idiom).
   function folderRow(container, opts) {
-    const { title, sub, enabledKey, pathKeyOf, onChange, afterChange } = opts;
+    // onTickWithoutPath: where a tick with no folder yet gets one; the picker unless a row says.
+    const { title, sub, enabledKey, pathKeyOf, onChange, onTickWithoutPath = onChange, afterChange } = opts;
 
     const row = document.createElement("div");
     row.className = "stack";
@@ -182,12 +183,12 @@ export function render(el, ctx) {
     }
 
     box.addEventListener("change", async () => {
-      // A game with no folder yet is ticked by picking its folder (the Change… handler below
-      // turns it on), not by a tick that would sync nothing. Unticking always just unticks,
-      // so a game left on without a folder can be turned off.
+      // A game with no folder yet is ticked by finding its folder (onTickWithoutPath turns it
+      // on), not by a tick that would sync nothing. Unticking always just unticks, so a game
+      // left on without a folder can be turned off.
       if (box.checked && !pathKeyOf(config)) {
         box.checked = false;
-        change.click();
+        await applyPatch(onTickWithoutPath);
         return;
       }
       await persist({ [enabledKey]: box.checked });
@@ -196,11 +197,11 @@ export function render(el, ctx) {
       afterChange();
     });
 
-    change.addEventListener("click", async () => {
+    // getPatch returns the full patch (the new path plus turning the game on — finding a
+    // folder is exactly the signal that the player wants that game synced).
+    async function applyPatch(getPatch) {
       try {
-        // onChange already returns the full patch (the new path plus turning the game on —
-        // picking a folder is exactly the signal that the player wants that game synced).
-        const patch = await onChange();
+        const patch = await getPatch();
         if (disposed || !patch) return;
         const ok = await persist(patch);
         if (disposed || !ok) return;
@@ -210,7 +211,9 @@ export function render(el, ctx) {
         if (disposed) return;
         ctx.toast(String(e), true);
       }
-    });
+    }
+
+    change.addEventListener("click", () => applyPatch(onChange));
 
     return paint;
   }
@@ -227,6 +230,7 @@ export function render(el, ctx) {
         const picked = await ctx.api.pickForeverRoot();
         return picked ? { foreverRootPath: picked, foreverEnabled: true } : null;
       },
+      onTickWithoutPath: () => foreverRootPatch(ctx.api.detectInstalls, ctx.api.pickForeverRoot),
       afterChange: () => {},
     });
 

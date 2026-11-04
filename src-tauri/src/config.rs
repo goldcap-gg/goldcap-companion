@@ -85,11 +85,11 @@ pub struct Config {
     /// Forever, since the two games can live on entirely different drives.
     #[serde(default)]
     pub wow_retail_path: String,
-    /// The WoW folder that holds the Forever client — `_classic_beta_` today,
-    /// or any folder the addon has stamped a Forever passport into (see
-    /// `games.rs`). Not the game folder itself: the folder's exact name is
-    /// Blizzard's to change, so this is one level up, the same way
-    /// `games::discover`/`sync_forever` need it. Independent of
+    /// The WoW folder that holds the Forever client — `_forever_` since launch
+    /// (`_classic_beta_` in the beta), or any folder the addon has stamped a
+    /// Forever passport into (see `games.rs`). Not the game folder itself:
+    /// the folder's exact name is Blizzard's to change, so this is one level
+    /// up, the same way `games::discover`/`sync_forever` need it. Independent of
     /// `wow_retail_path` — a player can have Retail on one drive and Forever
     /// on another. A config written before this field existed gets one
     /// migrated in from the old shared `wowRootPath` (or, failing that,
@@ -1070,6 +1070,27 @@ mod tests {
 
         assert_eq!(normalize_retail_dir(&base), None);
         assert_eq!(normalize_retail_dir(&dir.join("nope")), None);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // The retail picker (`pick_wow_path`) is untouched by the Forever picker taking a game folder
+    // for its parent: beside `_forever_` it still answers `_retail_` only, and a picked
+    // `_forever_` is no retail install.
+    #[test]
+    fn the_retail_picker_still_wants_retail_beside_a_forever_folder() {
+        let dir =
+            std::env::temp_dir().join(format!("goldcap-companion-norm-f-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let base = dir.join("World of Warcraft");
+        fs::create_dir_all(base.join("_forever_")).unwrap();
+
+        assert_eq!(normalize_retail_dir(&base), None);
+        assert_eq!(normalize_retail_dir(&base.join("_forever_")), None);
+        fs::create_dir_all(base.join("_retail_")).unwrap();
+        assert_eq!(normalize_retail_dir(&base), Some(base.join("_retail_")));
+        assert_eq!(normalize_retail_dir(&base.join("_retail_")), Some(base.join("_retail_")));
+        assert_eq!(normalize_retail_dir(&base.join("_forever_")), None);
 
         fs::remove_dir_all(&dir).ok();
     }

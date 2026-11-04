@@ -1,7 +1,8 @@
-//! Every WoW game folder under the install root (`_retail_`, `_classic_beta_`, …) and which
-//! game wrote the GoldCap files in it. The folder name is Blizzard's to change — the Forever
-//! launch folder is not known — so a folder is Forever only by the passport the addon stamps
-//! into `GoldCapDB.client` (docs/companion/AGENTS.md "Client passport").
+//! Every WoW game folder under the install root (`_retail_`, `_forever_`, …) and which game
+//! wrote the GoldCap files in it. At sync time a folder is Forever only by the passport the addon
+//! stamps into `GoldCapDB.client` (docs/companion/AGENTS.md "Client passport"). Onboarding also
+//! goes by name: the live Forever client installs into `_forever_` (seen 2026-11-04), the beta
+//! into `_classic_beta_`.
 
 use crate::config::Config;
 use crate::forever::{is_forever_interface, read_passport};
@@ -43,15 +44,24 @@ pub fn has_game_folder(root: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// A registry/common-path candidate as `_retail_` itself (Blizzard's `InstallPath` sometimes
-/// points straight at it) normalized to its parent — the shape every root-hunting function here
-/// wants, since a folder is classified by what lives *under* it.
+/// A candidate that is a game folder itself (`…/_retail_`, `…/_forever_`: Blizzard's
+/// `InstallPath` or an uninstall entry may point straight at one, and a player may pick one)
+/// normalized to its parent — the shape every root-hunting function here wants, since a folder
+/// is classified by what lives *under* it. A folder that holds game folders is a root whatever
+/// its own name.
 fn normalize_root_candidate(c: PathBuf) -> PathBuf {
-    if c.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("_retail_")) {
-        c.parent().map(Path::to_path_buf).unwrap_or(c)
-    } else {
-        c
+    let is_game_dir = c.file_name().is_some_and(|n| is_game_folder(&n.to_string_lossy()));
+    match c.parent() {
+        Some(parent) if is_game_dir && !has_game_folder(&c) => parent.to_path_buf(),
+        _ => c,
     }
+}
+
+/// The Forever root for a folder the player picked (`pick_forever_root`): the folder itself when
+/// it holds a game folder, its parent when it is one (`…/_forever_`). None when neither is.
+pub fn picked_forever_root(picked: &Path) -> Option<PathBuf> {
+    let root = normalize_root_candidate(picked.to_path_buf());
+    has_game_folder(&root).then_some(root)
 }
 
 /// WoW: Forever's own root: exactly `config.forever_root_path`, the way `sync_once` (sync.rs)
@@ -71,16 +81,21 @@ pub fn forever_root(config: &Config) -> Option<PathBuf> {
 /// Best-effort auto-detect of the WoW: Forever root, for the wizard's "Which WoW do you play?"
 /// step and Settings' "Change…"/"Detect" for Forever — the same candidates `detect_wow_retail_path`
 /// walks for Retail, but classified independently: a candidate qualifies the moment it holds a
-/// `_classic_beta_` folder or any folder carrying a Forever passport (see `detect_games`), even
-/// when it holds no `_retail_` at all. Usable before any `Config` exists. Empty string when
-/// nothing is found.
+/// `_forever_` or `_classic_beta_` folder or any folder carrying a Forever passport (see
+/// `detect_games`), even when it holds no `_retail_` at all. Usable before any `Config` exists.
+/// Empty string when nothing is found.
 pub fn detect_forever_root() -> String {
-    crate::config::wow_base_candidates()
+    first_forever_root(crate::config::wow_base_candidates())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// `detect_forever_root` without the machine's own candidate list.
+fn first_forever_root(candidates: Vec<PathBuf>) -> Option<PathBuf> {
+    candidates
         .into_iter()
         .map(normalize_root_candidate)
         .find(|c| detect_games(c).iter().any(|g| g.kind == DetectedKind::Forever))
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_default()
 }
 
 /// What the wizard's "Which WoW do you play?" step (and Settings' auto-detect) offer up front,
@@ -119,10 +134,11 @@ pub fn detect_installs() -> GameDetection {
 }
 
 /// What the wizard's "Which WoW do you play?" step offers for one game folder under the WoW
-/// root: the folders `discover` would report at runtime, plus a `_classic_beta_` folder even
-/// before the addon inside it has ever written a Forever passport (a fresh Forever install with
-/// no characters yet has nothing else to go on), and `_classic_era_` named specifically so the
-/// step can show it disabled as "not supported" rather than silently omitting it.
+/// root: the folders `discover` would report at runtime, plus a `_forever_` (the live client) or
+/// `_classic_beta_` (the beta) folder even before the addon inside it has ever written a Forever
+/// passport (a fresh Forever install with no characters yet has nothing else to go on), and
+/// `_classic_era_` named specifically so the step can show it disabled as "not supported" rather
+/// than silently omitting it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DetectedKind {
@@ -175,7 +191,10 @@ pub fn detect_games(root: &Path) -> Vec<DetectedGame> {
                 DetectedKind::Retail
             } else if folder.eq_ignore_ascii_case("_classic_era_") {
                 DetectedKind::ClassicEra
-            } else if passport_forever.contains(&folder) || folder.eq_ignore_ascii_case("_classic_beta_") {
+            } else if passport_forever.contains(&folder)
+                || folder.eq_ignore_ascii_case("_forever_")
+                || folder.eq_ignore_ascii_case("_classic_beta_")
+            {
                 DetectedKind::Forever
             } else {
                 DetectedKind::Other
@@ -284,7 +303,7 @@ mod tests {
     #[test]
     fn the_folder_name_never_decides_only_the_passport() {
         let r = root("names");
-        saved(&r, "_forever_", "A", FOREVER); // a launch folder name nobody knows yet
+        saved(&r, "_forever_", "A", FOREVER); // the live client's folder: still the passport that decides
         saved(&r, "_ptr_", "A", RETAIL); // a retail passport outside the configured _retail_
         saved(&r, "_classic_era_", "A", UNSTAMPED); // no passport at all
         let games = discover(&r, None);
@@ -411,11 +430,76 @@ mod tests {
     #[test]
     fn detect_games_finds_a_forever_passport_under_any_folder_name() {
         let r = root("detect-passport-anywhere");
-        saved(&r, "_forever_", "A", FOREVER);
+        saved(&r, "_forever_ptr_", "A", FOREVER); // a name no rule here knows
         let games = detect_games(&r);
         assert_eq!(games.len(), 1);
-        assert_eq!(games[0].folder, "_forever_");
+        assert_eq!(games[0].folder, "_forever_ptr_");
         assert_eq!(games[0].kind, DetectedKind::Forever);
+        fs::remove_dir_all(&r).ok();
+    }
+
+    // Launch day: the live client's `_forever_` exists, nobody has logged in yet, so no addon has
+    // written a passport. It must be offered all the same, beside an untouched `_retail_`.
+    #[test]
+    fn detect_games_offers_a_fresh_forever_folder_beside_retail() {
+        let r = root("detect-forever-fresh");
+        saved(&r, "_retail_", "A", RETAIL);
+        fs::create_dir_all(r.join("_Forever_")).unwrap(); // no WTF, no SavedVariables; any case
+        let games = detect_games(&r);
+        let kinds: Vec<(&str, DetectedKind)> = games.iter().map(|g| (g.folder.as_str(), g.kind)).collect();
+        assert_eq!(kinds, vec![("_Forever_", DetectedKind::Forever), ("_retail_", DetectedKind::Retail)]);
+        fs::remove_dir_all(&r).ok();
+    }
+
+    // The name rule is for onboarding only: at sync time an unstamped file in `_forever_` is still
+    // unknown and is uploaded nowhere.
+    #[test]
+    fn discover_still_needs_the_passport_in_the_forever_folder() {
+        let r = root("discover-forever-unstamped");
+        saved(&r, "_forever_", "A", UNSTAMPED);
+        let games = discover(&r, None);
+        assert_eq!(games.len(), 1);
+        assert_eq!(games[0].kind, GameKind::Other);
+        fs::remove_dir_all(&r).ok();
+    }
+
+    #[test]
+    fn the_forever_root_is_found_from_a_fresh_forever_folder_beside_retail() {
+        let r = root("first-root-fresh-forever");
+        fs::create_dir_all(r.join("_retail_")).unwrap();
+        fs::create_dir_all(r.join("_forever_")).unwrap();
+        let missing = r.join("not-here");
+        assert_eq!(first_forever_root(vec![missing, r.clone()]), Some(r.clone()));
+        // A candidate that names a game folder itself stands for its parent.
+        assert_eq!(first_forever_root(vec![r.join("_retail_")]), Some(r.clone()));
+        assert_eq!(first_forever_root(vec![r.join("_forever_")]), Some(r.clone()));
+        fs::remove_dir_all(&r).ok();
+    }
+
+    #[test]
+    fn a_picked_forever_folder_stands_for_its_parent() {
+        let r = root("picked-forever-root");
+        fs::create_dir_all(r.join("_retail_")).unwrap();
+        fs::create_dir_all(r.join("_forever_")).unwrap();
+        fs::create_dir_all(r.join("Data")).unwrap();
+        assert_eq!(picked_forever_root(&r), Some(r.clone()));
+        assert_eq!(picked_forever_root(&r.join("_forever_")), Some(r.clone()));
+        assert_eq!(picked_forever_root(&r.join("Data")), None);
+        // A root that holds game folders is a root, whatever its own name.
+        let named = r.join("_games_");
+        fs::create_dir_all(named.join("_forever_")).unwrap();
+        assert_eq!(picked_forever_root(&named), Some(named.clone()));
+        fs::remove_dir_all(&r).ok();
+    }
+
+    #[test]
+    fn a_retail_only_root_is_no_forever_root() {
+        let r = root("first-root-retail-only");
+        saved(&r, "_retail_", "A", RETAIL);
+        fs::create_dir_all(r.join("_ptr_")).unwrap();
+        assert_eq!(first_forever_root(vec![r.clone(), r.join("_retail_")]), None);
+        let kinds: Vec<DetectedKind> = detect_games(&r).iter().map(|g| g.kind).collect();
+        assert_eq!(kinds, vec![DetectedKind::Other, DetectedKind::Retail]);
         fs::remove_dir_all(&r).ok();
     }
 

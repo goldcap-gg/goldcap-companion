@@ -18,7 +18,7 @@ export const pickWowPath = () => invoke("pick_wow_path");
  * plus whether a Classic Era install was seen under either one.
  */
 export const detectInstalls = () => invoke("detect_installs");
-/** Forever's own root folder (holds its game folder, e.g. `_classic_beta_`), picked by hand. */
+/** Forever's own root folder (holds its game folder, e.g. `_forever_`), picked by hand. */
 export const pickForeverRoot = () => invoke("pick_forever_root");
 /** Which games exist under one already-known root. */
 export const detectGames = (root) => invoke("detect_games", { root });

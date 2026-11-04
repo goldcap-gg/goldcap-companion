@@ -173,3 +173,18 @@ export function addonCard(line, now) {
 export function addonInstalledSince(lines, since) {
   return lines.some((l) => l.lastChange === "installed" && (l.updatedAt ?? 0) >= since);
 }
+
+// What ticking WoW: Forever in Settings saves when it has no folder yet: the root auto-detect
+// finds (`detect`, what the wizard offers), else the folder the player picks (`pick`). Null when
+// nothing was found and the picker was cancelled. A detection that fails falls back to the
+// picker; a pick that fails throws, so its message reaches the player.
+export async function foreverRootPatch(detect, pick) {
+  let root = "";
+  try {
+    root = (await detect())?.foreverRootPath || "";
+  } catch {
+    /* the picker still works */
+  }
+  if (!root) root = (await pick()) || "";
+  return root ? { foreverRootPath: root, foreverEnabled: true } : null;
+}
