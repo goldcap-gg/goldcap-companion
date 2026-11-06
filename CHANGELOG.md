@@ -4,7 +4,7 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
-## 1.21.0 (unreleased)
+## 1.21.0 (2026-11-06)
 
 - Sends your WoW: Forever trades and gold to goldcap.gg for the new WoW: Forever ledger.
 
