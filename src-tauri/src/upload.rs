@@ -219,7 +219,7 @@ impl UploadState {
 /// one full re-send. That is the documented worst case for this file (see the
 /// module header) and exactly what is wanted here: it is what carries the
 /// correction up for players who already have bad rows stored.
-fn entry_fingerprint(e: &LedgerEntry) -> String {
+pub(crate) fn entry_fingerprint(e: &LedgerEntry) -> String {
     format!(
         "{}|{}|{}|{}|{}|{}",
         e.key,
@@ -231,7 +231,7 @@ fn entry_fingerprint(e: &LedgerEntry) -> String {
     )
 }
 
-fn gold_fingerprint(g: &GoldPoint) -> String {
+pub(crate) fn gold_fingerprint(g: &GoldPoint) -> String {
     format!("gold|{}|{}", g.character, g.at)
 }
 
@@ -741,6 +741,7 @@ mod tests {
             expected_profit: None,
             recommended_quantity: None,
             source_at: None,
+            faction: None,
         }
     }
 
@@ -750,6 +751,7 @@ mod tests {
             region: Some("eu".into()),
             copper: 1,
             at,
+            faction: None,
         }
     }
 
@@ -1296,7 +1298,8 @@ mod tests {
         assert!(uploadable(&data_with(None)));
         assert!(uploadable(&data_with(Some(ClientPassport {
             interface: 120100,
-            build: "12.1.0.69933".into()
+            build: "12.1.0.69933".into(),
+            region_id: None,
         }))));
     }
 
@@ -1304,7 +1307,8 @@ mod tests {
     fn a_forever_file_is_not_uploaded_to_retail() {
         assert!(!uploadable(&data_with(Some(ClientPassport {
             interface: 16001,
-            build: "1.60.1.69977".into()
+            build: "1.60.1.69977".into(),
+            region_id: None,
         }))));
     }
 
@@ -1316,6 +1320,7 @@ mod tests {
             &data_with(Some(ClientPassport {
                 interface: 120100,
                 build: "12.1.0.69933".into(),
+                region_id: None,
             })),
         )
         .build()

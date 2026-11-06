@@ -358,6 +358,14 @@ pub struct ForeverState {
     /// SavedVariables path → the file's (mtime, length) when every purchase in it had been sent:
     /// an unchanged file is not parsed again for purchases.
     pub purchase_stamps: BTreeMap<String, (i64, u64)>,
+    /// SavedVariables path → the fingerprints of ledger rows and gold readings goldcap.gg has taken
+    /// from that file (the Forever ledger). Only prints still in the file are kept.
+    #[serde(default)]
+    pub ledger_sent: BTreeMap<String, std::collections::BTreeSet<String>>,
+    /// SavedVariables path → the file's (mtime, length) when everything in it had been sent to the
+    /// Forever ledger.
+    #[serde(default)]
+    pub ledger_stamps: BTreeMap<String, (i64, u64)>,
     /// SavedVariables path → the fold `at` the site has had its say about.
     pub sent: BTreeMap<String, i64>,
     /// Install dir → what the Forever leg knows about it.
@@ -666,6 +674,31 @@ pub async fn sync_forever_at_root(
                     crate::forever_runs::PurchasePass::Complete => {
                         if let Some(s) = stamp {
                             state.purchase_stamps.insert(file_key, s);
+                        }
+                    }
+                    crate::forever_runs::PurchasePass::Incomplete => {}
+                    crate::forever_runs::PurchasePass::Unauthorized => {
+                        state.installs.entry(key.clone()).or_default().unauthorized = true;
+                        break;
+                    }
+                }
+            }
+        }
+        // Forever ledger: every ledger row and gold reading of the file, to its own route.
+        if !token.is_empty() && !state.installs.get(&key).is_some_and(|e| e.unauthorized) {
+            for file in &game.saved_vars {
+                let file_key = file.to_string_lossy().into_owned();
+                let stamp = file_stamp(file);
+                if stamp.is_some() && state.ledger_stamps.get(&file_key).copied() == stamp {
+                    continue;
+                }
+                let mut sent = state.ledger_sent.remove(&file_key).unwrap_or_default();
+                let pass = crate::forever_ledger::send_ledger(client, base, &token, file, &mut sent, logger).await;
+                state.ledger_sent.insert(file_key.clone(), sent);
+                match pass {
+                    crate::forever_runs::PurchasePass::Complete => {
+                        if let Some(s) = stamp {
+                            state.ledger_stamps.insert(file_key, s);
                         }
                     }
                     crate::forever_runs::PurchasePass::Incomplete => {}
@@ -1446,6 +1479,7 @@ pub(crate) mod tests {
         let runs = r#"{"v":3,"generatedAt":"2026-10-01T10:00:00.000Z","plan":"pro","freeLines":5,"game":"forever","runs":[{"code":"abcd2345","name":"Tailoring 1 → 100","updatedAt":"2026-10-01T09:00:00.000Z","lines":[{"itemId":2589,"qty":120,"vendor":false,"nameEn":"Linen Cloth","usual":70}]}]}"#;
         let (base, seen) = serve_forever(vec![
             answer("200 OK", r#"{"status":"accepted","market":"us-beta-classic-beta-pve-2-horde","items":1974,"dropped":0}"#),
+            answer("200 OK", "{}"), // the ledger rows of the file
             answer("500 Internal Server Error", "{}"), // the crowd prices: not this test's business
             answer("200 OK", runs),
         ]);
@@ -1481,6 +1515,7 @@ pub(crate) mod tests {
         let store = std::sync::Mutex::new(std::collections::HashMap::new());
         let (base, seen) = serve_forever(vec![
             answer("200 OK", r#"{"accepted":1,"stored":1}"#),
+            answer("200 OK", "{}"),
             answer("200 OK", r#"{"v":3,"generatedAt":"2026-10-01T10:00:00.000Z","plan":"free","freeLines":5,"game":"forever","runs":[]}"#),
         ]);
         let state = sync_forever_at_root(&crate::sync::build_client(), &base, &root, &config, &logger, &root.join("s.json"), &store, 1).await;
@@ -1489,6 +1524,9 @@ pub(crate) mod tests {
         let key = sv.to_string_lossy().into_owned();
         assert!(state.purchases_sent.get(&key).is_some_and(|s| s.contains("buyrun-a")));
         assert!(state.purchase_stamps.contains_key(&key));
+        assert!(first[1].to_ascii_lowercase().starts_with("post /v1/forever/ledger/upload "), "{first:?}");
+        assert!(state.ledger_sent.get(&key).is_some_and(|s| s.len() == 1));
+        assert!(state.ledger_stamps.contains_key(&key));
         // Same file next tick: not re-read, not re-sent (nothing listens on port 9 anyway).
         let again = sync_forever_at_root(&crate::sync::build_client(), "http://127.0.0.1:9", &root, &config, &logger, &root.join("s.json"), &store, 2).await;
         assert!(again.purchases_sent.get(&key).is_some_and(|s| s.contains("buyrun-a")));

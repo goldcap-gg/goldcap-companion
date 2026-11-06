@@ -10,6 +10,7 @@ mod autostart;
 mod commands;
 mod config;
 mod forever;
+mod forever_ledger;
 mod forever_runs;
 mod games;
 mod health;

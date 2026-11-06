@@ -51,6 +51,10 @@ pub struct LedgerEntry {
     pub recommended_quantity: Option<i64>,
     #[serde(rename = "sourceAt", skip_serializing_if = "Option::is_none")]
     pub source_at: Option<i64>,
+    /// "Alliance" or "Horde" when the addon build wrote it. Never part of the retail upload body
+    /// (hence `skip_serializing`); the Forever ledger sends it in its own wire type.
+    #[serde(skip_serializing)]
+    pub faction: Option<String>,
 }
 
 struct DecisionEvidence {
@@ -118,6 +122,9 @@ pub struct GoldPoint {
     pub region: Option<String>,
     pub copper: i64,
     pub at: i64,
+    /// "Alliance" or "Horde" when the addon build wrote it; not part of the retail upload body.
+    #[serde(skip_serializing)]
+    pub faction: Option<String>,
 }
 
 /// One row of `GoldCapDB.itemNames`: what the game client said about an item
@@ -162,6 +169,9 @@ pub struct ItemNameReport {
 pub struct ClientPassport {
     pub interface: i64,
     pub build: String,
+    /// `GoldCapDB.client.regionId`: the game's region id. Only the Forever ledger sends it; the
+    /// header (and so every retail request) is unchanged.
+    pub region_id: Option<i64>,
 }
 
 /// Retail's interface numbers are six digits; every other WoW client is below
@@ -216,6 +226,11 @@ pub fn saved_variables_paths(wow_retail_path: &Path) -> Vec<PathBuf> {
         .map(|a| a.path().join("SavedVariables").join("GoldCap.lua"))
         .filter(|p| p.is_file())
         .collect()
+}
+
+/// The row's `faction`, kept only when it is one of the two the site knows.
+fn faction(row: &Table) -> Option<String> {
+    opt_string(row, "faction").filter(|f| f == "Alliance" || f == "Horde")
 }
 
 pub(crate) fn opt_string(t: &Table, key: &str) -> Option<String> {
@@ -367,7 +382,8 @@ pub fn parse_saved_variables(lua_source: &str) -> Result<LedgerData, String> {
         {
             let build = build.trim().to_string();
             if is_valid_passport_interface(interface) && is_valid_passport_build(&build) {
-                data.client = Some(ClientPassport { interface, build });
+                let region_id = opt_int(&client, "regionId").filter(|id| *id > 0);
+                data.client = Some(ClientPassport { interface, build, region_id });
             }
         }
     }
@@ -412,6 +428,7 @@ pub fn parse_saved_variables(lua_source: &str) -> Result<LedgerData, String> {
                 expected_profit: evidence.as_ref().map(|e| e.expected_profit),
                 recommended_quantity: evidence.as_ref().map(|e| e.recommended_quantity),
                 source_at: evidence.as_ref().map(|e| e.source_at),
+                faction: faction(&row),
             });
         }
     }
@@ -430,6 +447,7 @@ pub fn parse_saved_variables(lua_source: &str) -> Result<LedgerData, String> {
                 region: opt_string(&row, "region"),
                 copper,
                 at,
+                faction: faction(&row),
             });
         }
     }
