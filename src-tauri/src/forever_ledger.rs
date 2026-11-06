@@ -357,6 +357,27 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Run by hand against the local stand (API on :8093, a companion token for the stand's Pro
+    /// account in `companion_tokens`), never in CI:
+    ///   GOLDCAP_E2E_API=http://localhost:8093 GOLDCAP_E2E_TOKEN=stand-forever-token \
+    ///     cargo test --locked -- --ignored forever_ledger_e2e
+    /// Sends the owner's real WoW: Forever SavedVariables, read-only, through this module's pass.
+    #[tokio::test]
+    #[ignore]
+    async fn forever_ledger_e2e_against_the_local_stand() {
+        let base = std::env::var("GOLDCAP_E2E_API").expect("GOLDCAP_E2E_API");
+        let token = std::env::var("GOLDCAP_E2E_TOKEN").expect("GOLDCAP_E2E_TOKEN");
+        let accounts = "/Applications/World of Warcraft/_forever_/WTF/Account";
+        let file = std::fs::read_dir(accounts).unwrap().flatten()
+            .map(|a| a.path().join("SavedVariables").join("GoldCap.lua"))
+            .find(|p| p.is_file()).expect("a WoW: Forever GoldCap.lua");
+        let logger = crate::logging::Logger::new(&std::env::temp_dir().join("goldcap-e2e-ledger-log")).unwrap();
+        let mut sent = BTreeSet::new();
+        let pass = send_ledger(&crate::sync::build_client(), &base, &token, &file, &mut sent, &logger).await;
+        assert!(matches!(pass, PurchasePass::Complete));
+        assert!(!sent.is_empty(), "nothing went up");
+    }
+
     #[test]
     fn the_parser_keeps_only_alliance_and_horde() {
         let lua = r#"GoldCapDB = { client = { interface = 16001, build = "1.60.1.70790", regionId = 3 }, ledger = {
