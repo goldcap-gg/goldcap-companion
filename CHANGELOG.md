@@ -4,6 +4,10 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
+## 1.21.0 (unreleased)
+
+- Sends your WoW: Forever trades and gold to goldcap.gg for the new WoW: Forever ledger.
+
 ## 1.20.1 (2026-11-04)
 
 - WoW: Forever: the Companion now finds the game folder Battle.net installs for the launch on its own, even before you have played there, and puts the GoldCap addon into it. Ticking WoW: Forever in Settings finds it the same way, and choosing the `_forever_` folder itself in the folder picker now works too.
