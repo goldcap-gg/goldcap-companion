@@ -8,7 +8,7 @@
 //! (`upload::entry_fingerprint` / `gold_fingerprint`), so a row re-written under the same key with
 //! a new total, pending flag or region goes up again.
 
-use crate::forever_runs::{PurchaseOutcome, PurchasePass};
+use crate::forever_runs::PurchasePass;
 use crate::savedvars::{ClientPassport, GoldPoint, LedgerEntry};
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -97,6 +97,30 @@ fn wire_gold(g: &GoldPoint) -> WireGold<'_> {
     WireGold { character: &g.character, region: g.region.as_deref(), copper: g.copper, at: g.at, faction: g.faction.as_deref() }
 }
 
+/// What the site did with one batch.
+#[derive(Debug, PartialEq)]
+pub enum LedgerOutcome {
+    /// Taken, or refused for good as it is (400/413/422). The indexes are the rows the site deferred:
+    /// dated more than an hour ahead of its clock (a PC clock that runs fast). They are sent again
+    /// on a later pass, once that date has come.
+    Taken { deferred: BTreeSet<usize> },
+    /// 409: not this file's game, or a region the site does not take (the beta). Nothing is marked
+    /// sent; the file goes up again only when it changes, in case the site has learned its region.
+    Refused,
+    Unauthorized,
+    Retry(String),
+}
+
+/// The site's `deferred` (entries) or `goldDeferred` (gold) indexes from a 200 answer. An answer
+/// without them, or one that does not parse, defers nothing.
+fn deferred_of(body: &str, field: &str) -> BTreeSet<usize> {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get(field).and_then(|d| d.as_array()).cloned())
+        .map(|a| a.iter().filter_map(|i| i.as_u64()).map(|i| i as usize).collect())
+        .unwrap_or_default()
+}
+
 /// One request to the Forever ledger route under the pairing token and the file's own passport.
 pub async fn upload_ledger(
     client: &reqwest::Client,
@@ -106,7 +130,7 @@ pub async fn upload_ledger(
     region_id: i64,
     entries: &[LedgerEntry],
     gold: &[GoldPoint],
-) -> PurchaseOutcome {
+) -> LedgerOutcome {
     let body = UploadBody {
         client: PassportBody { interface: passport.interface, build: &passport.build, region_id },
         entries: entries.iter().map(wire_entry).collect(),
@@ -120,13 +144,19 @@ pub async fn upload_ledger(
         .send()
         .await;
     match sent {
-        Err(e) => PurchaseOutcome::Retry(crate::sync::describe_err(&e, crate::sync::CLIENT_TIMEOUT)),
+        Err(e) => LedgerOutcome::Retry(crate::sync::describe_err(&e, crate::sync::CLIENT_TIMEOUT)),
         Ok(res) => match res.status().as_u16() {
-            // 400/409/413/422 (409 includes the site's beta refusal): this batch will never be
-            // taken as it is, so resending it every tick helps nobody. Marked done like a 200.
-            200 | 400 | 409 | 413 | 422 => PurchaseOutcome::Done,
-            401 => PurchaseOutcome::Unauthorized,
-            code => PurchaseOutcome::Retry(format!("status {code}")),
+            200 => {
+                let field = if entries.is_empty() { "goldDeferred" } else { "deferred" };
+                let body = res.text().await.unwrap_or_default();
+                LedgerOutcome::Taken { deferred: deferred_of(&body, field) }
+            }
+            // 400/413/422: this batch will never be taken as it is, so resending it every tick
+            // helps nobody. Marked sent like a 200.
+            400 | 413 | 422 => LedgerOutcome::Taken { deferred: BTreeSet::new() },
+            409 => LedgerOutcome::Refused,
+            401 => LedgerOutcome::Unauthorized,
+            code => LedgerOutcome::Retry(format!("status {code}")),
         },
     }
 }
@@ -168,31 +198,42 @@ pub async fn send_ledger(
         data.entries.iter().zip(&entry_prints).filter(|(_, p)| !sent.contains(*p)).collect();
     let pending_gold: Vec<(&GoldPoint, &String)> =
         data.gold.iter().zip(&gold_prints).filter(|(_, p)| !sent.contains(*p)).collect();
-    let (mut entries_sent, mut gold_sent) = (0usize, 0usize);
+    let (mut entries_sent, mut gold_sent, mut deferred_total) = (0usize, 0usize, 0usize);
+    let mut refused = false;
 
     for batch in pending_entries.chunks(MAX_BATCH) {
         let rows: Vec<LedgerEntry> = batch.iter().map(|(e, _)| (*e).clone()).collect();
         match upload_ledger(client, base, token, passport, region_id, &rows, &[]).await {
-            PurchaseOutcome::Done => {
-                sent.extend(batch.iter().map(|(_, p)| (*p).clone()));
-                entries_sent += batch.len();
+            LedgerOutcome::Taken { deferred } => {
+                sent.extend(batch.iter().enumerate().filter(|(i, _)| !deferred.contains(i)).map(|(_, (_, p))| (*p).clone()));
+                entries_sent += batch.len() - deferred.len().min(batch.len());
+                deferred_total += deferred.len();
             }
-            PurchaseOutcome::Unauthorized => return PurchasePass::Unauthorized,
-            PurchaseOutcome::Retry(why) => {
+            LedgerOutcome::Refused => {
+                refused = true;
+                break;
+            }
+            LedgerOutcome::Unauthorized => return PurchasePass::Unauthorized,
+            LedgerOutcome::Retry(why) => {
                 logger.error(&format!("forever ledger from {}: will retry ({why})", file.display()));
                 return PurchasePass::Incomplete;
             }
         }
     }
     for batch in pending_gold.chunks(MAX_BATCH) {
+        if refused {
+            break;
+        }
         let rows: Vec<GoldPoint> = batch.iter().map(|(g, _)| (*g).clone()).collect();
         match upload_ledger(client, base, token, passport, region_id, &[], &rows).await {
-            PurchaseOutcome::Done => {
-                sent.extend(batch.iter().map(|(_, p)| (*p).clone()));
-                gold_sent += batch.len();
+            LedgerOutcome::Taken { deferred } => {
+                sent.extend(batch.iter().enumerate().filter(|(i, _)| !deferred.contains(i)).map(|(_, (_, p))| (*p).clone()));
+                gold_sent += batch.len() - deferred.len().min(batch.len());
+                deferred_total += deferred.len();
             }
-            PurchaseOutcome::Unauthorized => return PurchasePass::Unauthorized,
-            PurchaseOutcome::Retry(why) => {
+            LedgerOutcome::Refused => break,
+            LedgerOutcome::Unauthorized => return PurchasePass::Unauthorized,
+            LedgerOutcome::Retry(why) => {
                 logger.error(&format!("forever ledger from {}: will retry ({why})", file.display()));
                 return PurchasePass::Incomplete;
             }
@@ -200,6 +241,11 @@ pub async fn send_ledger(
     }
     if entries_sent + gold_sent > 0 {
         logger.info(&format!("forever ledger from {}: sent ({entries_sent} rows, {gold_sent} gold readings)", file.display()));
+    }
+    if deferred_total > 0 {
+        // The site's clock is behind this PC's: those rows go up again on a later pass.
+        logger.info(&format!("forever ledger from {}: {deferred_total} dated ahead of the site's clock, sent again later", file.display()));
+        return PurchasePass::Incomplete;
     }
     PurchasePass::Complete
 }
@@ -305,7 +351,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fingerprints_are_kept_after_200_and_409_and_forgotten_when_gone() {
+    async fn fingerprints_skip_deferred_rows_and_refused_batches_and_are_forgotten_when_gone() {
         let dir = std::env::temp_dir().join(format!("goldcap-forever-ledger-prints-{}", std::process::id()));
         let file = write(&dir, FILE);
         let logger = crate::logging::Logger::new(&dir.join("logs")).unwrap();
@@ -316,10 +362,25 @@ mod tests {
         assert!(matches!(pass, PurchasePass::Incomplete));
         assert!(sent.is_empty(), "a print no longer in the file is forgotten; nothing was taken");
 
-        // Rows taken (200), gold refused as a beta client (409): both are done.
-        let (base, _seen) = serve_forever(vec![answer("200 OK", "{}"), answer("409 Conflict", r#"{"error":"beta"}"#)]);
+        // Rows taken (200) but the second one deferred (dated ahead of the site's clock), then the
+        // gold refused (409): the deferred row and both readings stay unsent, and the pass is not
+        // complete, so the file is read again next tick.
+        let (base, _seen) =
+            serve_forever(vec![answer("200 OK", r#"{"accepted":2,"deferred":[1]}"#), answer("409 Conflict", r#"{"error":"beta"}"#)]);
+        let pass = send_ledger(&crate::sync::build_client(), &base, "tok", &file, &mut sent, &logger).await;
+        assert!(matches!(pass, PurchasePass::Incomplete));
+        assert_eq!(sent.len(), 2);
+
+        // Next pass: the deferred row alone, then the readings, all taken.
+        let (base, seen) = serve_forever(vec![
+            answer("200 OK", r#"{"accepted":1,"deferred":[]}"#),
+            answer("200 OK", r#"{"goldAccepted":2,"goldDeferred":[]}"#),
+        ]);
         let pass = send_ledger(&crate::sync::build_client(), &base, "tok", &file, &mut sent, &logger).await;
         assert!(matches!(pass, PurchasePass::Complete));
+        let again = body_of(&seen.recv().unwrap());
+        let keys: Vec<&str> = again["entries"].as_array().unwrap().iter().map(|e| e["key"].as_str().unwrap()).collect();
+        assert_eq!(keys, vec!["buy-1"]);
         assert_eq!(sent.len(), 5);
 
         // Nothing pending: no request at all (nothing listens on port 9).
@@ -342,6 +403,30 @@ mod tests {
         send_ledger(&crate::sync::build_client(), "http://127.0.0.1:9", "tok", &file, &mut sent, &logger).await;
         assert_eq!(sent.len(), 4);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_refused_region_marks_nothing_and_ends_the_pass() {
+        let dir = std::env::temp_dir().join(format!("goldcap-forever-ledger-409-{}", std::process::id()));
+        let file = write(&dir, FILE);
+        let logger = crate::logging::Logger::new(&dir.join("logs")).unwrap();
+        let mut sent = BTreeSet::new();
+        let (base, seen) = serve_forever(vec![answer("409 Conflict", r#"{"error":"beta"}"#)]);
+        let pass = send_ledger(&crate::sync::build_client(), &base, "tok", &file, &mut sent, &logger).await;
+        // Complete, so the file's stamp is kept and it goes again only when it changes; nothing is
+        // marked sent, so a site that learns the region later still gets every row.
+        assert!(matches!(pass, PurchasePass::Complete));
+        assert!(sent.is_empty());
+        assert_eq!(seen.try_iter().count(), 1, "no gold request after the rows were refused");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn deferred_indexes_come_from_the_answer_or_not_at_all() {
+        assert_eq!(deferred_of(r#"{"accepted":3,"deferred":[0,2]}"#, "deferred"), [0, 2].into());
+        assert_eq!(deferred_of(r#"{"goldDeferred":[1]}"#, "goldDeferred"), [1].into());
+        assert!(deferred_of(r#"{"accepted":3}"#, "deferred").is_empty());
+        assert!(deferred_of("not json", "deferred").is_empty());
     }
 
     #[tokio::test]
