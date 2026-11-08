@@ -1,4 +1,4 @@
-import { relativeTime, countdown, groupDigits, foreverScanLine, foreverCrowdLine, foreverMarketLine, foreverImpactLines, foreverPairLine, PAIR_HOW, addonCard } from "../lib/format.js";
+import { relativeTime, countdown, groupDigits, foreverScanLine, foreverCrowdLine, foreverMarketLine, foreverImpactLines, foreverPairLine, foreverNextStep, PAIR_HOW, addonCard } from "../lib/format.js";
 import { brandMarkSvg } from "../lib/brandMark.js";
 
 const POLL_MS = 5000;
@@ -108,7 +108,7 @@ function stageRow(key, stage, ctx, canPair) {
     const pair = document.createElement("button");
     pair.className = "btn btn-primary btn-sm";
     pair.textContent = "Pair";
-    pair.addEventListener("click", () => ctx.show("settings"));
+    pair.addEventListener("click", () => ctx.show("settings", { focus: "pair" }));
     body.append(pair);
   }
 
@@ -176,6 +176,15 @@ function foreverCard(g, paired, onPair) {
     pair.textContent = "Pair";
     pair.addEventListener("click", onPair);
     card.append(why, how, pair);
+  }
+
+  // Paired, nothing sent yet: the one thing left to do, in the game.
+  const next = foreverNextStep(g, paired);
+  if (next) {
+    const step = document.createElement("p");
+    step.className = "stage-detail";
+    step.textContent = next;
+    card.append(step);
   }
 
   // What that scan changed on its market, when goldcap.gg counted it. Not time-derived, so it
@@ -367,7 +376,7 @@ export function render(el, ctx) {
     }
 
     const games = foreverGames(snapshot);
-    const cards = games.map((g) => ({ g, ...foreverCard(g, snapshot.paired, () => ctx.show("settings")) }));
+    const cards = games.map((g) => ({ g, ...foreverCard(g, snapshot.paired, () => ctx.show("settings", { focus: "pair" })) }));
     foreverDetails = cards;
     foreverCards.replaceChildren(...cards.map(({ card }) => card));
 

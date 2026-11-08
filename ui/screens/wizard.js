@@ -1,4 +1,4 @@
-import { formatPairCode, addonInstalledSince, connectSubtitle } from "../lib/format.js";
+import { formatPairCode, addonInstalledSince, connectSubtitle, canSkipPairing } from "../lib/format.js";
 
 // The install path and, when the game folders resolve to exactly one, the
 // realm all come out of the game's own files — see detect() below. Step 0
@@ -522,7 +522,8 @@ export function render(el, ctx) {
   // ---- step 2: connect ----------------------------------------------------
 
   function stepConnect() {
-    setHead("Connect to goldcap.gg?", connectSubtitle(draft));
+    // A question where it may wait (Retail alone), an instruction where it may not (WoW: Forever).
+    setHead(canSkipPairing(draft) ? "Connect to goldcap.gg?" : "Pair with goldcap.gg", connectSubtitle(draft));
     bodyEl.replaceChildren();
 
     // Whichever way this step was reached, draft is already saved (Setup's
@@ -570,7 +571,7 @@ export function render(el, ctx) {
 
     const hint = document.createElement("p");
     hint.className = "muted wizard-hint";
-    hint.textContent = "The code is valid for 15 minutes.";
+    hint.textContent = "Sign in on goldcap.gg with Discord or Battle.net, press Show pairing code and type it here. The code is valid for 15 minutes.";
 
     const pair = document.createElement("button");
     pair.className = "btn btn-primary";
@@ -615,7 +616,10 @@ export function render(el, ctx) {
     later.addEventListener("click", finish);
 
     bodyEl.append(open, label, code, hint);
-    nav.replaceChildren(back, later, Object.assign(document.createElement("div"), { className: "spacer" }), pair);
+    // With WoW: Forever on there is no "Later": unpaired, Forever gets nothing at all (no scan goes
+    // up, no prices come back), and a player who skipped it waited for a first scan that never came.
+    const spacer = Object.assign(document.createElement("div"), { className: "spacer" });
+    nav.replaceChildren(...(canSkipPairing(draft) ? [back, later, spacer, pair] : [back, spacer, pair]));
   }
 
   function render_step() {

@@ -732,6 +732,13 @@ export function render(el, ctx) {
         });
 
         accountBody.append(open, fieldBlock("settings-pair-code", "Pairing code", code), pair);
+        // Opened from a Pair button on the Status window: straight to the code, not the top of
+        // a long screen the player would have to scroll.
+        if (ctx.opts?.focus === "pair") {
+          code.scrollIntoView({ block: "center" });
+          code.focus();
+          focus = false;
+        }
       }
 
       if (focus) state.focus();

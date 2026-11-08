@@ -62,6 +62,19 @@ export function foreverPairLine(g, paired) {
     : "Scans reach goldcap.gg only once this app is paired with your GoldCap account.";
 }
 
+// The Forever card's next step once paired and before the first scan has gone up: the one thing
+// to do in the game. Null when unpaired (foreverPairLine says what to do) and after the first send.
+export function foreverNextStep(g, paired) {
+  if (!paired || g.lastSentAt) return null;
+  return "Next: open the auction house in WoW: Forever (GoldCap scans it), then type /reload.";
+}
+
+// The wizard's Connect step: WoW: Forever gets nothing without pairing, so with it on the step
+// cannot be skipped; Retail alone still gets realm prices unpaired, so it keeps "Later".
+export function canSkipPairing(draft) {
+  return !draft.foreverEnabled;
+}
+
 // How to get the code, the same words on the Status card and in Settings.
 export const PAIR_HOW = "On goldcap.gg, sign in and open Account, press Show pairing code, and type the code in Settings here within 15 minutes.";
 
