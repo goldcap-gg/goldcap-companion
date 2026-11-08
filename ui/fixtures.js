@@ -311,6 +311,31 @@ export const FIXTURES = {
     },
   },
 
+  // The player who scanned the auction house, logged out, and pressed Later at Connect: the scan
+  // sits on disk and goes nowhere until the app is paired.
+  "forever-only, not paired, scans on disk": {
+    config: {
+      region: "eu",
+      realmSlug: "",
+      wowRetailPath: "",
+      foreverRootPath: "C:\\Program Files (x86)\\World of Warcraft",
+      retailEnabled: false,
+      foreverEnabled: true,
+      intervalMinutes: 30,
+      launchAtStartup: true,
+      autoUpdate: true,
+      companionToken: "",
+    },
+    status: {
+      configured: true, paired: false, retailEnabled: false, foreverEnabled: true, region: "eu", realmSlug: "",
+      syncing: false, nextTickAt: NOW + 1800, intervalMinutes: 30, version: "1.15.0",
+      prices: stage("notConnected", null, "Retail is off"),
+      addon: stage("notConnected", null, "Retail is off"),
+      ledger: stage("notConnected", null, "Retail is off"),
+      games: [{ folder: "_classic_beta_", game: "forever", lastScanAt: NOW - 900 }],
+    },
+  },
+
   // A retail-only player — the common case today, and the one that must
   // render byte-for-byte what it always has: three stage rows, no Forever
   // card, no games list.

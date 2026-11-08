@@ -1,4 +1,4 @@
-import { formatPairCode, foreverRootPatch } from "../lib/format.js";
+import { formatPairCode, foreverRootPatch, PAIR_HOW } from "../lib/format.js";
 
 const PRESET_INTERVALS = [15, 30, 60];
 
@@ -628,7 +628,7 @@ export function render(el, ctx) {
       state.tabIndex = -1;
       state.textContent = paired
         ? "Paired. Your ledger uploads on every sync."
-        : "Not paired. Nothing is uploaded.";
+        : `Not paired. Nothing is uploaded: no WoW: Forever scans, no ledger. ${PAIR_HOW.replace(" in Settings here", " below")}`;
       accountBody.append(state);
 
       if (paired) {

@@ -51,6 +51,28 @@ export function foreverScanLine(g, now) {
   return `Scan uploaded ${relativeTime(g.lastSentAt, now)}${items}`;
 }
 
+// The Forever card's pairing line: scans go up only with a pairing token (forever.rs skips the
+// upload without one), so an unpaired card says so instead of waiting for a scan that never goes.
+// Null once paired. A scan already on disk (`lastScanAt`) is named: it goes up at the next sync after
+// pairing, with nothing to redo in the game.
+export function foreverPairLine(g, paired) {
+  if (paired) return null;
+  return g.lastScanAt
+    ? "Your scan is ready, but it reaches goldcap.gg only once this app is paired with your GoldCap account. Pair it and the scan goes up at the next sync."
+    : "Scans reach goldcap.gg only once this app is paired with your GoldCap account.";
+}
+
+// How to get the code, the same words on the Status card and in Settings.
+export const PAIR_HOW = "On goldcap.gg, sign in and open Account, press Show pairing code, and type the code in Settings here within 15 minutes.";
+
+// The wizard's Connect step: with WoW: Forever on, pairing is what sends the scans, not only the
+// sales, so "Later" must not read as harmless.
+export function connectSubtitle(draft) {
+  return draft.foreverEnabled
+    ? "Your WoW: Forever scans and your sales reach goldcap.gg only once this app is paired with your account."
+    : "So your sales show up as profit on the site.";
+}
+
 // The Forever card's "crowd prices" line: when the companion last actually wrote everyone
 // else's prices into this install's addon folder. Empty until that has happened once.
 export function foreverCrowdLine(g, now) {

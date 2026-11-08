@@ -1,4 +1,4 @@
-import { formatPairCode, addonInstalledSince } from "../lib/format.js";
+import { formatPairCode, addonInstalledSince, connectSubtitle } from "../lib/format.js";
 
 // The install path and, when the game folders resolve to exactly one, the
 // realm all come out of the game's own files — see detect() below. Step 0
@@ -522,7 +522,7 @@ export function render(el, ctx) {
   // ---- step 2: connect ----------------------------------------------------
 
   function stepConnect() {
-    setHead("Connect to goldcap.gg?", "So your sales show up as profit on the site.");
+    setHead("Connect to goldcap.gg?", connectSubtitle(draft));
     bodyEl.replaceChildren();
 
     // Whichever way this step was reached, draft is already saved (Setup's

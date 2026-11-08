@@ -10,6 +10,8 @@ import {
   foreverCrowdLine,
   foreverMarketLine,
   foreverImpactLines,
+  foreverPairLine,
+  connectSubtitle,
   addonCard,
   addonInstalledSince,
   foreverRootPatch,
@@ -282,4 +284,18 @@ test("foreverRootPatch: the picker opens only when detection finds nothing or fa
 
 test("addonCard: no card when the companion does not manage the addon", () => {
   assert.equal(addonCard(line({ kind: "off" }), NOW), null);
+});
+
+test("foreverPairLine: nothing once paired; unpaired, it says the scan waits for pairing, naming one already on disk", () => {
+  assert.equal(foreverPairLine({ lastScanAt: NOW }, true), null);
+  assert.equal(foreverPairLine({}, true), null);
+  const ready = foreverPairLine({ lastScanAt: NOW - 600 }, false);
+  assert.match(ready, /^Your scan is ready, but it reaches goldcap\.gg only once this app is paired/);
+  assert.match(ready, /goes up at the next sync/);
+  assert.equal(foreverPairLine({}, false), "Scans reach goldcap.gg only once this app is paired with your GoldCap account.");
+});
+
+test("connectSubtitle: with WoW: Forever on, pairing is what sends the scans", () => {
+  assert.match(connectSubtitle({ foreverEnabled: true, retailEnabled: false }), /WoW: Forever scans and your sales reach goldcap\.gg only once/);
+  assert.equal(connectSubtitle({ foreverEnabled: false, retailEnabled: true }), "So your sales show up as profit on the site.");
 });
