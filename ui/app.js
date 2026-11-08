@@ -22,8 +22,9 @@ export function toast(message, isError = false) {
 }
 
 /// Swaps the visible screen. Screens own their own polling and must stop it
-/// on teardown, which is what the returned disposer is for.
-export function show(screen) {
+/// on teardown, which is what the returned disposer is for. `opts` reaches the
+/// screen as `ctx.opts`: `{ focus: "pair" }` opens Settings on the pairing code.
+export function show(screen, opts = {}) {
   if (current?.dispose) current.dispose();
   // Cleared before the swap: if the render below throws, the next show()
   // must not dispose a screen that is already gone.
@@ -36,7 +37,7 @@ export function show(screen) {
   root.append(section);
 
   try {
-    current = SCREENS[screen](section, ctx) ?? {};
+    current = SCREENS[screen](section, { ...ctx, opts }) ?? {};
   } catch (e) {
     // A half-built screen is worse than none: replace it with something
     // that says what happened, so the window is never silently dead.

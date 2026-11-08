@@ -10,6 +10,10 @@ import {
   foreverCrowdLine,
   foreverMarketLine,
   foreverImpactLines,
+  foreverPairLine,
+  foreverNextStep,
+  canSkipPairing,
+  connectSubtitle,
   addonCard,
   addonInstalledSince,
   foreverRootPatch,
@@ -282,4 +286,30 @@ test("foreverRootPatch: the picker opens only when detection finds nothing or fa
 
 test("addonCard: no card when the companion does not manage the addon", () => {
   assert.equal(addonCard(line({ kind: "off" }), NOW), null);
+});
+
+test("foreverPairLine: nothing once paired; unpaired, it says the scan waits for pairing, naming one already on disk", () => {
+  assert.equal(foreverPairLine({ lastScanAt: NOW }, true), null);
+  assert.equal(foreverPairLine({}, true), null);
+  const ready = foreverPairLine({ lastScanAt: NOW - 600 }, false);
+  assert.match(ready, /^Your scan is ready, but it reaches goldcap\.gg only once this app is paired/);
+  assert.match(ready, /goes up at the next sync/);
+  assert.equal(foreverPairLine({}, false), "Scans reach goldcap.gg only once this app is paired with your GoldCap account.");
+});
+
+test("connectSubtitle: with WoW: Forever on, pairing is what sends the scans", () => {
+  assert.match(connectSubtitle({ foreverEnabled: true, retailEnabled: false }), /WoW: Forever scans and your sales reach goldcap\.gg only once/);
+  assert.equal(connectSubtitle({ foreverEnabled: false, retailEnabled: true }), "So your sales show up as profit on the site.");
+});
+
+test("foreverNextStep: once paired and before the first send, the one thing to do in game", () => {
+  assert.equal(foreverNextStep({}, false), null, "unpaired: the pair line says what to do");
+  assert.match(foreverNextStep({}, true), /^Next: open the auction house in WoW: Forever .*\/reload\.$/);
+  assert.equal(foreverNextStep({ lastSentAt: NOW }, true), null);
+});
+
+test("canSkipPairing: never with WoW: Forever on; Retail alone keeps Later", () => {
+  assert.equal(canSkipPairing({ foreverEnabled: true, retailEnabled: true }), false);
+  assert.equal(canSkipPairing({ foreverEnabled: true, retailEnabled: false }), false);
+  assert.equal(canSkipPairing({ foreverEnabled: false, retailEnabled: true }), true);
 });

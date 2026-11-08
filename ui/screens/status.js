@@ -1,4 +1,4 @@
-import { relativeTime, countdown, groupDigits, foreverScanLine, foreverCrowdLine, foreverMarketLine, foreverImpactLines, addonCard } from "../lib/format.js";
+import { relativeTime, countdown, groupDigits, foreverScanLine, foreverCrowdLine, foreverMarketLine, foreverImpactLines, foreverPairLine, foreverNextStep, PAIR_HOW, addonCard } from "../lib/format.js";
 import { brandMarkSvg } from "../lib/brandMark.js";
 
 const POLL_MS = 5000;
@@ -55,6 +55,8 @@ function heroPhrase(s) {
   const games = foreverGames(s);
   if (foreverBroken(games)) return "WoW: Forever needs attention";
   if (s.retailEnabled) return "Everything works";
+  // Forever alone and not paired: nothing is sent, however many scans the player makes.
+  if (!s.paired && games.length > 0) return "Pair to send your scans";
   return games.some((g) => g.lastSentAt) ? "Everything works" : "Waiting for your first scan";
 }
 
@@ -106,7 +108,7 @@ function stageRow(key, stage, ctx, canPair) {
     const pair = document.createElement("button");
     pair.className = "btn btn-primary btn-sm";
     pair.textContent = "Pair";
-    pair.addEventListener("click", () => ctx.show("settings"));
+    pair.addEventListener("click", () => ctx.show("settings", { focus: "pair" }));
     body.append(pair);
   }
 
@@ -136,7 +138,7 @@ function impactBlock({ big, label, sub }) {
 // Returns the card alongside its two age-bearing paragraphs so paintTime can re-date them every
 // second without rebuilding the card (and losing focus/animation the way paintSnapshot's own
 // rebuild would).
-function foreverCard(g) {
+function foreverCard(g, paired, onPair) {
   const card = document.createElement("div");
   card.className = "card card-forever";
 
@@ -158,6 +160,32 @@ function foreverCard(g) {
   const scan = document.createElement("p");
   scan.className = "stage-detail";
   card.append(scan);
+
+  // Not paired: the scan goes nowhere, and the card says so with the way to fix it.
+  const pairLine = foreverPairLine(g, paired);
+  if (pairLine) {
+    const why = document.createElement("p");
+    why.className = "stage-error";
+    why.textContent = pairLine;
+    const how = document.createElement("p");
+    how.className = "stage-detail";
+    how.textContent = PAIR_HOW;
+    const pair = document.createElement("button");
+    pair.className = "btn btn-primary btn-sm";
+    pair.type = "button";
+    pair.textContent = "Pair";
+    pair.addEventListener("click", onPair);
+    card.append(why, how, pair);
+  }
+
+  // Paired, nothing sent yet: the one thing left to do, in the game.
+  const next = foreverNextStep(g, paired);
+  if (next) {
+    const step = document.createElement("p");
+    step.className = "stage-detail";
+    step.textContent = next;
+    card.append(step);
+  }
 
   // What that scan changed on its market, when goldcap.gg counted it. Not time-derived, so it
   // is built once here; an answer without numbers leaves the card exactly as it was.
@@ -348,7 +376,7 @@ export function render(el, ctx) {
     }
 
     const games = foreverGames(snapshot);
-    const cards = games.map((g) => ({ g, ...foreverCard(g) }));
+    const cards = games.map((g) => ({ g, ...foreverCard(g, snapshot.paired, () => ctx.show("settings", { focus: "pair" })) }));
     foreverDetails = cards;
     foreverCards.replaceChildren(...cards.map(({ card }) => card));
 

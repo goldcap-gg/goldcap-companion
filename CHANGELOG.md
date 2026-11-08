@@ -4,6 +4,12 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
+## 1.21.1 (2026-11-08)
+
+- WoW: Forever: if the Companion is not paired with your goldcap.gg account, the Status window now says so, instead of waiting for a scan that would never be sent. It tells you how to get a pairing code and has a Pair button. A scan you already made goes up at the next sync once you pair.
+- WoW: Forever: first-time setup now always ends with pairing, since WoW: Forever gets no prices without it, and the Pair button opens Settings right on the code field.
+- Once paired, until your first scan reaches goldcap.gg, the WoW: Forever card says the one thing left to do: open the auction house in game, then type /reload.
+
 ## 1.21.0 (2026-11-06)
 
 - Sends your WoW: Forever trades and gold to goldcap.gg for the new WoW: Forever ledger.
