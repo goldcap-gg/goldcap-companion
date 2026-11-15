@@ -99,9 +99,9 @@ pub struct ForeverUpload {
 /// Postgres `int4` max: the server drops an id above this as unknown (it can never exist in
 /// the catalogue, whose lookup array is also int4) rather than let the query crash — mirrored
 /// here so the companion drops the same items locally instead of sending them for nothing.
-const ITEM_MAX_ID: i64 = 2_147_483_647;
+pub(crate) const ITEM_MAX_ID: i64 = 2_147_483_647;
 
-fn item_id(key: &Value) -> Option<i64> {
+pub(crate) fn item_id(key: &Value) -> Option<i64> {
     match key {
         Value::Integer(i) if (1..=ITEM_MAX_ID).contains(i) => Some(*i),
         Value::Number(n) if n.fract() == 0.0 && *n >= 1.0 && *n <= ITEM_MAX_ID as f64 => Some(*n as i64),
@@ -366,6 +366,15 @@ pub struct ForeverState {
     /// Forever ledger.
     #[serde(default)]
     pub ledger_stamps: BTreeMap<String, (i64, u64)>,
+    /// SavedVariables path → the trainers and merchants goldcap.gg has taken from that file, each
+    /// (`t:<npc>` or `v:<npc>`) with the visit time it was taken at. Only npcs still in the file
+    /// are kept.
+    #[serde(default)]
+    pub sources_sent: BTreeMap<String, BTreeMap<String, i64>>,
+    /// SavedVariables path → the file's (mtime, length) when every trainer and merchant in it had
+    /// been sent.
+    #[serde(default)]
+    pub sources_stamps: BTreeMap<String, (i64, u64)>,
     /// SavedVariables path → the fold `at` the site has had its say about.
     pub sent: BTreeMap<String, i64>,
     /// Install dir → what the Forever leg knows about it.
@@ -699,6 +708,32 @@ pub async fn sync_forever_at_root(
                     crate::forever_runs::PurchasePass::Complete => {
                         if let Some(s) = stamp {
                             state.ledger_stamps.insert(file_key, s);
+                        }
+                    }
+                    crate::forever_runs::PurchasePass::Incomplete => {}
+                    crate::forever_runs::PurchasePass::Unauthorized => {
+                        state.installs.entry(key.clone()).or_default().unauthorized = true;
+                        break;
+                    }
+                }
+            }
+        }
+        // Recipe sources: what the trainers and merchants of the file teach and sell. A file
+        // without them (an older addon) makes no request.
+        if !token.is_empty() && !state.installs.get(&key).is_some_and(|e| e.unauthorized) {
+            for file in &game.saved_vars {
+                let file_key = file.to_string_lossy().into_owned();
+                let stamp = file_stamp(file);
+                if stamp.is_some() && state.sources_stamps.get(&file_key).copied() == stamp {
+                    continue;
+                }
+                let mut sent = state.sources_sent.remove(&file_key).unwrap_or_default();
+                let pass = crate::forever_sources::send_sources(client, base, &token, file, &mut sent, logger).await;
+                state.sources_sent.insert(file_key.clone(), sent);
+                match pass {
+                    crate::forever_runs::PurchasePass::Complete => {
+                        if let Some(s) = stamp {
+                            state.sources_stamps.insert(file_key, s);
                         }
                     }
                     crate::forever_runs::PurchasePass::Incomplete => {}
@@ -1424,6 +1459,16 @@ pub(crate) mod tests {
         let text = serde_json::to_string(&new).unwrap();
         assert_eq!(serde_json::from_str::<ForeverState>(&text).unwrap(), new);
         assert!(text.contains(r#""onlyYours":2"#) && text.contains(r#""sentAt":10"#), "{text}");
+
+        // The same for the recipe sources: a file from before them loads with none, and one with
+        // them comes back whole.
+        assert!(loaded.sources_sent.is_empty() && loaded.sources_stamps.is_empty());
+        new.sources_sent.insert("/a".into(), [("t:11044".to_string(), 1794681535), ("v:3534".to_string(), 1794700233)].into());
+        new.sources_stamps.insert("/a".into(), (7, 42));
+        let text = serde_json::to_string(&new).unwrap();
+        assert_eq!(serde_json::from_str::<ForeverState>(&text).unwrap(), new);
+        assert!(text.contains(r#""sources_sent":{"/a":{"t:11044":1794681535,"v:3534":1794700233}}"#), "{text}");
+        assert!(text.contains(r#""sources_stamps":{"/a":[7,42]}"#), "{text}");
     }
 
     #[tokio::test]
@@ -1530,6 +1575,46 @@ pub(crate) mod tests {
         // Same file next tick: not re-read, not re-sent (nothing listens on port 9 anyway).
         let again = sync_forever_at_root(&crate::sync::build_client(), "http://127.0.0.1:9", &root, &config, &logger, &root.join("s.json"), &store, 2).await;
         assert!(again.purchases_sent.get(&key).is_some_and(|s| s.contains("buyrun-a")));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_paired_forever_install_sends_its_trainers_and_merchants_once() {
+        let root = machine("forever-sources");
+        let sv = put(&root, "_forever_", r#"GoldCapDB = { client = { interface = 16001, build = "1.60.1.70009", regionId = 90 }, ledger = {
+          { key = "buyrun-a", kind = "buy", source = "goldcap_buy", itemID = 2589, qty = 53, total = 3551, runCode = "k7f3qzab", at = 1790000000 } },
+          foreverSources = { v = 1,
+            trainers = { [11044] = { n = "Doctor Martin Felben", m = 1458, z = "Undercity", f = "Horde", at = 1794681535, sv = { [2334] = { r = 50, c = 225, lv = 0, i = 2458 } } } },
+            vendors = { [3534] = { m = 1421, z = "Silverpine Forest", at = 1794700233, it = { [1197] = { p = 2666, k = 1, a = -1 } } } } } }"#);
+        std::fs::write(root.join("_forever_/WTF/Config.wtf"), "SET textLocale \"enUS\"\n").unwrap();
+        let config = crate::config::Config { companion_token: "tok".into(), ..crate::config::Config::default() };
+        let logger = crate::logging::Logger::new(&root.join("logs")).unwrap();
+        let store = std::sync::Mutex::new(std::collections::HashMap::new());
+        let (base, seen) = serve_forever(vec![
+            answer("200 OK", r#"{"accepted":1,"stored":1}"#),
+            answer("200 OK", "{}"),
+            answer("200 OK", r#"{"accepted":2,"skipped":0}"#),
+            answer("200 OK", r#"{"v":3,"generatedAt":"2026-10-01T10:00:00.000Z","plan":"free","freeLines":5,"game":"forever","runs":[]}"#),
+        ]);
+        let state = sync_forever_at_root(&crate::sync::build_client(), &base, &root, &config, &logger, &root.join("s.json"), &store, 1).await;
+        let first: Vec<String> = seen.try_iter().collect();
+        assert_eq!(first.len(), 4, "{first:?}");
+        assert!(first[0].to_ascii_lowercase().starts_with("post /v1/forever/run-purchases "), "{first:?}");
+        assert!(first[1].to_ascii_lowercase().starts_with("post /v1/forever/ledger/upload "), "{first:?}");
+        assert!(first[2].to_ascii_lowercase().starts_with("post /v1/forever/sources "), "{first:?}");
+        assert!(first[2].contains(r#""locale":"enUS""#) && first[2].contains(r#""npc":11044"#) && first[2].contains(r#""npc":3534"#), "{first:?}");
+        assert!(first[3].starts_with("GET /v1/lists/companion?game=forever "), "{first:?}");
+        let key = sv.to_string_lossy().into_owned();
+        let want: BTreeMap<String, i64> = [("t:11044".to_string(), 1794681535), ("v:3534".to_string(), 1794700233)].into();
+        assert_eq!(state.sources_sent.get(&key), Some(&want));
+        assert!(state.sources_stamps.contains_key(&key));
+        // Same file next tick: not re-read, not re-sent. Only the lists are asked for again.
+        let (base, seen) = serve_forever(vec![answer("200 OK", r#"{"v":3,"generatedAt":"2026-10-01T10:00:00.000Z","plan":"free","freeLines":5,"game":"forever","runs":[]}"#), answer("200 OK", "{}")]);
+        let again = sync_forever_at_root(&crate::sync::build_client(), &base, &root, &config, &logger, &root.join("s.json"), &store, 2).await;
+        let second: Vec<String> = seen.try_iter().collect();
+        assert_eq!(second.len(), 1, "{second:?}");
+        assert!(second[0].starts_with("GET /v1/lists/companion"), "{second:?}");
+        assert_eq!(again.sources_sent.get(&key), Some(&want));
         std::fs::remove_dir_all(&root).ok();
     }
 }

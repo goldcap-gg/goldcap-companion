@@ -12,6 +12,7 @@ mod config;
 mod forever;
 mod forever_ledger;
 mod forever_runs;
+mod forever_sources;
 mod games;
 mod health;
 mod ledger_summary;
