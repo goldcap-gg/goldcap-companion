@@ -248,7 +248,7 @@ pub(crate) fn opt_int(t: &Table, key: &str) -> Option<i64> {
     }
 }
 
-fn opt_exact_int(t: &Table, key: &str) -> Option<i64> {
+pub(crate) fn opt_exact_int(t: &Table, key: &str) -> Option<i64> {
     match t.get::<Value>(key) {
         Ok(Value::Integer(i)) => Some(i),
         Ok(Value::Number(n))
@@ -358,6 +358,24 @@ fn opt_levels(row: &Table) -> Option<Vec<BookLevel>> {
     }
 }
 
+/// `GoldCapDB.client`, or None. Anything unreadable is "no passport", never an error: a damaged
+/// stamp must not cost the player their ledger upload. The shape accepted here must match what
+/// the API accepts (interface `^\d{1,7}$`, build `^\d+(\.\d+){0,5}$`): a passport the server
+/// would reject as malformed is worse than no passport at all. A bad stamp like
+/// `build = "12.1.0-ptr"` would 400 and stall every upload from that file.
+pub(crate) fn read_client(db: &Table) -> Option<ClientPassport> {
+    let Ok(Value::Table(client)) = db.get::<Value>("client") else {
+        return None;
+    };
+    let interface = opt_int(&client, "interface")?;
+    let build = opt_string(&client, "build")?.trim().to_string();
+    if !is_valid_passport_interface(interface) || !is_valid_passport_build(&build) {
+        return None;
+    }
+    let region_id = opt_int(&client, "regionId").filter(|id| *id > 0);
+    Some(ClientPassport { interface, build, region_id })
+}
+
 /// Evaluates the file in a VM with NO standard library, so the "code" in it can
 /// only build tables — it cannot open a file, spawn a process or reach the
 /// network even if a hostile file tried.
@@ -371,22 +389,7 @@ pub fn parse_saved_variables(lua_source: &str) -> Result<LedgerData, String> {
 
     let mut data = LedgerData::default();
 
-    if let Ok(Value::Table(client)) = db.get::<Value>("client") {
-        // Anything unreadable is "no passport", never an error: a damaged stamp must not
-        // cost the player their ledger upload. The shape accepted here must match what the
-        // API accepts (interface `^\d{1,7}$`, build `^\d+(\.\d+){0,5}$`): a passport the
-        // server would reject as malformed is worse than no passport at all — a bad stamp
-        // like `build = "12.1.0-ptr"` would 400 and stall every upload from that file.
-        if let (Some(interface), Some(build)) =
-            (opt_int(&client, "interface"), opt_string(&client, "build"))
-        {
-            let build = build.trim().to_string();
-            if is_valid_passport_interface(interface) && is_valid_passport_build(&build) {
-                let region_id = opt_int(&client, "regionId").filter(|id| *id > 0);
-                data.client = Some(ClientPassport { interface, build, region_id });
-            }
-        }
-    }
+    data.client = read_client(&db);
 
     if let Ok(Value::Table(ledger)) = db.get::<Value>("ledger") {
         for row in ledger.sequence_values::<Table>().flatten() {

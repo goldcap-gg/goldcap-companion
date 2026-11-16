@@ -4,6 +4,10 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
+## 1.22.0 (2026-11-16)
+
+- WoW: Forever: sends what the profession trainers you talk to teach and what the merchants you open sell (ids, prices, the npc's name and zone), so recipe pages on goldcap.gg can say where a recipe is learned or bought.
+
 ## 1.21.1 (2026-11-08)
 
 - WoW: Forever: if the Companion is not paired with your goldcap.gg account, the Status window now says so, instead of waiting for a scan that would never be sent. It tells you how to get a pairing code and has a Pair button. A scan you already made goes up at the next sync once you pair.

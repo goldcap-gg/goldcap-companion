@@ -32,24 +32,34 @@ fn read_portal(wow_retail_path: &Path) -> Option<String> {
     parse_portal(&config)
 }
 
-/// Extracts the login region from Config.wtf contents: `SET portal "EU"`.
-pub fn parse_portal(config_wtf: &str) -> Option<String> {
+/// The value of the first `SET <name> "<value>"` line in Config.wtf contents, unquoted.
+fn cvar<'a>(config_wtf: &'a str, name: &str) -> Option<&'a str> {
     for line in config_wtf.lines() {
-        let line = line.trim();
-        let Some(rest) = line.strip_prefix("SET ") else {
+        let Some(rest) = line.trim().strip_prefix("SET ") else {
             continue;
         };
         let mut parts = rest.splitn(2, char::is_whitespace);
-        if parts.next() != Some("portal") {
+        if parts.next() != Some(name) {
             continue;
         }
-        let value = parts.next()?.trim().trim_matches('"').trim();
-        if value.is_empty() {
-            return None;
-        }
-        return Some(value.to_ascii_lowercase());
+        return Some(parts.next()?.trim().trim_matches('"').trim());
     }
     None
+}
+
+/// Extracts the login region from Config.wtf contents: `SET portal "EU"`.
+pub fn parse_portal(config_wtf: &str) -> Option<String> {
+    let value = cvar(config_wtf, "portal")?;
+    (!value.is_empty()).then(|| value.to_ascii_lowercase())
+}
+
+/// Extracts the client language from Config.wtf contents: `SET textLocale "enUS"`. Only the
+/// game's own shape (two lowercase letters, two uppercase) is a locale; anything else is unknown.
+pub fn parse_text_locale(config_wtf: &str) -> Option<String> {
+    let value = cvar(config_wtf, "textLocale")?;
+    let b = value.as_bytes();
+    (b.len() == 4 && b[..2].iter().all(u8::is_ascii_lowercase) && b[2..].iter().all(u8::is_ascii_uppercase))
+        .then(|| value.to_string())
 }
 
 /// Directory names under `WTF/Account/<ACCOUNT>/` are realm display names;
@@ -159,6 +169,25 @@ mod tests {
         assert_eq!(parse_portal(""), None);
         // `portalLite` or similar must not match the `portal` cvar.
         assert_eq!(parse_portal("SET portalLite \"1\"\n"), None);
+    }
+
+    #[test]
+    fn parses_the_text_locale_cvar() {
+        let config = "SET portal \"EU\"\nSET textLocale \"enUS\"\nSET agentUID \"wow_enus\"\n";
+        assert_eq!(parse_text_locale(config), Some("enUS".to_string()));
+        assert_eq!(parse_text_locale("  SET textLocale zhCN  "), Some("zhCN".to_string()));
+        assert_eq!(parse_text_locale("SET textLocale \"koKR\"\r\n"), Some("koKR".to_string()));
+    }
+
+    #[test]
+    fn a_text_locale_of_another_shape_or_none_at_all_yields_none() {
+        for bad in ["enus", "ENUS", "en", "enUSA", "en-US", "e1US", "éñUS", ""] {
+            assert_eq!(parse_text_locale(&format!("SET textLocale \"{bad}\"\n")), None, "{bad}");
+        }
+        assert_eq!(parse_text_locale("SET portal \"EU\"\n"), None);
+        assert_eq!(parse_text_locale(""), None);
+        // Another cvar that only starts the same way is not this one.
+        assert_eq!(parse_text_locale("SET textLocaleOld \"enUS\"\n"), None);
     }
 
     #[test]
