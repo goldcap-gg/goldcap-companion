@@ -182,21 +182,33 @@ fn kept_store() -> &'static Mutex<Option<KeptPayload>> {
     KEPT.get_or_init(|| Mutex::new(None))
 }
 
+/// Whether a failed region fetch is worth trying again within minutes: the site was not
+/// reached (a request error) or it was briefly unwell (a 5xx, a 429). A 304 with nothing
+/// kept, an oversized body, a payload that is not region data and any other status would
+/// come out the same again.
+pub fn is_transient_failure(message: &str) -> bool {
+    if let Some(code) = message.strip_prefix("unexpected status ") {
+        return code.trim().parse::<u16>().is_ok_and(|c| c >= 500 || c == 429);
+    }
+    !(message.starts_with("region data ")
+        || message.starts_with("response was not GCM1")
+        || message.starts_with("304 with no"))
+}
+
 /// One tick's region leg: revalidate or fetch, settle, log, and hand back the body to write
 /// with its summary for the Status screen -- one pair, so the two cannot disagree. Never an
 /// error: a failure is a log line and the import string is written whatever this returns.
+/// The flag says the fetch failed in a way worth retrying soon (`is_transient_failure`).
 pub async fn refresh(
     client: &reqwest::Client,
     region: &str,
     logger: &Logger,
     now: i64,
-) -> Option<(String, RegionSummary)> {
-    refresh_at(client, REGION_DATA_URL, kept_store(), region, logger, now).await
+) -> (Option<(String, RegionSummary)>, bool) {
+    refresh_inner(client, REGION_DATA_URL, kept_store(), region, logger, now).await
 }
 
-/// `refresh` against a given URL and store, so whole ticks run in tests against a local
-/// server without touching the process's own kept payload. The ETag comes from what was
-/// kept *before* this tick, and the store is always put back.
+#[cfg(test)]
 async fn refresh_at(
     client: &reqwest::Client,
     url: &str,
@@ -205,11 +217,26 @@ async fn refresh_at(
     logger: &Logger,
     now: i64,
 ) -> Option<(String, RegionSummary)> {
+    refresh_inner(client, url, store, region, logger, now).await.0
+}
+
+/// `refresh` against a given URL and store, so whole ticks run in tests against a local
+/// server without touching the process's own kept payload. The ETag comes from what was
+/// kept *before* this tick, and the store is always put back.
+async fn refresh_inner(
+    client: &reqwest::Client,
+    url: &str,
+    store: &Mutex<Option<KeptPayload>>,
+    region: &str,
+    logger: &Logger,
+    now: i64,
+) -> (Option<(String, RegionSummary)>, bool) {
     let previous = store.lock().unwrap_or_else(|p| p.into_inner()).take();
     let etag = if_none_match(previous.as_ref(), region).map(str::to_string);
     let fetched = fetch_from(client, url, region, etag.as_deref()).await;
     let unchanged = matches!(fetched, Ok(Fetched::NotModified));
     let (kept, outcome) = settle(previous, fetched, region);
+    let retry_soon = outcome.as_ref().is_err_and(|e| is_transient_failure(e));
     match outcome {
         Ok(summary) => logger.info(&format!(
             "region data {region}: {} {}, {} min old{}",
@@ -229,7 +256,7 @@ async fn refresh_at(
         ));
     }
     *store.lock().unwrap_or_else(|p| p.into_inner()) = kept;
-    written
+    (written, retry_soon)
 }
 
 #[cfg(test)]
@@ -321,6 +348,21 @@ mod tests {
         let (after, outcome) = settle(None, Ok(Fetched::NotModified), "eu");
         assert_eq!(after, None);
         assert!(outcome.is_err());
+    }
+
+    #[test]
+    fn only_a_missed_site_a_5xx_or_a_429_is_retried_soon() {
+        assert!(is_transient_failure("error sending request: client error (SendRequest): connection error: Connection reset by peer (os error 54)"));
+        assert!(is_transient_failure("could not connect: connection refused"));
+        assert!(is_transient_failure("timed out after 60 s"));
+        assert!(is_transient_failure("unexpected status 502"));
+        assert!(is_transient_failure("unexpected status 429"));
+        assert!(!is_transient_failure("unexpected status 404"));
+        assert!(!is_transient_failure("region data too large"));
+        assert!(!is_transient_failure("region data too large (9000000 bytes)"));
+        assert!(!is_transient_failure("region data carried no items"));
+        assert!(!is_transient_failure("response was not GCM1 region data for eu"));
+        assert!(!is_transient_failure("304 with no region data kept"));
     }
 
     #[test]

@@ -4,6 +4,14 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
+## 1.22.1 (unreleased)
+
+- After your computer wakes from sleep the Companion syncs again within a few seconds, instead
+  of waiting out the rest of the interval. If a sync fails because goldcap.gg can't be reached,
+  it tries again after a minute, then two, then five, instead of waiting for the next full
+  interval. The same goes when only the region-wide prices failed to download.
+- The Status window says "Syncing soon" when a sync is about to start, instead of "Next sync in due".
+
 ## 1.22.0 (2026-11-16)
 
 - WoW: Forever: sends what the profession trainers you talk to teach and what the merchants you open sell (ids, prices, the npc's name and zone), so recipe pages on goldcap.gg can say where a recipe is learned or bought.
