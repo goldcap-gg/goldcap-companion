@@ -4,7 +4,7 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
-## 1.22.0 (unreleased)
+## 1.22.0 (2026-11-16)
 
 - WoW: Forever: sends what the profession trainers you talk to teach and what the merchants you open sell (ids, prices, the npc's name and zone), so recipe pages on goldcap.gg can say where a recipe is learned or bought.
 
