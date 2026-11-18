@@ -3,6 +3,9 @@
 //! an OS notification. The site picks what the player asked to get on the Companion; this module
 //! only shows each one once.
 //!
+//! The first poll with no saved id (a fresh install, or the first run of this version) shows
+//! nothing: it only learns the newest id, and what arrives after that is shown.
+//!
 //! Each request carries the shared client's User-Agent, `goldcap-companion/<version>`: that is how
 //! the site tells a Companion that shows notifications from one that does not.
 //!
@@ -17,6 +20,9 @@ use std::time::Duration;
 
 pub const STATE_FILE_NAME: &str = "notify-feed.json";
 const POLL_EVERY: Duration = Duration::from_secs(60);
+/// How many pages the first poll reads to find the newest id (the site sends 5 a page, from the
+/// last two hours only).
+const MAX_PRIME_PAGES: usize = 40;
 /// The site reads `since` as at most 15 digits.
 const MAX_SINCE: u64 = 999_999_999_999_999;
 /// Only a page of the site opens from a click (Windows; the other systems report no click).
@@ -49,8 +55,14 @@ pub struct FeedState {
 }
 
 impl FeedState {
+    #[cfg(test)]
     pub fn load_from(path: &Path) -> Self {
-        std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+        Self::load_saved(path).unwrap_or_default()
+    }
+
+    /// None when there is no readable file: a fresh install, or the first run of this version.
+    pub fn load_saved(path: &Path) -> Option<Self> {
+        std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str(&t).ok())
     }
 
     pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
@@ -106,6 +118,9 @@ pub fn fresh(items: Vec<FeedItem>, last: u64) -> (Vec<FeedItem>, u64) {
 #[derive(Debug, Default)]
 pub struct Feed {
     pub last_id: u64,
+    /// A last id is known (saved, or found by a first poll). Until then a poll shows nothing: it
+    /// only learns the newest id, so a fresh install never shows a burst of old notifications.
+    primed: bool,
     /// The token the site refused: not asked again until the pairing changes.
     refused: Option<String>,
     /// The last failure logged, so a site that is down is one log line, not one a minute.
@@ -114,7 +129,10 @@ pub struct Feed {
 
 impl Feed {
     pub fn load(state_path: &Path) -> Self {
-        Feed { last_id: FeedState::load_from(state_path).last_id, ..Feed::default() }
+        match FeedState::load_saved(state_path) {
+            Some(saved) => Feed { last_id: saved.last_id, primed: true, ..Feed::default() },
+            None => Feed::default(),
+        }
     }
 
     /// One poll: what to show now. Silent (no request) while unpaired or after the site refused
@@ -132,20 +150,40 @@ impl Feed {
         if token.is_empty() || self.refused.as_deref() == Some(token) {
             return Vec::new();
         }
-        match fetch(client, base, token, self.last_id).await {
-            Fetched::Items(items) => {
-                if self.failing.take().is_some() {
-                    logger.info("notifications: reachable again");
-                }
-                let (show, next) = fresh(items, self.last_id);
-                if next != self.last_id {
-                    self.last_id = next;
-                    if let Err(e) = (FeedState { last_id: next }).save_to(state_path) {
-                        logger.error(&format!("notifications: last shown id not saved ({e})"));
-                    }
-                }
-                show
+        // The first poll pages through what the site still holds and shows none of it.
+        let pages = if self.primed { 1 } else { MAX_PRIME_PAGES };
+        for _ in 0..pages {
+            let items = match fetch(client, base, token, self.last_id).await {
+                Fetched::Items(items) => items,
+                other => return self.failed(other, token, logger),
+            };
+            if self.failing.take().is_some() {
+                logger.info("notifications: reachable again");
             }
+            let (show, next) = fresh(items, self.last_id);
+            let moved = next != self.last_id;
+            if moved || !self.primed {
+                self.last_id = next;
+                if let Err(e) = (FeedState { last_id: next }).save_to(state_path) {
+                    logger.error(&format!("notifications: last shown id not saved ({e})"));
+                }
+            }
+            if self.primed {
+                return show;
+            }
+            if !moved {
+                self.primed = true;
+                logger.info(&format!("notifications: starting after id {}", self.last_id));
+                return Vec::new();
+            }
+        }
+        // Still more pages than expected: carry on reading silently next minute.
+        Vec::new()
+    }
+
+    fn failed(&mut self, fetched: Fetched, token: &str, logger: &crate::logging::Logger) -> Vec<FeedItem> {
+        match fetched {
+            Fetched::Items(_) => Vec::new(),
             Fetched::Unauthorized => {
                 logger.error("notifications: token refused (401), not asked again until the Companion is paired again");
                 self.refused = Some(token.to_string());
@@ -261,7 +299,7 @@ pub async fn run_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forever::tests::{answer, serve_once};
+    use crate::forever::tests::{answer, serve_forever, serve_once};
 
     fn item(id: &str) -> FeedItem {
         FeedItem {
@@ -330,8 +368,9 @@ mod tests {
     async fn the_poll_asks_since_the_last_shown_and_never_shows_one_twice() {
         let (dir, state_path, logger) = setup("since");
         let client = crate::sync::build_client();
+        FeedState { last_id: 40 }.save_to(&state_path).unwrap();
         let mut feed = Feed::load(&state_path);
-        assert_eq!(feed.last_id, 0);
+        assert_eq!(feed.last_id, 40);
 
         let (base, seen) = serve_once(answer("200 OK", &feed_of(&[("41", false), ("42", true)])));
         let shown = feed.poll(&client, &base, "tok", &state_path, &logger).await;
@@ -339,7 +378,7 @@ mod tests {
         assert!(shown[1].silent);
         let request = seen.recv().unwrap();
         let lower = request.to_ascii_lowercase();
-        assert!(lower.starts_with("get /v1/companion/notifications?since=0 "), "{request}");
+        assert!(lower.starts_with("get /v1/companion/notifications?since=40 "), "{request}");
         assert!(lower.contains("authorization: bearer tok"));
         assert!(lower.contains(&format!("user-agent: goldcap-companion/{}", env!("CARGO_PKG_VERSION"))), "{request}");
         assert_eq!(FeedState::load_from(&state_path).last_id, 42, "kept on disk before anything is shown");
@@ -363,6 +402,7 @@ mod tests {
     async fn unpaired_or_refused_it_stays_silent() {
         let (dir, state_path, logger) = setup("silent");
         let client = crate::sync::build_client();
+        FeedState { last_id: 0 }.save_to(&state_path).unwrap();
         let mut feed = Feed::load(&state_path);
 
         // No token: no request (nothing listens on port 9, and nothing is shown).
@@ -382,7 +422,58 @@ mod tests {
         let (base, _seen) = serve_once(answer("200 OK", "not json"));
         assert!(feed.poll(&client, &base, "new", &state_path, &logger).await.is_empty());
         assert_eq!(feed.last_id, 5);
-        assert!(!state_path.exists() || FeedState::load_from(&state_path).last_id == 5);
+        assert_eq!(FeedState::load_from(&state_path).last_id, 5);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn the_first_poll_shows_nothing_and_starts_after_the_newest_id() {
+        let (dir, state_path, logger) = setup("prime");
+        let client = crate::sync::build_client();
+        let mut feed = Feed::load(&state_path);
+
+        // A fresh install: the site still holds seven, five a page. All are read, none shown.
+        let (base, seen) = serve_forever(vec![
+            answer("200 OK", &feed_of(&[("1", false), ("2", false), ("3", false), ("4", false), ("5", false)])),
+            answer("200 OK", &feed_of(&[("6", false), ("7", false)])),
+            answer("200 OK", &feed_of(&[])),
+        ]);
+        assert!(feed.poll(&client, &base, "tok", &state_path, &logger).await.is_empty());
+        let asked: Vec<String> = seen.try_iter().map(|r| r.lines().next().unwrap().to_string()).collect();
+        assert_eq!(
+            asked,
+            vec![
+                "GET /v1/companion/notifications?since=0 HTTP/1.1",
+                "GET /v1/companion/notifications?since=5 HTTP/1.1",
+                "GET /v1/companion/notifications?since=7 HTTP/1.1",
+            ]
+        );
+        assert_eq!(feed.last_id, 7);
+        assert_eq!(FeedState::load_from(&state_path).last_id, 7);
+
+        // Only what arrives after that is shown.
+        let (base, _seen) = serve_once(answer("200 OK", &feed_of(&[("8", false)])));
+        assert_eq!(ids(&feed.poll(&client, &base, "tok", &state_path, &logger).await), vec!["8"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_failed_first_poll_stays_silent_until_one_succeeds_and_a_broken_file_starts_over() {
+        let (dir, state_path, logger) = setup("prime-fail");
+        let client = crate::sync::build_client();
+        std::fs::write(&state_path, "{ broken").unwrap();
+        let mut feed = Feed::load(&state_path);
+
+        let (base, _seen) = serve_once(answer("500 Internal Server Error", "{}"));
+        assert!(feed.poll(&client, &base, "tok", &state_path, &logger).await.is_empty());
+
+        // The site holds nothing: the first poll still counts, and saves where it starts.
+        let (base, _seen) = serve_once(answer("200 OK", &feed_of(&[])));
+        assert!(feed.poll(&client, &base, "tok", &state_path, &logger).await.is_empty());
+        assert_eq!(FeedState::load_saved(&state_path), Some(FeedState { last_id: 0 }));
+
+        let (base, _seen) = serve_once(answer("200 OK", &feed_of(&[("3", false)])));
+        assert_eq!(ids(&feed.poll(&client, &base, "tok", &state_path, &logger).await), vec!["3"]);
         std::fs::remove_dir_all(&dir).ok();
     }
 
