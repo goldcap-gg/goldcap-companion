@@ -17,12 +17,13 @@ use std::path::Path;
 /// Must not exceed the site's own caps for entries and for gold readings in one request.
 pub const MAX_BATCH: usize = 500;
 
+/// The passport in a Forever upload's body, as the ledger and the owned-lots routes take it.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct PassportBody<'a> {
-    interface: i64,
-    build: &'a str,
-    region_id: i64,
+pub(crate) struct PassportBody<'a> {
+    pub(crate) interface: i64,
+    pub(crate) build: &'a str,
+    pub(crate) region_id: i64,
 }
 
 /// One ledger row on the wire: the retail row's names, without the sniper decision fields.

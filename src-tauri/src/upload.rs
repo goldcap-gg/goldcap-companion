@@ -272,7 +272,7 @@ fn pending_item_names<'a>(data: &'a LedgerData, state: &UploadState) -> Vec<&'a 
 /// `owned|` prefix, same shared key set as ledger / `gold|` / `live|` / `name|`. Keyed on
 /// auctionID PLUS seenAt and cancelledAt (not auctionID alone): a re-seen lot's seenAt moving
 /// forward, or a cancellation landing, are both new facts the server has not seen yet.
-fn owned_lot_fingerprint(l: &OwnedLot) -> String {
+pub(crate) fn owned_lot_fingerprint(l: &OwnedLot) -> String {
     format!(
         "owned|{}|{}|{}",
         l.auction_id,

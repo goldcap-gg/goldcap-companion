@@ -503,6 +503,13 @@ pub struct ForeverState {
     /// been sent.
     #[serde(default)]
     pub sources_stamps: BTreeMap<String, (i64, u64)>,
+    /// SavedVariables path → the prints (`upload::owned_lot_fingerprint`) of the auctions
+    /// goldcap.gg has taken from that file. Only prints still in the file are kept.
+    #[serde(default)]
+    pub owned_lots_sent: BTreeMap<String, std::collections::BTreeSet<String>>,
+    /// SavedVariables path → the file's (mtime, length) when every auction in it had been sent.
+    #[serde(default)]
+    pub owned_lots_stamps: BTreeMap<String, (i64, u64)>,
     /// SavedVariables path → the fold `at` the site has had its say about.
     pub sent: BTreeMap<String, i64>,
     /// SavedVariables path → the `at` of the skipped fold already logged, so the log says why
@@ -914,6 +921,31 @@ pub async fn sync_forever_at_root(
                     crate::forever_runs::PurchasePass::Complete => {
                         if let Some(s) = stamp {
                             state.sources_stamps.insert(file_key, s);
+                        }
+                    }
+                    crate::forever_runs::PurchasePass::Incomplete => {}
+                    crate::forever_runs::PurchasePass::Unauthorized => {
+                        state.installs.entry(key.clone()).or_default().unauthorized = true;
+                        break;
+                    }
+                }
+            }
+        }
+        // The player's own auctions, to the Forever owned-lots route: never the retail one.
+        if !token.is_empty() && !state.installs.get(&key).is_some_and(|e| e.unauthorized) {
+            for file in &game.saved_vars {
+                let file_key = file.to_string_lossy().into_owned();
+                let stamp = file_stamp(file);
+                if stamp.is_some() && state.owned_lots_stamps.get(&file_key).copied() == stamp {
+                    continue;
+                }
+                let mut sent = state.owned_lots_sent.remove(&file_key).unwrap_or_default();
+                let pass = crate::forever_owned_lots::send_owned_lots(client, base, &token, file, &mut sent, logger).await;
+                state.owned_lots_sent.insert(file_key.clone(), sent);
+                match pass {
+                    crate::forever_runs::PurchasePass::Complete => {
+                        if let Some(s) = stamp {
+                            state.owned_lots_stamps.insert(file_key, s);
                         }
                     }
                     crate::forever_runs::PurchasePass::Incomplete => {}
@@ -1901,6 +1933,40 @@ pub(crate) mod tests {
         assert_eq!(serde_json::from_str::<ForeverState>(&text).unwrap(), new);
         assert!(text.contains(r#""sources_sent":{"/a":{"t:11044":1794681535,"v:3534":1794700233}}"#), "{text}");
         assert!(text.contains(r#""sources_stamps":{"/a":[7,42]}"#), "{text}");
+
+        // And for the player's own auctions.
+        assert!(loaded.owned_lots_sent.is_empty() && loaded.owned_lots_stamps.is_empty());
+        new.owned_lots_sent.insert("/a".into(), ["owned|101|1794653802|0".to_string()].into());
+        new.owned_lots_stamps.insert("/a".into(), (7, 42));
+        let text = serde_json::to_string(&new).unwrap();
+        assert_eq!(serde_json::from_str::<ForeverState>(&text).unwrap(), new);
+        assert!(text.contains(r#""owned_lots_sent":{"/a":["owned|101|1794653802|0"]}"#), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_paired_forever_install_sends_its_own_auctions_once_and_never_to_retail() {
+        let root = machine("forever-lots");
+        let sv = put(&root, "_forever_", r#"GoldCapDB = { client = { interface = 16001, build = "1.60.1.70938", regionId = 3 }, ownedLots = {
+          { auctionID = 101, itemID = 2589, isCommodity = true, quantity = 20, unitPrice = 1500, char = "Alice-CAMWOW EU5 Realm 7 PvE", region = "eu", seenAt = 1794653802, expiresAt = 1794680006 } } }"#);
+        let config = crate::config::Config { companion_token: "tok".into(), ..crate::config::Config::default() };
+        let logger = crate::logging::Logger::new(&root.join("logs")).unwrap();
+        let store = std::sync::Mutex::new(std::collections::HashMap::new());
+        let (base, seen) = serve_forever(vec![
+            answer("200 OK", r#"{"accepted":1,"updated":0,"gone":0}"#),
+            answer("200 OK", r#"{"v":3,"generatedAt":"2026-10-01T10:00:00.000Z","plan":"free","freeLines":5,"game":"forever","runs":[]}"#),
+        ]);
+        let state = sync_forever_at_root(&crate::sync::build_client(), &base, &root, &config, &logger, &root.join("s.json"), &store, 1).await;
+        let first: Vec<String> = seen.try_iter().collect();
+        assert_eq!(first.len(), 2, "{first:?}");
+        assert!(first[0].to_ascii_lowercase().starts_with("post /v1/forever/owned-lots "), "{first:?}");
+        assert!(!first.iter().any(|r| r.starts_with("POST /v1/owned-lots")), "{first:?}");
+        let key = sv.to_string_lossy().into_owned();
+        assert_eq!(state.owned_lots_sent.get(&key).map(|s| s.len()), Some(1));
+        assert!(state.owned_lots_stamps.contains_key(&key));
+        // Same file next tick: not re-read, not re-sent (nothing listens on port 9 anyway).
+        let again = sync_forever_at_root(&crate::sync::build_client(), "http://127.0.0.1:9", &root, &config, &logger, &root.join("s.json"), &store, 2).await;
+        assert_eq!(again.owned_lots_sent.get(&key).map(|s| s.len()), Some(1));
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[tokio::test]

@@ -11,6 +11,7 @@ mod commands;
 mod config;
 mod forever;
 mod forever_ledger;
+mod forever_owned_lots;
 mod forever_runs;
 mod forever_sources;
 mod games;

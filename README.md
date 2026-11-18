@@ -43,6 +43,7 @@ The complete list. Every address is ours, and nothing else is contacted.
 | `POST /v1/forever/run-purchases` | WoW: Forever only: what you bought in the addon's BUY tab from a list made on goldcap.gg (item, amount, price, time, character), so the list on the site shows what is done |
 | `POST /v1/forever/ledger/upload` | WoW: Forever only: your trades and gold readings, for the ledger on goldcap.gg |
 | `POST /v1/forever/sources` | WoW: Forever only: the trainers and merchants you opened (npc id, name, zone, your game language, and what they teach or sell with prices); nothing about your character |
+| `POST /v1/forever/owned-lots` | WoW: Forever only: your own auctions (auction id, item, amount, price, character, when it was seen, when it ends or was cancelled), so the site can tell you when one is undercut, sold or expired |
 | `POST api.goldcap.gg/v1/companion/claim` | trades your pairing code for a token |
 | `POST /v1/ledger/upload`, `/v1/live-observations`, `/v1/owned-lots`, `/v1/addon/item-names` | your own rows, from the addon's saved data |
 | `GET /v1/lists/companion`, `/v1/ledger/summary/companion` | what the window shows you |
