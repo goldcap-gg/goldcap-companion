@@ -7,6 +7,7 @@ data.
 ## 1.24.0 (unreleased)
 
 - Your WoW: Forever auctions now go up to goldcap.gg, so the site can tell you when one is undercut, sold or expired.
+- Notifications from GoldCap now appear on your desktop.
 
 ## 1.23.2 (2026-11-22)
 

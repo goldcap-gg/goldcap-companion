@@ -21,6 +21,7 @@ mod ledger_summary;
 mod linux_env;
 mod logging;
 mod luafile;
+mod notify_feed;
 mod region;
 mod runs;
 mod savedvars;
@@ -109,6 +110,7 @@ fn main() {
             autostart::apply(&handle, &logger, initial_config.launch_at_startup);
 
             let (config_tx, config_rx) = watch::channel(initial_config.clone());
+            let notify_config_rx = config_tx.subscribe();
             let (trigger_tx, trigger_rx) = mpsc::channel::<()>(4);
             let status = Arc::new(Mutex::new(sync::SyncStatus::default()));
 
@@ -151,6 +153,15 @@ fn main() {
             // needs its own owned handle.
             let updater_logger = logger.clone();
             let logger_for_addon = logger.clone();
+
+            // Notifications from goldcap.gg, once a minute while paired.
+            tauri::async_runtime::spawn(notify_feed::run_loop(
+                handle.clone(),
+                sync::build_client(),
+                notify_config_rx,
+                config_dir.join(notify_feed::STATE_FILE_NAME),
+                logger.clone(),
+            ));
 
             let client = sync::build_client();
             let sync_refresh_handle = handle.clone();

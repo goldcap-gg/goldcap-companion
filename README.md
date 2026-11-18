@@ -47,6 +47,7 @@ The complete list. Every address is ours, and nothing else is contacted.
 | `POST api.goldcap.gg/v1/companion/claim` | trades your pairing code for a token |
 | `POST /v1/ledger/upload`, `/v1/live-observations`, `/v1/owned-lots`, `/v1/addon/item-names` | your own rows, from the addon's saved data |
 | `GET /v1/lists/companion`, `/v1/ledger/summary/companion` | what the window shows you |
+| `GET /v1/companion/notifications` | while paired, once a minute: the notifications goldcap.gg has for you, shown on your desktop |
 | `GET goldcap.gg/downloads/updater.json` | checking for a new version, every four hours — unless you turn that off in Settings and check with the button instead |
 | `GET goldcap.gg/downloads/addon/addon.json`, `addon.json.sig` | which GoldCap addon release is the newest, at start and every four hours, whoever looks after your copy and even before a game folder is set up; every two minutes while an update waits for the game to close or after one failed, then less often while it keeps failing. None of the addon requests are made while "Install and update the GoldCap addon" is off in Settings |
 | `GET goldcap.gg/downloads/addon/GoldCap-addon-v<version>.zip` | the GoldCap addon itself, only when an AddOns folder has none, has an older copy the Companion installed, or has one you handed over |
