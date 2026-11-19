@@ -7,10 +7,14 @@
 //! prints (auction id, seenAt, cancelledAt), so a lot the addon saw again, or saw cancelled, goes
 //! up again. The site reads every character's newest seenAt in a batch as its roster time, so a
 //! lot left out of a later roster is marked gone there.
+//!
+//! Each lot carries its character's faction when the same file knows it (the newest of the
+//! character's gold readings and ledger rows that names one), so the site can match the lot to its
+//! market even before it holds a reading of that character. Never on retail's lot body.
 
 use crate::forever_ledger::PassportBody;
 use crate::forever_runs::PurchasePass;
-use crate::savedvars::{ClientPassport, OwnedLot};
+use crate::savedvars::{ClientPassport, LedgerData, OwnedLot};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -28,7 +32,30 @@ const MAX_UNIT_PRICE: i64 = 1_000_000_000_000_000;
 #[derive(Serialize)]
 struct UploadBody<'a> {
     client: PassportBody<'a>,
-    lots: Vec<OwnedLot>,
+    lots: Vec<WireLot>,
+}
+
+/// Retail's lot plus the character's faction, only when the file names one.
+#[derive(Serialize)]
+struct WireLot {
+    #[serde(flatten)]
+    lot: OwnedLot,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    faction: Option<String>,
+}
+
+/// Each character's faction in the file: the newest gold reading or ledger row that names one
+/// (`savedvars` keeps only "Alliance" and "Horde"), under the same "Name-Realm" the lots carry.
+fn character_factions(data: &LedgerData) -> BTreeMap<String, String> {
+    let mut newest: BTreeMap<String, (i64, String)> = BTreeMap::new();
+    let readings = data.gold.iter().filter_map(|g| Some((g.character.as_str(), g.at, g.faction.as_ref()?)));
+    let rows = data.entries.iter().filter_map(|e| Some((e.character.as_deref()?, e.at, e.faction.as_ref()?)));
+    for (character, at, faction) in readings.chain(rows) {
+        if newest.get(character).map_or(true, |(kept, _)| at > *kept) {
+            newest.insert(character.to_string(), (at, faction.clone()));
+        }
+    }
+    newest.into_iter().map(|(c, (_, f))| (c, f)).collect()
 }
 
 /// "Name-Realm" with a hyphen strictly inside, 3 to 96 characters as the site counts them.
@@ -93,10 +120,15 @@ pub async fn upload_lots(
     passport: &ClientPassport,
     region_id: i64,
     lots: &[&OwnedLot],
+    factions: &BTreeMap<String, String>,
 ) -> LotsOutcome {
     let body = UploadBody {
         client: PassportBody { interface: passport.interface, build: &passport.build, region_id },
-        lots: lots.iter().filter_map(|l| wire_lot(l)).collect(),
+        lots: lots
+            .iter()
+            .filter_map(|l| wire_lot(l))
+            .map(|lot| WireLot { faction: factions.get(&lot.character).cloned(), lot })
+            .collect(),
     };
     let sent = client
         .post(format!("{base}/v1/forever/owned-lots"))
@@ -156,9 +188,10 @@ pub async fn send_owned_lots(
     sent.retain(|p| present.contains(p));
 
     let pending = pending_lots(&data.owned_lots, sent);
+    let factions = character_factions(&data);
     let mut taken = 0usize;
     for batch in pending.chunks(MAX_BATCH) {
-        match upload_lots(client, base, token, passport, region_id, batch).await {
+        match upload_lots(client, base, token, passport, region_id, batch, &factions).await {
             LotsOutcome::Taken => {
                 sent.extend(batch.iter().map(|l| crate::upload::owned_lot_fingerprint(l)));
                 taken += batch.len();
@@ -375,6 +408,32 @@ mod tests {
         let sizes: Vec<usize> = seen.try_iter().map(|r| body_of(&r)["lots"].as_array().unwrap().len()).collect();
         assert_eq!(sizes, vec![500, 120]);
         assert_eq!(sent.len(), 620);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn each_lot_carries_its_characters_newest_faction_from_the_same_file() {
+        // Alice: a gold reading as Alliance, then a newer ledger row as Horde (the newest wins).
+        // Bob: a gold reading with no faction, and one the site does not know: none is sent.
+        let lua = FILE.replacen(
+            "ownedLots = {",
+            r#"gold = {
+              { char = "Alice-CAMWOW EU5 Realm 7 PvE", region = "eu", copper = 100, at = 1794600000, faction = "Alliance" },
+              { char = "Bob-CAMWOW EU5 Realm 7 PvE", region = "eu", copper = 100, at = 1794600000 },
+              { char = "Bob-CAMWOW EU5 Realm 7 PvE", region = "eu", copper = 200, at = 1794600100, faction = "Neutral" },
+            }, ledger = {
+              { key = "k1", kind = "sale", source = "mail", qty = 1, total = 100, at = 1794650000, char = "Alice-CAMWOW EU5 Realm 7 PvE", region = "eu", faction = "Horde" },
+            }, ownedLots = {"#,
+            1,
+        );
+        let (dir, file, logger) = setup("faction", &lua);
+        let mut sent = BTreeSet::new();
+        let (base, seen) = serve_once(answer("200 OK", "{}"));
+        send_owned_lots(&crate::sync::build_client(), &base, "tok", &file, &mut sent, &logger).await;
+        let body = body_of(&seen.recv().unwrap());
+        let factions: Vec<(i64, Option<&str>)> =
+            body["lots"].as_array().unwrap().iter().map(|l| (l["auctionID"].as_i64().unwrap(), l.get("faction").and_then(|f| f.as_str()))).collect();
+        assert_eq!(factions, vec![(101, Some("Horde")), (102, Some("Horde")), (103, None)]);
         std::fs::remove_dir_all(&dir).ok();
     }
 
