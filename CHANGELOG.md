@@ -4,7 +4,7 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
-## Unreleased
+## 1.23.0 (2026-11-22)
 
 - WoW: Forever: since game version 1.60.1.71037 the game no longer tells the addon your realm name. With GoldCap addon 0.31.2 or newer your scans are sent anyway: the addon notes which game server you scanned on, and goldcap.gg files the scan under the realm it knows for that server. The Status window shows that realm's name.
 - If goldcap.gg does not know your realm yet, the Status window says so: it learns it as soon as another player on your realm scans, or after you play a character the game named the realm for. A scan goldcap.gg turns down for any other reason is shown on the card too.
