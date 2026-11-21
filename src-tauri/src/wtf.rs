@@ -93,7 +93,7 @@ pub fn list_realm_names(wow_retail_path: &Path) -> Vec<String> {
         }
     }
 
-    found.sort_by(|a, b| b.1.cmp(&a.1));
+    found.sort_by_key(|f| std::cmp::Reverse(f.1));
     let mut names: Vec<String> = Vec::with_capacity(found.len());
     for (name, _) in found {
         if !names.contains(&name) {
