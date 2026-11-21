@@ -311,6 +311,23 @@ export const FIXTURES = {
     },
   },
 
+  // Paired and scanning, but the addon wrote the scan without a realm: the card says why it was
+  // not sent instead of waiting for a first scan.
+  "forever-only: scan not sent (no realm)": {
+    config: { ...configured, foreverRootPath: "C:\\Program Files (x86)\\World of Warcraft", retailEnabled: false, foreverEnabled: true },
+    status: {
+      configured: true, paired: true, retailEnabled: false, foreverEnabled: true, region: "eu", realmSlug: "",
+      syncing: false, nextTickAt: NOW + 1800, intervalMinutes: 30, version: "1.22.0",
+      prices: stage("notConnected", null, "Retail is off"),
+      addon: stage("notConnected", null, "Retail is off"),
+      ledger: stage("notConnected", null, "Retail is off"),
+      games: [{
+        folder: "_forever_", game: "forever",
+        skipped: "Your last scan has no realm name, so it was not sent. Update the GoldCap addon.",
+      }],
+    },
+  },
+
   // The player who scanned the auction house, logged out, and pressed Later at Connect: the scan
   // sits on disk and goes nowhere until the app is paired.
   "forever-only, not paired, scans on disk": {

@@ -4,6 +4,11 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
+## Unreleased
+
+- WoW: Forever: when your last scan cannot be sent, the Status window now says why and what to do, instead of waiting for a first scan forever. Since game version 1.60.1.71037 the game no longer tells the addon your realm name, so an older GoldCap addon writes scans without one; the Companion does not guess the realm (a region has several WoW: Forever realms), so update the GoldCap addon: 0.31.1 and newer fill the realm in for characters they have seen it on before.
+- The Companion's log names the reason once per scan, so a support request can point straight at it.
+
 ## 1.22.0 (2026-11-16)
 
 - WoW: Forever: sends what the profession trainers you talk to teach and what the merchants you open sell (ids, prices, the npc's name and zone), so recipe pages on goldcap.gg can say where a recipe is learned or bought.

@@ -12,6 +12,7 @@ import {
   foreverImpactLines,
   foreverPairLine,
   foreverNextStep,
+  foreverHeroPhrase,
   canSkipPairing,
   connectSubtitle,
   addonCard,
@@ -306,6 +307,20 @@ test("foreverNextStep: once paired and before the first send, the one thing to d
   assert.equal(foreverNextStep({}, false), null, "unpaired: the pair line says what to do");
   assert.match(foreverNextStep({}, true), /^Next: open the auction house in WoW: Forever .*\/reload\.$/);
   assert.equal(foreverNextStep({ lastSentAt: NOW }, true), null);
+  assert.equal(foreverNextStep({ skipped: "Your last scan has no realm name" }, true), null, "a skipped scan says what to do instead");
+});
+
+test("foreverHeroPhrase: a scan that was not sent outranks waiting and everything works", () => {
+  const skipped = { skipped: "Your last scan has no realm name, so it was not sent. Update the GoldCap addon." };
+  const paired = { paired: true, retailEnabled: false };
+  assert.equal(foreverHeroPhrase([{}], paired), "Waiting for your first scan");
+  assert.equal(foreverHeroPhrase([skipped], paired), "Your last WoW: Forever scan was not sent");
+  assert.equal(foreverHeroPhrase([{ ...skipped, lastSentAt: NOW }], paired), "Your last WoW: Forever scan was not sent");
+  assert.equal(foreverHeroPhrase([skipped], { paired: true, retailEnabled: true }), "Your last WoW: Forever scan was not sent");
+  assert.equal(foreverHeroPhrase([{ lastSentAt: NOW }], paired), "Everything works");
+  assert.equal(foreverHeroPhrase([skipped], { paired: false, retailEnabled: false }), "Pair to send your scans");
+  assert.equal(foreverHeroPhrase([{ ...skipped, unauthorized: true }], paired), "WoW: Forever needs attention");
+  assert.equal(foreverHeroPhrase([], { paired: true, retailEnabled: true }), "Everything works");
 });
 
 test("canSkipPairing: never with WoW: Forever on; Retail alone keeps Later", () => {

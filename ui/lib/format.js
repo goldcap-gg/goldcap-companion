@@ -64,9 +64,21 @@ export function foreverPairLine(g, paired) {
 
 // The Forever card's next step once paired and before the first scan has gone up: the one thing
 // to do in the game. Null when unpaired (foreverPairLine says what to do) and after the first send.
+// Null too when the last scan was not sent (`g.skipped` says why and what to do instead).
 export function foreverNextStep(g, paired) {
-  if (!paired || g.lastSentAt) return null;
+  if (!paired || g.lastSentAt || g.skipped) return null;
   return "Next: open the auction house in WoW: Forever (GoldCap scans it), then type /reload.";
+}
+
+// The Status hero once Retail's own stages have had their say. A Forever scan the Companion did
+// not send (`g.skipped`, the reason in the player's words, shown on the card) outranks "waiting"
+// and "everything works": another scan alone will not fix it.
+export function foreverHeroPhrase(games, { paired, retailEnabled }) {
+  if (games.some((g) => g.unauthorized)) return "WoW: Forever needs attention";
+  if (!retailEnabled && !paired && games.length > 0) return "Pair to send your scans";
+  if (games.some((g) => g.skipped)) return "Your last WoW: Forever scan was not sent";
+  if (retailEnabled || games.some((g) => g.lastSentAt)) return "Everything works";
+  return "Waiting for your first scan";
 }
 
 // The wizard's Connect step: WoW: Forever gets nothing without pairing, so with it on the step
