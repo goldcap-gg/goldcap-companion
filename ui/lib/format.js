@@ -121,7 +121,8 @@ export function foreverMarketLine(g) {
 export function foreverImpactLines(g) {
   const i = g.impact;
   if (!i) return null;
-  const market = foreverMarketLine(i);
+  // A scan the game named no realm in, before goldcap.gg's prices for it named one.
+  const market = i.realm ? foreverMarketLine(i) : "your realm";
   if (i.updated === 0) return { big: "", label: "", sub: `Your last scan updated no prices on ${market}.` };
   if (i.first) {
     return { big: "", label: "", sub: `You opened ${market}: its first ${groupDigits(i.updated)} prices are yours.` };

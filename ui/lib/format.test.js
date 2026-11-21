@@ -160,6 +160,10 @@ test("foreverImpactLines: a scan that updated nothing says so, even on an opened
   assert.deepEqual(foreverImpactLines({ impact: impact({ updated: 0, onlyYours: 0, first: true }) }), { big: "", label: "", sub });
 });
 
+test("foreverImpactLines: a scan whose realm nobody named yet says 'your realm'", () => {
+  assert.equal(foreverImpactLines({ impact: impact({ realm: "", faction: "Horde" }) }).label, "prices updated on your realm");
+});
+
 test("foreverImpactLines groups digits and names a market without a faction by its realm alone", () => {
   const lines = foreverImpactLines({ impact: impact({ updated: 12345, onlyYours: 1200, faction: null }) });
   assert.equal(lines.big, "12\u2009345");
