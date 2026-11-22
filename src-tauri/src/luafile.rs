@@ -200,7 +200,7 @@ fn render_impacts(impacts: &[crate::forever::ScanImpact], written_at: i64) -> Op
         .iter()
         .filter(|i| written_at - i.sent_at <= crate::forever::CROWD_MAX_AGE_SECS)
         .collect();
-    fresh.sort_by(|a, b| b.sent_at.cmp(&a.sent_at));
+    fresh.sort_by_key(|i| std::cmp::Reverse(i.sent_at));
     fresh.truncate(MAX_IMPACTS);
     if fresh.is_empty() {
         return None;

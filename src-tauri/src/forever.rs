@@ -78,7 +78,14 @@ pub struct ForeverFold {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub partial: Option<bool>,
     pub region: i64,
+    /// Empty when the game named no realm (Forever 1.60.1.71037): then omitted, and `server`
+    /// says where the scan was made.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub realm: String,
+    /// The server number from the player GUID (`Player-6949-…` → `"6949"`): goldcap.gg learns
+    /// (region, server) → realm from folds that carry both, and files a realm-less one by it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub faction: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -134,57 +141,126 @@ fn has_control_char(s: &str) -> bool {
     s.chars().any(|c| (c as u32) <= 0x1f || c as u32 == 0x7f)
 }
 
-/// The Forever upload one SavedVariables file holds, or None: no Forever passport, no fold,
-/// or a fold the site would refuse whole (no items, an unknown source, no realm, a corrupt or
-/// out-of-range `at`). A courier: the items go as the addon wrote them, and the site checks
-/// their grammar; a `ruleset` with a control character is dropped alone rather than take the
-/// whole fold down with it, exactly as `faction` already is.
-pub fn parse_forever_upload(source: &str) -> Result<Option<ForeverUpload>, String> {
+/// Why a fold the addon wrote is not sent: the site would refuse it whole.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FoldSkip {
+    /// The passport has no valid build or region id.
+    Client,
+    /// A field the site needs is missing or not the right type.
+    Missing(&'static str),
+    NoRealm,
+    RealmTooLong,
+    NoItems,
+    TooManyItems(usize),
+    UnknownSource(String),
+    /// `at` is not positive, or more than ten years from now.
+    BadTime,
+}
+
+impl FoldSkip {
+    /// The log's words: exact, for whoever reads the log.
+    pub fn reason(&self) -> String {
+        match self {
+            FoldSkip::Client => "the client passport has no valid build or region".into(),
+            FoldSkip::Missing(field) => format!("missing or corrupt field `{field}`"),
+            FoldSkip::NoRealm => "no realm".into(),
+            FoldSkip::RealmTooLong => "realm over 64 characters".into(),
+            FoldSkip::NoItems => "no items".into(),
+            FoldSkip::TooManyItems(n) => format!("{n} items, over the {MAX_ITEMS} cap"),
+            FoldSkip::UnknownSource(s) => format!("unknown source {s:?}"),
+            FoldSkip::BadTime => "scan time out of range".into(),
+        }
+    }
+
+    /// The Status card's words: what happened and what the player can do.
+    pub fn player_text(&self) -> &'static str {
+        match self {
+            FoldSkip::NoRealm => "Your last scan has no realm name, so it was not sent. Update the GoldCap addon.",
+            FoldSkip::NoItems => "Your last scan has no prices in it, so it was not sent. Open the auction house in WoW: Forever, let GoldCap scan it, then type /reload.",
+            FoldSkip::BadTime => "Your last scan has a wrong date, so it was not sent. Check your computer's clock, then scan again.",
+            FoldSkip::UnknownSource(_) => "Your last scan comes from a GoldCap addon this app does not know, so it was not sent. Update the GoldCap addon and this app.",
+            FoldSkip::Client | FoldSkip::Missing(_) | FoldSkip::RealmTooLong | FoldSkip::TooManyItems(_) => {
+                "Your last scan is damaged, so it was not sent. Update the GoldCap addon, then scan again."
+            }
+        }
+    }
+}
+
+/// What one SavedVariables file holds for the Forever upload.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ParsedFold {
+    /// No Forever passport or no fold: nothing to send and nothing to say.
+    Absent,
+    /// A fold is there but the site would refuse it whole. `at` is the fold's own, 0 when it
+    /// has none — the key a skip is logged once by.
+    Skipped { at: i64, why: FoldSkip },
+    Upload(Box<ForeverUpload>),
+}
+
+/// The Forever upload one SavedVariables file holds, as a `ParsedFold`. A non-Forever interface
+/// is another game's file, never a skip. A courier: the items go as the addon wrote them, and
+/// the site checks their grammar; a `ruleset` with a control character is dropped alone rather
+/// than take the whole fold down with it, exactly as `faction` already is.
+///
+/// A fold with no realm goes up only with its `server`, which goldcap.gg files under the realm it
+/// learned for it; with neither it is skipped, never filed under a guessed realm: a region has
+/// several Forever realms, and the Companion keeps none the player picked.
+pub fn parse_forever_fold(source: &str) -> Result<ParsedFold, String> {
+    use crate::savedvars::{flag, opt_int, opt_string};
     let lua = Lua::new_with(StdLib::NONE, LuaOptions::default()).map_err(|e| e.to_string())?;
     lua.load(source).exec().map_err(|e| e.to_string())?;
-    let Ok(Value::Table(db)) = lua.globals().get::<Value>("GoldCapDB") else { return Ok(None) };
-    let Ok(Value::Table(c)) = db.get::<Value>("client") else { return Ok(None) };
-    let (Some(interface), Some(build), Some(region_id)) = (
-        crate::savedvars::opt_int(&c, "interface"),
-        crate::savedvars::opt_string(&c, "build").map(|b| b.trim().to_string()),
-        crate::savedvars::opt_int(&c, "regionId"),
-    ) else {
-        return Ok(None);
+    let Ok(Value::Table(db)) = lua.globals().get::<Value>("GoldCapDB") else { return Ok(ParsedFold::Absent) };
+    let Ok(Value::Table(c)) = db.get::<Value>("client") else { return Ok(ParsedFold::Absent) };
+    let Some(interface) = opt_int(&c, "interface").filter(|i| is_forever_interface(*i)) else {
+        return Ok(ParsedFold::Absent);
     };
-    if !is_forever_interface(interface) || !crate::savedvars::is_valid_passport_build(&build) || !(1..=999).contains(&region_id) {
-        return Ok(None);
-    }
-    let Ok(Value::Table(scan)) = db.get::<Value>("foreverScan") else { return Ok(None) };
-    let Ok(Value::Table(f)) = scan.get::<Value>("fold") else { return Ok(None) };
+    let Ok(Value::Table(scan)) = db.get::<Value>("foreverScan") else { return Ok(ParsedFold::Absent) };
+    let Ok(Value::Table(f)) = scan.get::<Value>("fold") else { return Ok(ParsedFold::Absent) };
 
-    use crate::savedvars::{flag, opt_int, opt_string};
-    let (Some(v), Some(at), Some(source), Some(item_count), Some(region), Some(realm), Some(fold_build), Some(fold_interface)) = (
+    let at = opt_int(&f, "at");
+    let skip = |why| Ok(ParsedFold::Skipped { at: at.unwrap_or(0), why });
+    let build = opt_string(&c, "build").map(|b| b.trim().to_string()).filter(|b| crate::savedvars::is_valid_passport_build(b));
+    let (Some(build), Some(region_id)) = (build, opt_int(&c, "regionId").filter(|r| (1..=999).contains(r))) else {
+        return skip(FoldSkip::Client);
+    };
+    let (Some(v), Some(at), Some(source), Some(item_count), Some(region), Some(fold_build), Some(fold_interface)) = (
         opt_int(&f, "v"),
-        opt_int(&f, "at"),
+        at,
         opt_string(&f, "source"),
         opt_int(&f, "itemCount"),
         opt_int(&f, "region"),
-        opt_string(&f, "realm").map(|r| r.trim().to_string()),
         opt_string(&f, "build"),
         opt_int(&f, "interface"),
     ) else {
-        return Ok(None);
+        let missing_int = ["v", "at", "itemCount", "region", "interface"].into_iter().find(|k| opt_int(&f, k).is_none());
+        let field = missing_int.unwrap_or(if opt_string(&f, "source").is_none() { "source" } else { "build" });
+        return skip(FoldSkip::Missing(field));
     };
+    let realm = opt_string(&f, "realm").map(|r| r.trim().to_string()).unwrap_or_default();
+    let server = opt_string(&f, "server").filter(|s| (1..=10).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit()));
     let items = read_items(&f);
     // `at` mirrors the server's own bounds: positive, and no more than ten years from now — a
     // NaN or an out-of-range Lua number saturates through `opt_int`'s `as i64` cast to a value
     // far outside this window anyway, so no separate finiteness check is needed.
-    if items.is_empty()
-        || items.len() > MAX_ITEMS
-        || !SOURCES.contains(&source.as_str())
-        || realm.is_empty()
-        || realm.chars().count() > 64
-        || at <= 0
-        || (at - crate::luafile::now_unix()).abs() > FOLD_MAX_CLOCK_SKEW_SECS
-    {
-        return Ok(None);
+    let why = if realm.is_empty() && server.is_none() {
+        Some(FoldSkip::NoRealm)
+    } else if realm.chars().count() > 64 {
+        Some(FoldSkip::RealmTooLong)
+    } else if items.is_empty() {
+        Some(FoldSkip::NoItems)
+    } else if items.len() > MAX_ITEMS {
+        Some(FoldSkip::TooManyItems(items.len()))
+    } else if !SOURCES.contains(&source.as_str()) {
+        Some(FoldSkip::UnknownSource(source.clone()))
+    } else if at <= 0 || (at - crate::luafile::now_unix()).abs() > FOLD_MAX_CLOCK_SKEW_SECS {
+        Some(FoldSkip::BadTime)
+    } else {
+        None
+    };
+    if let Some(why) = why {
+        return skip(why);
     }
-    Ok(Some(ForeverUpload {
+    Ok(ParsedFold::Upload(Box::new(ForeverUpload {
         client: ForeverClient { interface, build, region_id },
         fold: ForeverFold {
             v,
@@ -195,6 +271,7 @@ pub fn parse_forever_upload(source: &str) -> Result<Option<ForeverUpload>, Strin
             partial: flag(&f, "partial").then_some(true),
             region,
             realm,
+            server,
             faction: opt_string(&f, "faction").filter(|x| FACTIONS.contains(&x.as_str())),
             ruleset: opt_string(&f, "ruleset")
                 .map(|r| r.trim().to_string())
@@ -203,7 +280,16 @@ pub fn parse_forever_upload(source: &str) -> Result<Option<ForeverUpload>, Strin
             interface: fold_interface,
             items,
         },
-    }))
+    })))
+}
+
+/// `parse_forever_fold`, as just the upload: the specs' shorthand.
+#[cfg(test)]
+pub fn parse_forever_upload(source: &str) -> Result<Option<ForeverUpload>, String> {
+    Ok(match parse_forever_fold(source)? {
+        ParsedFold::Upload(up) => Some(*up),
+        _ => None,
+    })
 }
 
 pub const API_BASE: &str = "https://api.goldcap.gg";
@@ -220,7 +306,16 @@ pub enum UploadOutcome {
     /// `impact`: what the accepted scan changed on its market — `(updated, only_yours,
     /// first_on_market)` — only from an `accepted` or `duplicate` answer that carried it whole.
     /// Anything malformed, or an old site that sends none, is `None`, never a wrong number.
-    Done { market: Option<String>, note: Option<String>, impact: Option<(u32, u32, bool)> },
+    /// `realm`: the realm an `accepted` or `duplicate` answer filed the fold under, when it names
+    /// one — what the card shows for a fold the game named no realm in.
+    /// `refused`: a `rejected` answer's reason, for the log.
+    Done {
+        market: Option<String>,
+        realm: Option<String>,
+        note: Option<String>,
+        impact: Option<(u32, u32, bool)>,
+        refused: Option<String>,
+    },
     /// The token itself was refused (401): nothing decided about this fold, so it is retried
     /// next tick like any other unresolved answer — but distinct from `Retry` so the caller can
     /// stop telling the addon this install uploads until a later attempt actually succeeds
@@ -230,14 +325,24 @@ pub enum UploadOutcome {
     Retry(String),
 }
 
+pub const UNKNOWN_REALM_TEXT: &str = "goldcap.gg does not know your realm yet. It will as soon as another player on it scans, or after you play a character the game named the realm for.";
+
 fn note_for(status: &str, reason: Option<&str>) -> Option<String> {
     match (status, reason) {
         ("quarantined", Some("unlinked")) => Some("Link Battle.net on goldcap.gg for your scans to count in public prices".into()),
         ("quarantined", Some(_)) => Some("Your scans are not counted in public prices right now".into()),
         ("rejected", Some("stale")) => Some("The last scan was over a day old when it was sent".into()),
+        ("rejected", Some("unknown_realm")) => Some(UNKNOWN_REALM_TEXT.into()),
         ("rejected", Some(r)) => Some(format!("goldcap.gg refused the last scan ({r})")),
+        ("rejected", None) => Some("goldcap.gg refused the last scan".into()),
         _ => None,
     }
+}
+
+/// A realm name the site's answer carries, held to the fold's own rules.
+fn answer_realm(body: &serde_json::Value) -> Option<String> {
+    let r = body["realm"].as_str()?.trim();
+    (!r.is_empty() && r.chars().count() <= 64 && !has_control_char(r)).then(|| r.to_string())
 }
 
 /// The site's `impact` object, read strictly: `updated` and `onlyYours` whole non-negative
@@ -272,20 +377,32 @@ pub async fn upload_fold(client: &reqwest::Client, base: &str, token: &str, up: 
         .filter(|s| matches!(*s, "accepted" | "duplicate"))
         .and_then(|_| body["market"].as_str())
         .map(str::to_string);
-    let impact = status
-        .filter(|s| matches!(*s, "accepted" | "duplicate"))
-        .and_then(|_| read_impact(&body));
+    let filed = status.is_some_and(|s| matches!(s, "accepted" | "duplicate"));
+    let impact = filed.then(|| read_impact(&body)).flatten();
+    let realm = filed.then(|| answer_realm(&body)).flatten();
+    let reason = body["reason"].as_str();
     match code {
         // A captive portal or a proxy's own error page can answer 200 with a body that carries
         // no `status` at all — that is not the site having its say, so the fold is retried
         // rather than silently marked sent and lost (fix round 1 M4).
         200 if status.is_none() => UploadOutcome::Retry("200 without a status".into()),
-        200 | 422 => UploadOutcome::Done { market, note: note_for(status.unwrap_or(""), body["reason"].as_str()), impact },
-        400 | 409 | 413 => UploadOutcome::Done {
-            market: None,
-            note: Some(format!("goldcap.gg refused the last scan ({})", body["error"].as_str().unwrap_or("unknown"))),
-            impact: None,
+        200 | 422 => UploadOutcome::Done {
+            market,
+            realm,
+            note: note_for(status.unwrap_or(""), reason),
+            impact,
+            refused: (status == Some("rejected")).then(|| reason.unwrap_or("no reason").to_string()),
         },
+        400 | 409 | 413 => {
+            let error = body["error"].as_str().unwrap_or("unknown");
+            UploadOutcome::Done {
+                market: None,
+                realm: None,
+                note: Some(format!("goldcap.gg refused the last scan ({error})")),
+                impact: None,
+                refused: Some(format!("{code} {error}")),
+            }
+        }
         401 => UploadOutcome::Unauthorized,
         _ => UploadOutcome::Retry(format!("status {code}")),
     }
@@ -323,6 +440,9 @@ pub struct InstallState {
     /// (None when the answer carried no numbers), so the card never shows an older scan's
     /// numbers under a newer "Scan uploaded" line — the rule `sent_items` follows.
     pub impact: Option<ScanImpact>,
+    /// The newest scan in this install was not sent, in the player's words: why, and what to
+    /// do. Worked out again every tick, so it clears once a good scan comes.
+    pub skipped: Option<String>,
 }
 
 /// What one accepted scan changed on its market, as goldcap.gg counted it at receipt. `at` is
@@ -377,6 +497,10 @@ pub struct ForeverState {
     pub sources_stamps: BTreeMap<String, (i64, u64)>,
     /// SavedVariables path → the fold `at` the site has had its say about.
     pub sent: BTreeMap<String, i64>,
+    /// SavedVariables path → the `at` of the skipped fold already logged, so the log says why
+    /// once per fold, not every tick.
+    #[serde(default)]
+    pub skips: BTreeMap<String, i64>,
     /// Install dir → what the Forever leg knows about it.
     pub installs: BTreeMap<String, InstallState>,
     /// Every game folder the last tick found, for the Status screen.
@@ -446,6 +570,12 @@ pub fn summarize_gcf1(body: &str, slug: &str) -> Result<CrowdSummary, String> {
         return Err("Forever prices carried no items".into());
     }
     Ok(CrowdSummary { items, ts })
+}
+
+/// The realm name a `GCF1` header names, when it is a usable one.
+fn gcf1_realm(body: &str) -> Option<String> {
+    let r = body.split(';').nth(3)?.trim();
+    (!r.is_empty() && r.chars().count() <= 64 && !has_control_char(r)).then(|| r.to_string())
 }
 
 /// Kept Forever payloads, by install dir, for the life of the process.
@@ -520,7 +650,7 @@ pub async fn sync_forever_at(
     }
 }
 
-type ParsedCache = std::collections::HashMap<String, (i64, u64, Option<ForeverUpload>)>;
+type ParsedCache = std::collections::HashMap<String, (i64, u64, ParsedFold)>;
 
 /// (SavedVariables path → (mtime, byte length, the parse result)), for the life of the
 /// process. Shared by every install: paths are absolute, so two installs never collide.
@@ -540,12 +670,12 @@ fn file_stamp(path: &Path) -> Option<(i64, u64)> {
     Some((mtime, meta.len()))
 }
 
-/// `parse_forever_upload`, cached by the file's (mtime, length): a tick where nothing on disk
+/// `parse_forever_fold`, cached by the file's (mtime, length): a tick where nothing on disk
 /// changed since the fold was last looked at parses nothing at all — no read, no Lua interpreter
 /// (fix round 1 M2). A file that cannot be stat'd or read right now is never cached, so the next
 /// tick retries it; a file that parses to "no valid fold" (an unknown shape) IS cached as such,
 /// so a genuinely bad file is not re-parsed every tick either.
-fn parse_forever_upload_cached(file: &Path, logger: &crate::logging::Logger) -> Option<ForeverUpload> {
+fn parse_forever_fold_cached(file: &Path, logger: &crate::logging::Logger) -> Option<ParsedFold> {
     let stamp = file_stamp(file)?;
     let file_key = file.to_string_lossy().into_owned();
     let cached = parsed_cache()
@@ -553,12 +683,12 @@ fn parse_forever_upload_cached(file: &Path, logger: &crate::logging::Logger) -> 
         .unwrap_or_else(|p| p.into_inner())
         .get(&file_key)
         .filter(|(m, l, _)| (*m, *l) == stamp)
-        .map(|(_, _, up)| up.clone());
-    if let Some(up) = cached {
-        return up;
+        .map(|(_, _, parsed)| parsed.clone());
+    if cached.is_some() {
+        return cached;
     }
     let src = std::fs::read_to_string(file).ok()?;
-    let parsed = match parse_forever_upload(&src) {
+    let parsed = match parse_forever_fold(&src) {
         Ok(v) => v,
         Err(e) => {
             logger.error(&format!("{}: not readable yet ({e})", file.display()));
@@ -569,7 +699,7 @@ fn parse_forever_upload_cached(file: &Path, logger: &crate::logging::Logger) -> 
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .insert(file_key, (stamp.0, stamp.1, parsed.clone()));
-    parsed
+    Some(parsed)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -604,12 +734,39 @@ pub async fn sync_forever_at_root(
         // order is arbitrary) — otherwise a second, older account can regress the TOC and make
         // the Forever client treat GoldCap_AppData as out of date (fix round 1 M3).
         let mut interface = game.interface.unwrap_or(FOREVER_MIN_INTERFACE + 1);
+        // The newest good fold and the newest skipped one across this install's files: the card
+        // names a skip only when it is the newest scan, so one old account's bad fold does not
+        // hide another's good ones.
+        let mut newest_ok: Option<i64> = None;
+        let mut newest_skip: Option<(i64, &'static str)> = None;
         for file in &game.saved_vars {
-            let Some(up) = parse_forever_upload_cached(file, logger) else { continue };
+            let file_key = file.to_string_lossy().into_owned();
+            let up = match parse_forever_fold_cached(file, logger) {
+                Some(ParsedFold::Upload(up)) => {
+                    state.skips.remove(&file_key);
+                    up
+                }
+                Some(ParsedFold::Skipped { at, why }) => {
+                    // Once per fold: the file is rewritten on every /reload, the fold is not.
+                    if state.skips.get(&file_key) != Some(&at) {
+                        logger.error(&format!("forever scan from {}: not sent ({}, at {at})", game.folder, why.reason()));
+                        state.skips.insert(file_key, at);
+                    }
+                    if newest_skip.map_or(true, |(a, _)| at >= a) {
+                        newest_skip = Some((at, why.player_text()));
+                    }
+                    continue;
+                }
+                Some(ParsedFold::Absent) => {
+                    state.skips.remove(&file_key);
+                    continue;
+                }
+                None => continue,
+            };
             interface = interface.max(up.client.interface);
+            newest_ok = newest_ok.max(Some(up.fold.at));
             let entry = state.installs.entry(key.clone()).or_default();
             entry.last_scan_at = entry.last_scan_at.max(Some(up.fold.at));
-            let file_key = file.to_string_lossy().into_owned();
             if token.is_empty() || state.sent.get(&file_key) == Some(&up.fold.at) {
                 continue;
             }
@@ -630,8 +787,22 @@ pub async fn sync_forever_at_root(
                 continue;
             }
             match upload_fold(client, base, &token, &up).await {
-                UploadOutcome::Done { market, note, impact } => {
-                    logger.info(&format!("forever scan from {}: sent ({} items)", game.folder, up.fold.items.len()));
+                UploadOutcome::Done { market, realm, note, impact, refused } => {
+                    match &refused {
+                        Some(why) => logger.error(&format!(
+                            "forever scan from {}: refused by goldcap.gg ({why}): {}",
+                            game.folder,
+                            note.as_deref().unwrap_or("")
+                        )),
+                        None => logger.info(&format!("forever scan from {}: sent ({} items)", game.folder, up.fold.items.len())),
+                    }
+                    let entry = state.installs.entry(key.clone()).or_default();
+                    // The fold's own realm, else the one the answer filed it under, else the one
+                    // already shown for this same market.
+                    let realm = Some(up.fold.realm.clone())
+                        .filter(|r| !r.is_empty())
+                        .or(realm)
+                        .or_else(|| entry.realm.clone().filter(|_| market.is_some() && entry.market == market));
                     state.sent.insert(file_key.clone(), up.fold.at);
                     let scan_impact = impact.map(|(updated, only_yours, first)| ScanImpact {
                         at: up.fold.at,
@@ -639,7 +810,7 @@ pub async fn sync_forever_at_root(
                         updated,
                         only_yours,
                         first,
-                        realm: up.fold.realm.clone(),
+                        realm: realm.clone().unwrap_or_default(),
                         faction: up.fold.faction.clone(),
                     });
                     match &scan_impact {
@@ -654,7 +825,7 @@ pub async fn sync_forever_at_root(
                     entry.sent_items = Some(up.fold.items.len() as u32);
                     if market.is_some() {
                         entry.market = market;
-                        entry.realm = Some(up.fold.realm.clone());
+                        entry.realm = realm;
                         entry.faction = up.fold.faction.clone();
                     }
                 }
@@ -744,11 +915,28 @@ pub async fn sync_forever_at_root(
                 }
             }
         }
+        let skipped = newest_skip.filter(|(at, _)| newest_ok.map_or(true, |ok| *at > ok)).map(|(_, text)| text.to_string());
+        if skipped.is_some() || state.installs.contains_key(&key) {
+            state.installs.entry(key.clone()).or_default().skipped = skipped;
+        }
         let market = state.installs.get(&key).and_then(|e| e.market.clone());
         let crowd = match &market {
             Some(slug) => refresh_crowd_at(client, base, store, &key, slug, logger, now).await,
             None => None,
         };
+        // A scan the game named no realm in, filed by its server: the market's own prices name
+        // the realm, for the card and the addon's scan result.
+        if let Some(name) = crowd.as_ref().and_then(|(body, _)| gcf1_realm(body)) {
+            if state.installs.get(&key).is_some_and(|e| e.realm.is_none()) {
+                let files: Vec<String> = game.saved_vars.iter().map(|f| f.to_string_lossy().into_owned()).collect();
+                let entry = state.installs.entry(key.clone()).or_default();
+                entry.realm = Some(name.clone());
+                let unnamed = state.impacts.iter_mut().filter(|(f, _)| files.contains(f)).map(|(_, i)| i).chain(entry.impact.as_mut());
+                for i in unnamed.filter(|i| i.realm.is_empty()) {
+                    i.realm = name.clone();
+                }
+            }
+        }
         let entry = state.installs.entry(key.clone()).or_default();
         entry.crowd_items = crowd.as_ref().map(|(_, s)| s.items);
         entry.crowd_ts = crowd.as_ref().map(|(_, s)| s.ts);
@@ -995,7 +1183,7 @@ pub(crate) mod tests {
         let up = parse_forever_upload(REAL).unwrap().unwrap();
         let (base, seen) = serve_once(answer("200 OK", r#"{"status":"accepted","market":"us-beta-classic-beta-pve-2-horde","items":1974,"dropped":0}"#));
         let out = upload_fold(&crate::sync::build_client(), &base, "tok", &up).await;
-        assert_eq!(out, UploadOutcome::Done { market: Some("us-beta-classic-beta-pve-2-horde".into()), note: None, impact: None });
+        assert_eq!(out, UploadOutcome::Done { market: Some("us-beta-classic-beta-pve-2-horde".into()), realm: None, note: None, impact: None, refused: None });
         let request = seen.recv().unwrap();
         let lower = request.to_ascii_lowercase();
         assert!(lower.starts_with("post /v1/forever/scans "), "{}", &request[..60]);
@@ -1160,6 +1348,232 @@ pub(crate) mod tests {
             state.installs.values().next().unwrap().note.as_deref(),
             Some("The last scan was too large to send")
         );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    fn fold_file(client: &str, fold: &str) -> String {
+        format!(r#"GoldCapDB = {{ client = {{ {client} }}, foreverScan = {{ fold = {{ {fold} }} }} }}"#)
+    }
+    const CLIENT: &str = r#"interface = 16001, build = "1.60.1.71037", regionId = 3"#;
+    const ITEM: &str = r#"items = { [1] = "1,1,1,;0x1" }"#;
+
+    fn good_fold(at: i64) -> String {
+        format!(r#"v = 2, at = {at}, source = "replicate", itemCount = 1, region = 3, realm = "R", build = "1.60.1.71037", interface = 16001, {ITEM}"#)
+    }
+
+    #[test]
+    fn every_reason_a_fold_is_skipped_is_named() {
+        let at = crate::luafile::now_unix();
+        let good = good_fold(at);
+        let skip = |client: &str, fold: &str| match parse_forever_fold(&fold_file(client, fold)).unwrap() {
+            ParsedFold::Skipped { at, why } => (at, why),
+            other => panic!("expected a skip, got {other:?}"),
+        };
+        let cases: Vec<(String, FoldSkip)> = vec![
+            (good.replace(r#"realm = "R""#, r#"realm = """#), FoldSkip::NoRealm),
+            (good.replace(r#"realm = "R", "#, ""), FoldSkip::NoRealm),
+            (good.replace(r#"realm = "R""#, r#"realm = "  ""#), FoldSkip::NoRealm),
+            (good.replace(r#"realm = "R""#, &format!(r#"realm = "{}""#, "r".repeat(65))), FoldSkip::RealmTooLong),
+            (good.replace(ITEM, "items = {}"), FoldSkip::NoItems),
+            (good.replace(ITEM, r#"items = { [1] = 5 }"#), FoldSkip::NoItems),
+            (good.replace(r#""replicate""#, r#""dump""#), FoldSkip::UnknownSource("dump".into())),
+            (good.replace(r#"build = "1.60.1.71037", "#, ""), FoldSkip::Missing("build")),
+            (good.replace("v = 2, ", ""), FoldSkip::Missing("v")),
+            (good.replace("itemCount = 1", r#"itemCount = "x""#), FoldSkip::Missing("itemCount")),
+        ];
+        for (fold, want) in cases {
+            assert_eq!(skip(CLIENT, &fold), (at, want), "{fold}");
+        }
+        let many: String = (1..=MAX_ITEMS + 1).map(|i| format!("[{i}] = \"1\",")).collect();
+        assert_eq!(skip(CLIENT, &good.replace(ITEM, &format!("items = {{ {many} }}"))).1, FoldSkip::TooManyItems(MAX_ITEMS + 1));
+        assert_eq!(skip(CLIENT, &good_fold(0)), (0, FoldSkip::BadTime));
+        assert_eq!(skip(CLIENT, &good.replace(&format!("at = {at}, "), "")), (0, FoldSkip::Missing("at")), "no at: logged under 0");
+        assert_eq!(skip(r#"interface = 16001, build = "x", regionId = 3"#, &good).1, FoldSkip::Client);
+        assert_eq!(skip(r#"interface = 16001, build = "1.60.1.71037""#, &good).1, FoldSkip::Client);
+        assert!(matches!(parse_forever_fold(&fold_file(CLIENT, &good)).unwrap(), ParsedFold::Upload(_)));
+    }
+
+    #[test]
+    fn the_server_is_read_only_as_up_to_ten_digits() {
+        let good = good_fold(crate::luafile::now_unix());
+        let server = |value: &str| {
+            let fold = good.replace(ITEM, &format!("server = {value}, {ITEM}"));
+            parse_forever_upload(&fold_file(CLIENT, &fold)).unwrap().expect("sent").fold.server
+        };
+        assert_eq!(server(r#""6949""#).as_deref(), Some("6949"));
+        assert_eq!(server(r#""1234567890""#).as_deref(), Some("1234567890"));
+        for bad in [r#""""#, r#""12345678901""#, r#"" 6949""#, r#""69a9""#, r#""-1""#, r#""६९""#, "6949", "true"] {
+            assert_eq!(server(bad), None, "{bad}");
+        }
+        let missing = parse_forever_upload(&fold_file(CLIENT, &good)).unwrap().unwrap();
+        assert_eq!(missing.fold.server, None);
+        assert!(serde_json::to_value(&missing).unwrap()["fold"].get("server").is_none());
+    }
+
+    // Forever 1.60.1.71037 names no realm; GoldCap 0.31.2 writes the GUID's server instead, and
+    // goldcap.gg files the fold by it. Without a valid server it stays a 'no realm' skip.
+    #[test]
+    fn a_realmless_fold_with_a_server_is_sent_without_a_realm() {
+        let realmless = good_fold(crate::luafile::now_unix()).replace(r#"realm = "R", "#, "");
+        let fold = realmless.replace(ITEM, &format!(r#"server = "6949", {ITEM}"#));
+        let up = parse_forever_upload(&fold_file(CLIENT, &fold)).unwrap().expect("sent by its server");
+        let json = serde_json::to_value(&up).unwrap();
+        let mut keys: Vec<&str> = json["fold"].as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(keys, vec!["at", "build", "interface", "itemCount", "items", "region", "server", "source", "v"]);
+        assert_eq!(json["fold"]["server"], "6949");
+        let with_realm = fold.replace("region = 3, ", r#"region = 3, realm = "R", "#);
+        let json = serde_json::to_value(parse_forever_upload(&fold_file(CLIENT, &with_realm)).unwrap().unwrap()).unwrap();
+        assert_eq!((json["fold"]["realm"].as_str(), json["fold"]["server"].as_str()), (Some("R"), Some("6949")));
+        for no_server in [realmless.clone(), realmless.replace(ITEM, &format!(r#"server = "x", {ITEM}"#))] {
+            let parsed = parse_forever_fold(&fold_file(CLIENT, &no_server)).unwrap();
+            assert!(matches!(parsed, ParsedFold::Skipped { why: FoldSkip::NoRealm, .. }), "{parsed:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn every_rejection_is_put_in_the_players_words() {
+        let up = parse_forever_upload(REAL).unwrap().unwrap();
+        let cases = [
+            (r#"{"status":"rejected","reason":"unknown_realm","market":null}"#, UNKNOWN_REALM_TEXT.to_string(), "unknown_realm"),
+            (r#"{"status":"rejected","reason":"stale","market":"m"}"#, "The last scan was over a day old when it was sent".into(), "stale"),
+            (r#"{"status":"rejected","reason":"brand_new","market":"m"}"#, "goldcap.gg refused the last scan (brand_new)".into(), "brand_new"),
+            (r#"{"status":"rejected","market":"m"}"#, "goldcap.gg refused the last scan".into(), "no reason"),
+        ];
+        for (body, words, reason) in cases {
+            let (base, _seen) = serve_once(answer("422 Unprocessable Entity", body));
+            let out = upload_fold(&crate::sync::build_client(), &base, "tok", &up).await;
+            let UploadOutcome::Done { market, realm, note, refused, .. } = out else { panic!("{out:?}") };
+            assert_eq!((market, realm, note.as_deref(), refused.as_deref()), (None, None, Some(words.as_str()), Some(reason)), "{body}");
+        }
+    }
+
+    #[test]
+    fn no_fold_or_another_games_file_is_absent_not_skipped() {
+        let no_fold = r#"GoldCapDB = { client = { interface = 16001, build = "1.60.1.71037", regionId = 3 } }"#;
+        assert_eq!(parse_forever_fold(no_fold).unwrap(), ParsedFold::Absent);
+        let retail = fold_file(r#"interface = 120100, build = "12.1.0.69933", regionId = 3"#, r#"v = 2, at = 1, realm = """#);
+        assert_eq!(parse_forever_fold(&retail).unwrap(), ParsedFold::Absent);
+    }
+
+    #[test]
+    fn the_skip_words_for_the_player_and_for_the_log() {
+        assert_eq!(FoldSkip::NoRealm.player_text(), "Your last scan has no realm name, so it was not sent. Update the GoldCap addon.");
+        assert_eq!(FoldSkip::NoRealm.reason(), "no realm");
+        assert_eq!(FoldSkip::UnknownSource("dump".into()).reason(), r#"unknown source "dump""#);
+        assert_eq!(FoldSkip::Missing("at").reason(), "missing or corrupt field `at`");
+        for why in [FoldSkip::Client, FoldSkip::Missing("v"), FoldSkip::RealmTooLong, FoldSkip::NoItems, FoldSkip::TooManyItems(1), FoldSkip::BadTime] {
+            assert!(why.player_text().contains("so it was not sent"), "{why:?}");
+        }
+    }
+
+    // The player report: Forever 1.60.1.71037 writes folds with no realm. The Companion says why
+    // in the log once per fold and on the Status card, and never files the fold under a realm it
+    // already knows — not Retail's hand-picked one, not the last accepted fold's.
+    #[tokio::test]
+    async fn a_realmless_fold_is_logged_once_shown_on_the_card_and_never_sent() {
+        let root = machine("realmless");
+        let file = put(&root, "_classic_beta_", REAL);
+        let config = crate::config::Config {
+            companion_token: "tok".into(),
+            realm_slug: "dentarg".into(),
+            realm_auto: false,
+            ..crate::config::Config::default()
+        };
+        let logger = crate::logging::Logger::new(&root.join("logs")).unwrap();
+        let store = std::sync::Mutex::new(std::collections::HashMap::new());
+        let state_path = root.join("s.json");
+        let log = || std::fs::read_to_string(root.join("logs").join(crate::logging::LOG_FILE_NAME)).unwrap_or_default();
+        let tick = |base: String, now: i64| {
+            let (config, logger, store, state_path, root) = (&config, &logger, &store, &state_path, &root);
+            async move { sync_forever_at_root(&crate::sync::build_client(), &base, root, config, logger, state_path, store, now).await }
+        };
+
+        // A good fold first, accepted: the install now knows a realm from goldcap.gg.
+        let (base, _seen) = serve_once(answer("200 OK", r#"{"status":"accepted","market":"m","items":1974,"dropped":0}"#));
+        let state = tick(base, 1).await;
+        assert_eq!(state.installs.values().next().unwrap().realm.as_deref(), Some("Classic Beta PvE 2"));
+
+        // Then a realm-less one. Port 9 answers nothing: an attempt to send would log a retry.
+        let at = crate::luafile::now_unix();
+        let realmless = good_fold(at).replace(r#"realm = "R", "#, "");
+        std::fs::write(&file, fold_file(CLIENT, &realmless)).unwrap();
+        let state = tick("http://127.0.0.1:9".into(), 2).await;
+        let card = state.games.iter().find(|g| g.game == crate::games::GameKind::Forever).unwrap();
+        assert_eq!(card.state.skipped.as_deref(), Some(FoldSkip::NoRealm.player_text()));
+        assert_eq!(state.sent.values().copied().collect::<Vec<_>>(), vec![parse_forever_upload(REAL).unwrap().unwrap().fold.at]);
+        let json = serde_json::to_string(card).unwrap();
+        assert!(json.contains(r#""skipped":"Your last scan has no realm name"#), "{json}");
+
+        // A /reload rewrites the file (a new length), the fold is the same: no second line.
+        std::fs::write(&file, fold_file(CLIENT, &realmless) + "\n").unwrap();
+        tick("http://127.0.0.1:9".into(), 3).await;
+        let lines: Vec<_> = log().lines().filter(|l| l.contains("not sent (no realm")).map(String::from).collect();
+        assert_eq!(lines.len(), 1, "{}", log());
+        assert!(lines[0].contains(&format!("forever scan from _classic_beta_: not sent (no realm, at {at})")), "{}", lines[0]);
+        assert!(!log().contains("forever scan from _classic_beta_: will retry"), "nothing was sent: {}", log());
+
+        // A newer good fold clears the card's reason.
+        std::fs::write(&file, fold_file(CLIENT, &good_fold(at + 1))).unwrap();
+        let state = tick("http://127.0.0.1:9".into(), 4).await;
+        assert_eq!(state.installs.values().next().unwrap().skipped, None);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // A fold filed by its server: goldcap.gg refuses it while it knows no realm for that server,
+    // and the card and the log say so; once it does, the card names the realm the site filed it
+    // under, from the answer or else from that market's own prices.
+    #[tokio::test]
+    async fn a_realmless_fold_is_sent_by_its_server_and_the_card_names_the_realm_goldcap_knows() {
+        let root = machine("by-server");
+        let file = put(&root, "_classic_beta_", REAL);
+        let config = crate::config::Config { companion_token: "tok".into(), ..crate::config::Config::default() };
+        let logger = crate::logging::Logger::new(&root.join("logs")).unwrap();
+        let store = std::sync::Mutex::new(std::collections::HashMap::new());
+        let state_path = root.join("s.json");
+        let tick = |base: String, now: i64| {
+            let (config, logger, store, state_path, root) = (&config, &logger, &store, &state_path, &root);
+            async move { sync_forever_at_root(&crate::sync::build_client(), &base, root, config, logger, state_path, store, now).await }
+        };
+        let at = crate::luafile::now_unix();
+        let by_server = |at: i64| good_fold(at).replace(r#"realm = "R", "#, "").replace(ITEM, &format!(r#"server = "6949", {ITEM}"#));
+        let card = |state: &ForeverState| state.installs.values().next().unwrap().clone();
+
+        std::fs::write(&file, fold_file(CLIENT, &by_server(at))).unwrap();
+        let (base, seen) = serve_once(answer("422 Unprocessable Entity", r#"{"status":"rejected","reason":"unknown_realm","market":null}"#));
+        let state = tick(base, 1).await;
+        let request = seen.recv().unwrap();
+        assert!(request.contains(r#""server":"6949""#) && !request.contains(r#""realm""#), "{request}");
+        let entry = card(&state);
+        assert_eq!((entry.skipped, entry.note.as_deref(), entry.market, entry.realm), (None, Some(UNKNOWN_REALM_TEXT), None, None));
+        let log = std::fs::read_to_string(root.join("logs").join(crate::logging::LOG_FILE_NAME)).unwrap();
+        assert!(log.contains(&format!("forever scan from _classic_beta_: refused by goldcap.gg (unknown_realm): {UNKNOWN_REALM_TEXT}")), "{log}");
+
+        // The answer names the realm.
+        std::fs::write(&file, fold_file(CLIENT, &by_server(at + 1)) + "\n").unwrap();
+        let (base, _seen) = serve_once(answer("200 OK", r#"{"status":"accepted","market":"eu-zul-horde","realm":"Zul'jin","items":1,"dropped":0}"#));
+        let entry = card(&tick(base, 2).await);
+        assert_eq!((entry.note, entry.market.as_deref(), entry.realm.as_deref()), (None, Some("eu-zul-horde"), Some("Zul'jin")));
+
+        // The same market again, its answer naming none: the realm stays.
+        std::fs::write(&file, fold_file(CLIENT, &by_server(at + 2)) + &"\n".repeat(2)).unwrap();
+        let (base, _seen) = serve_once(answer("200 OK", r#"{"status":"accepted","market":"eu-zul-horde","items":1,"dropped":0}"#));
+        assert_eq!(card(&tick(base, 3).await).realm.as_deref(), Some("Zul'jin"));
+
+        // Another market and no realm in the answer: the market's prices name it, card and addon.
+        std::fs::write(&file, fold_file(CLIENT, &by_server(at + 3)) + &"\n".repeat(3)).unwrap();
+        let now = crate::luafile::now_unix();
+        let (base, _seen) = serve_forever(vec![
+            answer("200 OK", r#"{"status":"accepted","market":"eu-mirage-horde","items":1,"dropped":0,"impact":{"updated":1,"onlyYours":1,"firstOnMarket":false}}"#),
+            format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{body}",
+                body = format!("GCF1;eu-mirage-horde;3;Mirage Raceway;Horde;{now};I:1"), len = format!("GCF1;eu-mirage-horde;3;Mirage Raceway;Horde;{now};I:1").len()),
+        ]);
+        let state = tick(base, 4).await;
+        let entry = card(&state);
+        assert_eq!(entry.realm.as_deref(), Some("Mirage Raceway"));
+        assert_eq!(entry.impact.map(|i| i.realm).as_deref(), Some("Mirage Raceway"));
+        let lua = std::fs::read_to_string(root.join("_classic_beta_/Interface/AddOns/GoldCap_AppData/AppData.lua")).unwrap();
+        assert!(lua.contains("realm = 'Mirage Raceway'"), "{lua}");
         std::fs::remove_dir_all(&root).ok();
     }
 

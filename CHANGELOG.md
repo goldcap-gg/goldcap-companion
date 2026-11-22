@@ -4,6 +4,13 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
+## 1.23.0 (2026-11-22)
+
+- WoW: Forever: since game version 1.60.1.71037 the game no longer tells the addon your realm name. With GoldCap addon 0.31.2 or newer your scans are sent anyway: the addon notes which game server you scanned on, and goldcap.gg files the scan under the realm it knows for that server. The Status window shows that realm's name.
+- If goldcap.gg does not know your realm yet, the Status window says so: it learns it as soon as another player on your realm scans, or after you play a character the game named the realm for. A scan goldcap.gg turns down for any other reason is shown on the card too.
+- When your last scan cannot be sent at all, the Status window says why and what to do, instead of waiting for a first scan forever. A scan with neither a realm nor a server (an addon older than 0.31.2) is never filed under a guessed realm: update the GoldCap addon.
+- The Companion's log names the reason once per scan, and every scan goldcap.gg turned down, so a support request can point straight at it.
+
 ## 1.22.0 (2026-11-16)
 
 - WoW: Forever: sends what the profession trainers you talk to teach and what the merchants you open sell (ids, prices, the npc's name and zone), so recipe pages on goldcap.gg can say where a recipe is learned or bought.

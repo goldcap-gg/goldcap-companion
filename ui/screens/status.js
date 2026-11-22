@@ -1,4 +1,4 @@
-import { relativeTime, countdown, groupDigits, foreverScanLine, foreverCrowdLine, foreverMarketLine, foreverImpactLines, foreverPairLine, foreverNextStep, PAIR_HOW, addonCard } from "../lib/format.js";
+import { relativeTime, countdown, groupDigits, foreverScanLine, foreverCrowdLine, foreverMarketLine, foreverImpactLines, foreverPairLine, foreverNextStep, foreverHeroPhrase, PAIR_HOW, addonCard } from "../lib/format.js";
 import { brandMarkSvg } from "../lib/brandMark.js";
 
 const POLL_MS = 5000;
@@ -36,8 +36,10 @@ function foreverGames(s) {
   return s.foreverEnabled ? (s.games ?? []).filter((g) => g.game === "forever") : [];
 }
 
+// A revoked token, or a newest scan the Companion could not send: either way the player has
+// something to do.
 function foreverBroken(games) {
-  return games.some((g) => g.unauthorized);
+  return games.some((g) => g.unauthorized || g.skipped);
 }
 
 // The earliest failing link, in pipeline order — the ones after it may only
@@ -52,12 +54,7 @@ function heroPhrase(s) {
     const idle = ORDER.find((k) => s[k].state === "notConnected");
     if (idle) return IDLE_PHRASE[idle];
   }
-  const games = foreverGames(s);
-  if (foreverBroken(games)) return "WoW: Forever needs attention";
-  if (s.retailEnabled) return "Everything works";
-  // Forever alone and not paired: nothing is sent, however many scans the player makes.
-  if (!s.paired && games.length > 0) return "Pair to send your scans";
-  return games.some((g) => g.lastSentAt) ? "Everything works" : "Waiting for your first scan";
+  return foreverHeroPhrase(foreverGames(s), s);
 }
 
 function heroState(s) {
@@ -160,6 +157,14 @@ function foreverCard(g, paired, onPair) {
   const scan = document.createElement("p");
   scan.className = "stage-detail";
   card.append(scan);
+
+  // The newest scan was not sent: why, and what to do.
+  if (g.skipped) {
+    const skipped = document.createElement("p");
+    skipped.className = "stage-error";
+    skipped.textContent = g.skipped;
+    card.append(skipped);
+  }
 
   // Not paired: the scan goes nowhere, and the card says so with the way to fix it.
   const pairLine = foreverPairLine(g, paired);
