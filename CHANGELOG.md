@@ -4,6 +4,10 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
+## 1.23.2 (unreleased)
+
+- WoW: Forever: a scan that goldcap.gg is still matching to your market is shown as "Scan accepted, waiting to be matched to your market" instead of nothing. It is counted as soon as it is matched; you don't need to do anything.
+
 ## 1.23.1 (2026-11-22)
 
 - After your computer wakes from sleep the Companion syncs again within a few seconds, instead

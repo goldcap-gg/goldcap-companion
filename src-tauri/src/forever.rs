@@ -327,8 +327,13 @@ pub enum UploadOutcome {
 
 pub const UNKNOWN_REALM_TEXT: &str = "goldcap.gg does not know your realm yet. It will as soon as another player on it scans, or after you play a character the game named the realm for.";
 
+/// A `pending_market` answer (200, terminal): goldcap.gg kept a scan that named no realm and files
+/// it itself once it knows the server's market. Not an error, and nothing to resend.
+pub const PENDING_MARKET_TEXT: &str = "Scan accepted, waiting to be matched to your market. goldcap.gg counts it as soon as it is.";
+
 fn note_for(status: &str, reason: Option<&str>) -> Option<String> {
     match (status, reason) {
+        ("pending_market", _) => Some(PENDING_MARKET_TEXT.into()),
         ("quarantined", Some("unlinked")) => Some("Link Battle.net on goldcap.gg for your scans to count in public prices".into()),
         ("quarantined", Some(_)) => Some("Your scans are not counted in public prices right now".into()),
         ("rejected", Some("stale")) => Some("The last scan was over a day old when it was sent".into()),
@@ -426,6 +431,9 @@ pub struct InstallState {
     /// fold.
     pub sent_items: Option<u32>,
     pub note: Option<String>,
+    /// `note` says the last scan was kept and waits for its market (`pending_market`): news, not
+    /// an error, so the card does not show it as one.
+    pub waiting: bool,
     pub crowd_items: Option<u32>,
     pub crowd_ts: Option<i64>,
     /// When this install's `AppData.lua` last actually carried a `foreverString` — distinct
@@ -820,6 +828,7 @@ pub async fn sync_forever_at_root(
                     let entry = state.installs.entry(key.clone()).or_default();
                     entry.impact = scan_impact;
                     entry.last_sent_at = Some(now);
+                    entry.waiting = note.as_deref() == Some(PENDING_MARKET_TEXT);
                     entry.note = note;
                     entry.unauthorized = false;
                     entry.sent_items = Some(up.fold.items.len() as u32);
@@ -1446,6 +1455,15 @@ pub(crate) mod tests {
             let UploadOutcome::Done { market, realm, note, refused, .. } = out else { panic!("{out:?}") };
             assert_eq!((market, realm, note.as_deref(), refused.as_deref()), (None, None, Some(words.as_str()), Some(reason)), "{body}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_scan_waiting_for_its_market_is_accepted_not_refused() {
+        let up = parse_forever_upload(REAL).unwrap().unwrap();
+        let (base, _seen) = serve_once(answer("200 OK", r#"{"status":"pending_market","items":1974,"dropped":0}"#));
+        let out = upload_fold(&crate::sync::build_client(), &base, "tok", &up).await;
+        let UploadOutcome::Done { market, realm, note, refused, impact } = out else { panic!("{out:?}") };
+        assert_eq!((market, realm, note.as_deref(), refused, impact), (None, None, Some(PENDING_MARKET_TEXT), None, None));
     }
 
     #[test]
