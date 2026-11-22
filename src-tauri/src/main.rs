@@ -196,17 +196,13 @@ fn main() {
         })
         .build(tauri::generate_context!())
         .expect("error while building the goldcap companion app")
-        .run(|app_handle, event| match event {
+        .run(|#[cfg_attr(not(target_os = "macos"), allow(unused_variables))] app_handle, event| match event {
             // Tray-only app: closing the companion window must not quit the
             // process. A window-close exit request carries code None; an
             // explicit app.exit(0) (the tray's Quit item) carries Some(0)
             // and must be allowed through — blocking unconditionally here
             // is exactly the "Quit does nothing" bug.
-            tauri::RunEvent::ExitRequested { api, code, .. } => {
-                if code.is_none() {
-                    api.prevent_exit();
-                }
-            }
+            tauri::RunEvent::ExitRequested { api, code: None, .. } => api.prevent_exit(),
             // Relaunching the .app while it's already running (Dock,
             // Spotlight, `open`, clicking it again) delivers Reopen instead
             // of a second process start. The tray icon is the only other

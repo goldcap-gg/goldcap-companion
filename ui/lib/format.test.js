@@ -13,6 +13,7 @@ import {
   foreverImpactLines,
   foreverPairLine,
   foreverNextStep,
+  foreverHeroPhrase,
   canSkipPairing,
   connectSubtitle,
   addonCard,
@@ -158,6 +159,10 @@ test("foreverImpactLines: a scan that updated nothing says so, even on an opened
   const sub = "Your last scan updated no prices on Classic Beta PvE 2 · Alliance.";
   assert.deepEqual(foreverImpactLines({ impact: impact({ updated: 0, onlyYours: 0 }) }), { big: "", label: "", sub });
   assert.deepEqual(foreverImpactLines({ impact: impact({ updated: 0, onlyYours: 0, first: true }) }), { big: "", label: "", sub });
+});
+
+test("foreverImpactLines: a scan whose realm nobody named yet says 'your realm'", () => {
+  assert.equal(foreverImpactLines({ impact: impact({ realm: "", faction: "Horde" }) }).label, "prices updated on your realm");
 });
 
 test("foreverImpactLines groups digits and names a market without a faction by its realm alone", () => {
@@ -307,6 +312,20 @@ test("foreverNextStep: once paired and before the first send, the one thing to d
   assert.equal(foreverNextStep({}, false), null, "unpaired: the pair line says what to do");
   assert.match(foreverNextStep({}, true), /^Next: open the auction house in WoW: Forever .*\/reload\.$/);
   assert.equal(foreverNextStep({ lastSentAt: NOW }, true), null);
+  assert.equal(foreverNextStep({ skipped: "Your last scan has no realm name" }, true), null, "a skipped scan says what to do instead");
+});
+
+test("foreverHeroPhrase: a scan that was not sent outranks waiting and everything works", () => {
+  const skipped = { skipped: "Your last scan has no realm name, so it was not sent. Update the GoldCap addon." };
+  const paired = { paired: true, retailEnabled: false };
+  assert.equal(foreverHeroPhrase([{}], paired), "Waiting for your first scan");
+  assert.equal(foreverHeroPhrase([skipped], paired), "Your last WoW: Forever scan was not sent");
+  assert.equal(foreverHeroPhrase([{ ...skipped, lastSentAt: NOW }], paired), "Your last WoW: Forever scan was not sent");
+  assert.equal(foreverHeroPhrase([skipped], { paired: true, retailEnabled: true }), "Your last WoW: Forever scan was not sent");
+  assert.equal(foreverHeroPhrase([{ lastSentAt: NOW }], paired), "Everything works");
+  assert.equal(foreverHeroPhrase([skipped], { paired: false, retailEnabled: false }), "Pair to send your scans");
+  assert.equal(foreverHeroPhrase([{ ...skipped, unauthorized: true }], paired), "WoW: Forever needs attention");
+  assert.equal(foreverHeroPhrase([], { paired: true, retailEnabled: true }), "Everything works");
 });
 
 test("canSkipPairing: never with WoW: Forever on; Retail alone keeps Later", () => {

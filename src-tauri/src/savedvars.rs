@@ -387,9 +387,7 @@ pub fn parse_saved_variables(lua_source: &str) -> Result<LedgerData, String> {
         return Ok(LedgerData::default());
     };
 
-    let mut data = LedgerData::default();
-
-    data.client = read_client(&db);
+    let mut data = LedgerData { client: read_client(&db), ..LedgerData::default() };
 
     if let Ok(Value::Table(ledger)) = db.get::<Value>("ledger") {
         for row in ledger.sequence_values::<Table>().flatten() {
