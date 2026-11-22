@@ -203,7 +203,7 @@ function foreverCard(g, paired, onPair) {
 
   if (g.note) {
     const note = document.createElement("p");
-    note.className = "stage-error mono";
+    note.className = g.waiting ? "muted" : "stage-error mono";
     note.textContent = g.note;
     card.append(note);
   }
