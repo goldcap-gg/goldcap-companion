@@ -236,3 +236,11 @@ export async function foreverRootPatch(detect, pick) {
   if (!root) root = (await pick()) || "";
   return root ? { foreverRootPath: root, foreverEnabled: true } : null;
 }
+
+// The Status screen's "next sync" line. An elapsed schedule is not "due": the loop is about to
+// run (after a wake or a retry), so say that.
+export function nextSyncLine(until, now) {
+  const left = countdown(until, now);
+  if (!left) return "";
+  return left === "due" ? "Syncing soon" : `Next sync in ${left}`;
+}

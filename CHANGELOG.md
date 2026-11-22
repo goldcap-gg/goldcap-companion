@@ -4,6 +4,14 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
+## 1.23.1 (2026-11-22)
+
+- After your computer wakes from sleep the Companion syncs again within a few seconds, instead
+  of waiting out the rest of the interval. If a sync fails because goldcap.gg can't be reached,
+  it tries again after a minute, then two, then five, instead of waiting for the next full
+  interval. The same goes when only the region-wide prices failed to download.
+- The Status window says "Syncing soon" when a sync is about to start, instead of "Next sync in due".
+
 ## 1.23.0 (2026-11-22)
 
 - WoW: Forever: since game version 1.60.1.71037 the game no longer tells the addon your realm name. With GoldCap addon 0.31.2 or newer your scans are sent anyway: the addon notes which game server you scanned on, and goldcap.gg files the scan under the realm it knows for that server. The Status window shows that realm's name.

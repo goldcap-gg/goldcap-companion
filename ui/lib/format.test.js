@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   relativeTime,
   countdown,
+  nextSyncLine,
   groupDigits,
   formatPairCode,
   gameLine,
@@ -331,4 +332,11 @@ test("canSkipPairing: never with WoW: Forever on; Retail alone keeps Later", () 
   assert.equal(canSkipPairing({ foreverEnabled: true, retailEnabled: true }), false);
   assert.equal(canSkipPairing({ foreverEnabled: true, retailEnabled: false }), false);
   assert.equal(canSkipPairing({ foreverEnabled: false, retailEnabled: true }), true);
+});
+
+test("an overdue schedule reads as syncing soon, not as due", () => {
+  assert.equal(nextSyncLine(NOW - 10, NOW), "Syncing soon");
+  assert.equal(nextSyncLine(NOW, NOW), "Syncing soon");
+  assert.equal(nextSyncLine(NOW + 61, NOW), "Next sync in 2 min");
+  assert.equal(nextSyncLine(null, NOW), "");
 });

@@ -1,4 +1,4 @@
-import { relativeTime, countdown, groupDigits, foreverScanLine, foreverCrowdLine, foreverMarketLine, foreverImpactLines, foreverPairLine, foreverNextStep, foreverHeroPhrase, PAIR_HOW, addonCard } from "../lib/format.js";
+import { relativeTime, nextSyncLine, groupDigits, foreverScanLine, foreverCrowdLine, foreverMarketLine, foreverImpactLines, foreverPairLine, foreverNextStep, foreverHeroPhrase, PAIR_HOW, addonCard } from "../lib/format.js";
 import { brandMarkSvg } from "../lib/brandMark.js";
 
 const POLL_MS = 5000;
@@ -426,12 +426,9 @@ export function render(el, ctx) {
       crowdEl.hidden = !crowdText;
     }
 
-    const left = countdown(snapshot.nextTickAt, now);
     meta.textContent = snapshot.syncing
       ? "Syncing now…"
-      : left
-        ? `Next sync in ${left}`
-        : "";
+      : nextSyncLine(snapshot.nextTickAt, now);
   }
 
   async function takeOver(dir, button) {
