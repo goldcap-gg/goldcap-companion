@@ -4,6 +4,11 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
+## 1.24.0 (2026-11-23)
+
+- WoW: Forever: your own auctions now go up to goldcap.gg, for My auctions on the site and its alerts when one is undercut, sold or expired. They are sent after you log out or type /reload, when the game saves them.
+- Notifications from goldcap.gg now show on your desktop while the Companion is paired. Only the ones that arrive after this update are shown, none from before. During your quiet hours they come without a sound, and on Windows a click on one opens its page on goldcap.gg.
+
 ## 1.23.2 (2026-11-22)
 
 - WoW: Forever: a scan that goldcap.gg is still matching to your market is shown as "Scan accepted, waiting to be matched to your market" instead of nothing. It is counted as soon as it is matched; you don't need to do anything.

@@ -1,6 +1,6 @@
 [package]
 name = "goldcap-companion"
-version = "1.23.2"
+version = "1.24.0"
 description = "GoldCap companion — automatic price sync for the GoldCap WoW addon"
 edition = "2021"
 rust-version = "1.77"
@@ -42,6 +42,9 @@ winreg = "0.56"
 # The running programs' paths for the game check in addon_game.rs. Already in
 # the lock through tokio, winreg and tray-icon: this adds no crate.
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
+# A click on a notification from goldcap.gg opens its page (notify_feed.rs): the notification
+# plugin shows a toast but does not report the click. Already in the lock through that plugin.
+notify-rust = "4"
 
 # macOS already funnels a relaunch into the running process (RunEvent::Reopen
 # in main.rs); Windows and Linux start a second one. See main.rs for why that
