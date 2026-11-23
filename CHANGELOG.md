@@ -6,8 +6,8 @@ data.
 
 ## 1.24.0 (unreleased)
 
-- Your WoW: Forever auctions now go up to goldcap.gg, so the site can tell you when one is undercut, sold or expired.
-- Notifications from GoldCap now appear on your desktop.
+- WoW: Forever: your own auctions now go up to goldcap.gg, for My auctions on the site and its alerts when one is undercut, sold or expired. They are sent after you log out or type /reload, when the game saves them.
+- Notifications from goldcap.gg now show on your desktop while the Companion is paired. Only the ones that arrive after this update are shown, none from before. During your quiet hours they come without a sound, and on Windows a click on one opens its page on goldcap.gg.
 
 ## 1.23.2 (2026-11-22)
 
