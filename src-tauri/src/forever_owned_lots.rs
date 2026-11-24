@@ -137,6 +137,12 @@ pub async fn upload_lots(
         .json(&body)
         .send()
         .await;
+    outcome(sent).await
+}
+
+/// What a Forever upload route's answer means for the batch it answers. Shared with the holdings
+/// pass, whose route answers the same way.
+pub(crate) async fn outcome(sent: reqwest::Result<reqwest::Response>) -> LotsOutcome {
     match sent {
         Err(e) => LotsOutcome::Retry(crate::sync::describe_err(&e, crate::sync::CLIENT_TIMEOUT)),
         Ok(res) => match res.status().as_u16() {

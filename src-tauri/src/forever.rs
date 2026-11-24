@@ -510,6 +510,13 @@ pub struct ForeverState {
     /// SavedVariables path → the file's (mtime, length) when every auction in it had been sent.
     #[serde(default)]
     pub owned_lots_stamps: BTreeMap<String, (i64, u64)>,
+    /// SavedVariables path → the holdings goldcap.gg has taken from that file: each place's readAt
+    /// and the newest send time. Only places still in the file are kept.
+    #[serde(default)]
+    pub holdings_sent: BTreeMap<String, crate::holdings::HoldingsSent>,
+    /// SavedVariables path → the file's (mtime, length) when all its holdings had been sent.
+    #[serde(default)]
+    pub holdings_stamps: BTreeMap<String, (i64, u64)>,
     /// SavedVariables path → the fold `at` the site has had its say about.
     pub sent: BTreeMap<String, i64>,
     /// SavedVariables path → the `at` of the skipped fold already logged, so the log says why
@@ -946,6 +953,33 @@ pub async fn sync_forever_at_root(
                     crate::forever_runs::PurchasePass::Complete => {
                         if let Some(s) = stamp {
                             state.owned_lots_stamps.insert(file_key, s);
+                        }
+                    }
+                    crate::forever_runs::PurchasePass::Incomplete => {}
+                    crate::forever_runs::PurchasePass::Unauthorized => {
+                        state.installs.entry(key.clone()).or_default().unauthorized = true;
+                        break;
+                    }
+                }
+            }
+        }
+        // What the characters hold, after the ledger, to the Forever holdings route.
+        if !token.is_empty() && !state.installs.get(&key).is_some_and(|e| e.unauthorized) {
+            for file in &game.saved_vars {
+                let file_key = file.to_string_lossy().into_owned();
+                let stamp = file_stamp(file);
+                if stamp.is_some() && state.holdings_stamps.get(&file_key).copied() == stamp {
+                    continue;
+                }
+                let mut sent = state.holdings_sent.remove(&file_key).unwrap_or_default();
+                let pass = crate::forever_holdings::send_holdings(client, base, &token, file, &mut sent, logger).await;
+                if sent != crate::holdings::HoldingsSent::default() {
+                    state.holdings_sent.insert(file_key.clone(), sent);
+                }
+                match pass {
+                    crate::forever_runs::PurchasePass::Complete => {
+                        if let Some(s) = stamp {
+                            state.holdings_stamps.insert(file_key, s);
                         }
                     }
                     crate::forever_runs::PurchasePass::Incomplete => {}
@@ -1941,6 +1975,18 @@ pub(crate) mod tests {
         let text = serde_json::to_string(&new).unwrap();
         assert_eq!(serde_json::from_str::<ForeverState>(&text).unwrap(), new);
         assert!(text.contains(r#""owned_lots_sent":{"/a":["owned|101|1794653802|0"]}"#), "{text}");
+
+        // And for the holdings.
+        assert!(loaded.holdings_sent.is_empty() && loaded.holdings_stamps.is_empty());
+        let readings = [("Alice-Realm|bags".to_string(), 1794600000)].into();
+        new.holdings_sent.insert("/a".into(), crate::holdings::HoldingsSent { readings, sends_at: 1794597000 });
+        new.holdings_stamps.insert("/a".into(), (7, 42));
+        let text = serde_json::to_string(&new).unwrap();
+        assert_eq!(serde_json::from_str::<ForeverState>(&text).unwrap(), new);
+        assert!(text.contains(r#""holdings_sent":{"/a":{"readings":{"Alice-Realm|bags":1794600000},"sends_at":1794597000}}"#), "{text}");
+        assert!(text.contains(r#""holdings_stamps":{"/a":[7,42]}"#), "{text}");
+        let older: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(older.get("holdings_sent").is_some(), "unknown keys are ignored by older builds");
     }
 
     #[tokio::test]

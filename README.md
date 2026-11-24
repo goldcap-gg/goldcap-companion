@@ -46,6 +46,7 @@ The complete list. Every address is ours, and nothing else is contacted.
 | `POST /v1/forever/owned-lots` | WoW: Forever only: your own auctions (auction id, item, amount, price, character, when it was seen, when it ends or was cancelled), so the site can tell you when one is undercut, sold or expired |
 | `POST api.goldcap.gg/v1/companion/claim` | trades your pairing code for a token |
 | `POST /v1/ledger/upload`, `/v1/live-observations`, `/v1/owned-lots`, `/v1/addon/item-names` | your own rows, from the addon's saved data |
+| `POST /v1/ledger/holdings`, `/v1/forever/ledger/holdings` | what your characters hold (item and amount per character and place: bags, bank, warband, mail, auctions, guild bank, and when each was read) and the items you mailed between characters, so stock you no longer have leaves your ledger |
 | `GET /v1/lists/companion`, `/v1/ledger/summary/companion` | what the window shows you |
 | `GET /v1/companion/notifications` | while paired, once a minute: the notifications goldcap.gg has for you, shown on your desktop |
 | `GET goldcap.gg/downloads/updater.json` | checking for a new version, every four hours — unless you turn that off in Settings and check with the button instead |
