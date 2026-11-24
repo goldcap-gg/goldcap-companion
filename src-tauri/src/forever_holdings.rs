@@ -50,7 +50,7 @@ pub async fn send_holdings(
         return PurchasePass::Complete;
     };
 
-    let mut taken = 0usize;
+    let (mut taken, mut accepted) = (0usize, 0u64);
     for batch in pending(&holdings, sent) {
         let body = UploadBody { client: PassportBody { interface: passport.interface, build: &passport.build, region_id }, batch: &batch };
         let answer = client
@@ -60,7 +60,15 @@ pub async fn send_holdings(
             .json(&body)
             .send()
             .await;
-        match outcome(answer).await {
+        let answer = match answer {
+            Ok(res) if res.status().as_u16() == 200 => {
+                let body: serde_json::Value = res.json().await.unwrap_or_default();
+                accepted += body["accepted"].as_u64().unwrap_or(0);
+                LotsOutcome::Taken
+            }
+            other => outcome(other).await,
+        };
+        match answer {
             LotsOutcome::Taken => {
                 stamp(sent, &batch);
                 taken += batch.rows();
@@ -77,7 +85,7 @@ pub async fn send_holdings(
         }
     }
     if taken > 0 {
-        logger.info(&format!("forever holdings from {}: sent ({taken} rows)", file.display()));
+        logger.info(&format!("forever holdings from {}: sent ({taken} rows, {accepted} accepted)", file.display()));
     }
     PurchasePass::Complete
 }

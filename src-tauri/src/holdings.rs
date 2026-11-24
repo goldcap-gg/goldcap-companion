@@ -355,6 +355,8 @@ mod tests {
         let pass = crate::forever_holdings::send_holdings(&client, &base, "stand-holdings-token", &file, &mut sent, &logger).await;
         assert!(matches!(pass, PurchasePass::Complete));
         assert!(!sent.readings.is_empty(), "the Forever route took the readings");
+        let log = std::fs::read_to_string(dir.join("logs").join(crate::logging::LOG_FILE_NAME)).unwrap();
+        assert!(log.contains(" accepted)") && !log.contains(", 0 accepted)"), "a 200 with accepted > 0: {log}");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

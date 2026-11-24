@@ -2016,6 +2016,36 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn forever_holdings_are_retried_after_a_404_and_stamped_after_a_200() {
+        let root = machine("forever-holdings");
+        let lua = include_str!("../tests/fixtures/GoldCap-holdings.lua")
+            .replacen("[\"interface\"] = 120100,", "[\"interface\"] = 16001, [\"regionId\"] = 3,", 1)
+            .replacen("12.1.0.69933", "1.60.1.70938", 1);
+        let sv = put(&root, "_forever_", &lua);
+        let key = sv.to_string_lossy().into_owned();
+        let config = crate::config::Config { companion_token: "tok".into(), ..crate::config::Config::default() };
+        let logger = crate::logging::Logger::new(&root.join("logs")).unwrap();
+        let store = std::sync::Mutex::new(std::collections::HashMap::new());
+        let runs = r#"{"v":3,"generatedAt":"2026-10-01T10:00:00.000Z","plan":"free","freeLines":5,"game":"forever","runs":[]}"#;
+
+        // An older site: nothing marked, so the unchanged file is read again on the next tick.
+        let (base, seen) = serve_forever(vec![answer("404 Not Found", "{}"), answer("200 OK", runs)]);
+        let state = sync_forever_at_root(&crate::sync::build_client(), &base, &root, &config, &logger, &root.join("s.json"), &store, 1).await;
+        let first: Vec<String> = seen.try_iter().collect();
+        assert!(first[0].starts_with("POST /v1/forever/ledger/holdings "), "{first:?}");
+        assert!(state.holdings_sent.is_empty() && state.holdings_stamps.is_empty());
+
+        let (base, seen) = serve_forever(vec![answer("200 OK", r#"{"accepted":10,"skipped":0,"sends":1}"#), answer("200 OK", runs)]);
+        let state = sync_forever_at_root(&crate::sync::build_client(), &base, &root, &config, &logger, &root.join("s.json"), &store, 2).await;
+        let second: Vec<String> = seen.try_iter().collect();
+        assert!(second[0].starts_with("POST /v1/forever/ledger/holdings "), "{second:?}");
+        assert!(!second.iter().any(|r| r.starts_with("POST /v1/ledger/holdings")), "{second:?}");
+        assert_eq!(state.holdings_sent[&key].readings.len(), 10);
+        assert!(state.holdings_stamps.contains_key(&key));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
     async fn unpaired_nothing_is_uploaded_but_the_install_is_listed() {
         let root = machine("unpaired");
         put(&root, "_classic_beta_", REAL);
