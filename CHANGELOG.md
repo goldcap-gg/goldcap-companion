@@ -4,7 +4,7 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
-## 1.25.0 (unreleased)
+## 1.25.0 (2026-11-25)
 
 - The Companion now sends goldcap.gg what your characters hold, so stock you no
   longer have leaves your ledger by itself. Needs the matching addon release;
