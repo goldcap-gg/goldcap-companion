@@ -205,6 +205,12 @@ mod tests {
 
     pub(crate) const FILE: &str = include_str!("../tests/fixtures/GoldCap-holdings.lua");
 
+    /// The fixture with `\n` line ends: a Windows checkout gives it `\r\n`, and the tests that edit it
+    /// match on `\n`. The reader takes either.
+    fn file_lf() -> String {
+        FILE.replace("\r\n", "\n")
+    }
+
     pub(crate) fn body_of(request: &str) -> serde_json::Value {
         serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap()
     }
@@ -282,7 +288,7 @@ mod tests {
         upload_holdings_once(&client, &base, "tok", &dir, &state_path, &logger).await;
 
         // Bjorn's bags read again; Bjorn's bank gone from the file.
-        let lua = FILE.replacen("[\"at\"] = 1794601000,", "[\"at\"] = 1794700000,", 1).replacen(
+        let lua = file_lf().replacen("[\"at\"] = 1794601000,", "[\"at\"] = 1794700000,", 1).replacen(
             "[\"bank\"] = {\n\t\t\t\t\t[\"at\"] = 1794591000,",
             "[\"bonk\"] = {\n\t\t\t\t\t[\"at\"] = 1794591000,",
             1,
@@ -330,8 +336,8 @@ mod tests {
     #[test]
     fn the_warband_of_each_region_is_its_own_reading_with_its_own_stamp() {
         let us = "\t\t[\"warband\"] = {\n\t\t\t[\"us\"] = { [\"at\"] = 1794598000, [\"full\"] = true, [\"items\"] = { [2589] = 7 } },\n";
-        let lua = FILE.replacen("\t\t[\"warband\"] = {\n", us, 1);
-        assert_ne!(lua, FILE);
+        let lua = file_lf().replacen("\t\t[\"warband\"] = {\n", us, 1);
+        assert_ne!(lua, file_lf());
         let h = crate::savedvars::parse_holdings(&lua).unwrap().unwrap();
         let banks: Vec<(Option<&str>, i64)> =
             h.readings.iter().filter(|r| r.place == "warband").map(|r| (r.region.as_deref(), r.read_at)).collect();
