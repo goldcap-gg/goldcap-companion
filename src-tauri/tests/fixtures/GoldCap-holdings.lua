@@ -69,27 +69,29 @@ GoldCapDB = {
 			},
 		},
 		["warband"] = {
-			["region"] = "eu",
-			["at"] = 1794599000,
-			["full"] = true,
-			["items"] = {
-				[190320] = 1000,
-				[2589] = 60,
+			["eu"] = {
+				["at"] = 1794599000,
+				["full"] = true,
+				["items"] = {
+					[190320] = 1000,
+					[2589] = 60,
+				},
 			},
 		},
 		["guilds"] = {
 			["Goldmakers-Dentarg"] = {
 				["region"] = "eu",
+				["at"] = 1794585000,
 				["full"] = false,
 				["tabs"] = {
-					{
+					[1] = {
 						["at"] = 1794580000,
 						["items"] = {
 							[2589] = 100,
 							[7676] = 1,
 						},
 					},
-					{
+					[3] = {
 						["at"] = 1794585000,
 						["items"] = {
 							[2589] = 50,
@@ -98,15 +100,15 @@ GoldCapDB = {
 				},
 			},
 		},
-		["sent"] = {
+		["sends"] = {
 			{
-				["from"] = "Aiyana-Dentarg",
-				["to"] = "Bjorn-Dentarg",
-				["region"] = "eu",
 				["at"] = 1794597000,
+				["to"] = "Bjorn-Dentarg",
+				["from"] = "Aiyana-Dentarg",
 				["items"] = {
 					[190320] = 20,
 				},
+				["region"] = "eu",
 			},
 		},
 	},

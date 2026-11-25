@@ -3,7 +3,7 @@
 //! no longer has off their ledger. This module holds what both games share and the retail pass;
 //! `forever_holdings` is the WoW: Forever pass.
 //!
-//! "Already sent" is per file: the readAt of each "holder|place" reading the site took, and the
+//! "Already sent" is per file: the readAt of each reading the site took (`key`), and the
 //! newest send time it took. A place read again goes up again; one the file no longer holds is
 //! forgotten. Sends go up from that newest time on, so the one at the boundary goes again: the site
 //! keeps the greatest time per item, so that is harmless.
@@ -25,7 +25,7 @@ const MAX_READING_BYTES: usize = 1024 * 1024;
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HoldingsSent {
-    /// "holder|place" to the readAt the site took.
+    /// A reading's `key` to the readAt the site took.
     pub readings: BTreeMap<String, i64>,
     /// The newest send time the site took.
     pub sends_at: i64,
@@ -65,8 +65,12 @@ impl HoldingsState {
     }
 }
 
+/// "holder|place", and "|region" after it for the warband bank: the addon keeps one per region.
 fn key(r: &HoldingReading) -> String {
-    format!("{}|{}", r.holder, r.place)
+    match (r.place.as_str(), &r.region) {
+        ("warband", Some(region)) => format!("{}|{}|{region}", r.holder, r.place),
+        _ => format!("{}|{}", r.holder, r.place),
+    }
 }
 
 /// One request's rows. `readings` is always there, even empty; `sends` only when there are some.
@@ -254,8 +258,9 @@ mod tests {
         assert!(request.to_ascii_lowercase().contains("authorization: bearer tok"));
         let body = body_of(&request);
         assert_eq!(places(&body).len(), 10);
-        assert_eq!(body["sends"].as_array().unwrap().len(), 1);
         assert_eq!(body["readings"][1], serde_json::json!({ "holder": "Aiyana-Dentarg", "place": "bags", "region": "eu", "readAt": 1794600000, "full": true, "items": [[2589, 40], [190320, 12]] }));
+        assert_eq!(body["readings"][9], serde_json::json!({ "holder": "warband", "place": "warband", "region": "eu", "readAt": 1794599000, "full": true, "items": [[2589, 60], [190320, 1000]] }));
+        assert_eq!(body["sends"], serde_json::json!([{ "from": "Aiyana-Dentarg", "to": "Bjorn-Dentarg", "region": "eu", "at": 1794597000, "items": [[190320, 20]] }]));
 
         let state = HoldingsState::load_from(&state_path);
         let key = state.sent.keys().next().unwrap().clone();
@@ -282,6 +287,8 @@ mod tests {
             "[\"bonk\"] = {\n\t\t\t\t\t[\"at\"] = 1794591000,",
             1,
         );
+        assert_eq!(lua.matches("1794700000").count(), 1);
+        assert!(lua.contains("[\"bonk\"]"));
         std::fs::write(&file, lua).unwrap();
         let (base, seen) = serve_once(answer("200 OK", r#"{"accepted":1,"skipped":0,"sends":1}"#));
         upload_holdings_once(&client, &base, "tok", &dir, &state_path, &logger).await;
@@ -318,6 +325,64 @@ mod tests {
         assert_eq!(upload_holdings_once(&client, &base, "tok", &dir, &state_path, &logger).await, 0);
         assert!(seen.recv_timeout(Duration::from_millis(300)).is_err());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_warband_of_each_region_is_its_own_reading_with_its_own_stamp() {
+        let us = "\t\t[\"warband\"] = {\n\t\t\t[\"us\"] = { [\"at\"] = 1794598000, [\"full\"] = true, [\"items\"] = { [2589] = 7 } },\n";
+        let lua = FILE.replacen("\t\t[\"warband\"] = {\n", us, 1);
+        assert_ne!(lua, FILE);
+        let h = crate::savedvars::parse_holdings(&lua).unwrap().unwrap();
+        let banks: Vec<(Option<&str>, i64)> =
+            h.readings.iter().filter(|r| r.place == "warband").map(|r| (r.region.as_deref(), r.read_at)).collect();
+        assert_eq!(banks, vec![(Some("eu"), 1794599000), (Some("us"), 1794598000)]);
+
+        let mut sent = HoldingsSent::default();
+        let batches = pending(&h, &mut sent);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].readings.iter().filter(|r| r.holder == "warband").count(), 2);
+        assert_eq!(batches[0].sends.len(), 1);
+        stamp(&mut sent, &batches[0]);
+        assert_eq!(sent.readings["warband|warband|eu"], 1794599000);
+        assert_eq!(sent.readings["warband|warband|us"], 1794598000);
+        assert!(pending(&h, &mut sent).is_empty());
+
+        // The us bank read again, still older than the eu one: it goes up, alone.
+        let h = crate::savedvars::parse_holdings(&lua.replacen("1794598000", "1794598500", 1)).unwrap().unwrap();
+        let batches = pending(&h, &mut sent);
+        assert_eq!(batches[0].readings.iter().map(|r| key(r)).collect::<Vec<_>>(), vec!["warband|warband|us"]);
+    }
+
+    /// Counts only, from a real SavedVariables file, read in place; run by hand, never in CI:
+    ///   GOLDCAP_HOLDINGS_SV=.../GoldCap.lua cargo test --locked -- --ignored holdings_counts_of_a_real_file --nocapture
+    #[test]
+    #[ignore]
+    fn holdings_counts_of_a_real_file() {
+        let path = std::env::var("GOLDCAP_HOLDINGS_SV").expect("GOLDCAP_HOLDINGS_SV");
+        let source = std::fs::read_to_string(&path).expect("a readable file");
+        let h = crate::savedvars::parse_holdings(&source).expect("a file that parses").expect("a holdings section");
+        let mut places = BTreeMap::<&str, (usize, usize)>::new();
+        for r in &h.readings {
+            let (all, full) = places.entry(r.place.as_str()).or_default();
+            *all += 1;
+            *full += usize::from(r.full);
+        }
+        let characters: BTreeSet<&str> =
+            h.readings.iter().filter(|r| r.place != "warband" && r.place != "guild").map(|r| r.holder.as_str()).collect();
+        let batches = pending(&h, &mut HoldingsSent::default());
+        println!("characters: {}", characters.len());
+        for place in ["bags", "bank", "mail", "auctions", "warband", "guild"] {
+            let (all, full) = places.get(place).copied().unwrap_or_default();
+            println!("{place} readings: {all} ({full} full)");
+        }
+        println!("sends: {}", h.sends.len());
+        println!(
+            "first upload: {} rows ({} readings, {} sends) in {} requests",
+            batches.iter().map(Batch::rows).sum::<usize>(),
+            batches.iter().map(|b| b.readings.len()).sum::<usize>(),
+            batches.iter().map(|b| b.sends.len()).sum::<usize>(),
+            batches.len()
+        );
     }
 
     #[test]

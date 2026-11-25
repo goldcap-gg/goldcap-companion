@@ -579,7 +579,8 @@ pub struct MailSend {
     pub items: Vec<(i64, i64)>,
 }
 
-/// `GoldCapDB.holdings`, flattened to the site's rows: readings by (holder, place), sends by time.
+/// `GoldCapDB.holdings`, flattened to the site's rows: readings by (holder, place, region), sends by
+/// time.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Holdings {
     pub readings: Vec<HoldingReading>,
@@ -691,15 +692,18 @@ pub fn parse_holdings(lua_source: &str) -> Result<Option<Holdings>, String> {
             }
         }
     }
-    if let Ok(Value::Table(t)) = store.get::<Value>("warband") {
-        readings.extend(place_reading(&t, "warband", "warband", opt_string(&t, "region")));
+    // `warband = { [region] = P }`: one warband bank per region, its region the key.
+    if let Ok(Value::Table(banks)) = store.get::<Value>("warband") {
+        for (region, t) in banks.pairs::<String, Table>().flatten() {
+            readings.extend(place_reading(&t, "warband", "warband", Some(region)));
+        }
     }
     for (name, guild) in named_tables(&store, "guilds") {
         readings.extend(guild_reading(&guild, &name));
     }
-    readings.sort_by(|a, b| (&a.holder, &a.place).cmp(&(&b.holder, &b.place)));
+    readings.sort_by(|a, b| (&a.holder, &a.place, &a.region).cmp(&(&b.holder, &b.place, &b.region)));
 
-    let mut sends: Vec<MailSend> = match store.get::<Value>("sent") {
+    let mut sends: Vec<MailSend> = match store.get::<Value>("sends") {
         Ok(Value::Table(list)) => list.sequence_values::<Table>().flatten().filter_map(|t| mail_send(&t)).collect(),
         _ => Vec::new(),
     };
@@ -742,7 +746,11 @@ mod tests {
         let guild = &h.readings[8];
         assert_eq!(guild.items, vec![(2589, 150), (7676, 1)], "summed over its tabs");
         assert_eq!((guild.read_at, guild.full), (1794580000, false), "its oldest tab's time");
-        assert_eq!(h.readings[9].items, vec![(2589, 60), (190320, 1000)]);
+        // The addon keys the warband bank by region; the row carries that region.
+        assert_eq!(
+            serde_json::to_value(&h.readings[9]).unwrap(),
+            serde_json::json!({ "holder": "warband", "place": "warband", "region": "eu", "readAt": 1794599000, "full": true, "items": [[2589, 60], [190320, 1000]] })
+        );
 
         assert_eq!(h.sends.len(), 1);
         assert_eq!(
@@ -764,10 +772,16 @@ mod tests {
             assert_eq!(h.readings.len(), 9, "{bad}");
             assert!(!h.readings.iter().any(|r| r.holder == "Aiyana-Dentarg" && r.place == "bags"), "{bad}");
         }
-        // One bad tab drops the whole guild; one bad attachment the whole send.
+        // One bad tab drops the whole guild; one bad item the warband of its region; one bad
+        // attachment the whole send.
         let src = HOLDINGS_FILE.replacen("[7676] = 1,", "[7676] = -1,", 1);
+        assert_ne!(src, HOLDINGS_FILE);
         assert!(!parse_holdings(&src).unwrap().unwrap().readings.iter().any(|r| r.place == "guild"));
+        let src = HOLDINGS_FILE.replacen("[2589] = 60,", "[2589] = 0,", 1);
+        assert_ne!(src, HOLDINGS_FILE);
+        assert!(!parse_holdings(&src).unwrap().unwrap().readings.iter().any(|r| r.place == "warband"));
         let src = HOLDINGS_FILE.replacen("[190320] = 20,", "[190320] = 0,", 1);
+        assert_ne!(src, HOLDINGS_FILE);
         assert!(parse_holdings(&src).unwrap().unwrap().sends.is_empty());
     }
 
