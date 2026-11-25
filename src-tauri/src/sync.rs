@@ -664,6 +664,17 @@ pub async fn sync_once(
         logger,
     )
     .await;
+
+    // Holdings, after the ledger and the lots: same passenger rule.
+    crate::holdings::upload_holdings_once(
+        client,
+        crate::forever::API_BASE,
+        &config.companion_token,
+        Path::new(&config.wow_retail_path),
+        &state_path.join(crate::holdings::STATE_FILE_NAME),
+        logger,
+    )
+    .await;
 }
 
 /// One full tick: the Retail leg (`sync_once` — import string, region data, ledger upload, runs,

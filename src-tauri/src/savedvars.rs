@@ -553,9 +553,250 @@ pub fn parse_saved_variables(lua_source: &str) -> Result<LedgerData, String> {
     Ok(data)
 }
 
+/// The latest reading of one place: every item it held and when the addon looked. `full` says the
+/// addon saw the whole place, so anything missing from it is no longer there.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HoldingReading {
+    pub holder: String,
+    pub place: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    pub read_at: i64,
+    pub full: bool,
+    pub items: Vec<(i64, i64)>,
+}
+
+/// One mail the player sent with items attached.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MailSend {
+    pub from: String,
+    pub to: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    pub at: i64,
+    pub items: Vec<(i64, i64)>,
+}
+
+/// `GoldCapDB.holdings`, flattened to the site's rows: readings by (holder, place, region), sends by
+/// time.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Holdings {
+    pub readings: Vec<HoldingReading>,
+    pub sends: Vec<MailSend>,
+    pub client: Option<ClientPassport>,
+}
+
+/// A character's own places; the warband and a guild bank are holders of their own.
+const CHARACTER_PLACES: [&str; 4] = ["bags", "bank", "mail", "auctions"];
+const MAX_COUNT: i64 = 2_147_483_647;
+const MAX_HOLDER_CHARS: usize = 96;
+const MAX_SEND_ITEMS: usize = 16;
+
+fn holder_name(name: &str) -> bool {
+    (1..=MAX_HOLDER_CHARS).contains(&name.encode_utf16().count())
+}
+
+/// `{ [itemID] = count }` in id order, or None when any one item is not a whole id and count the
+/// site takes: a reading missing an item would say the player no longer has it.
+fn holding_items(t: &Table) -> Option<Vec<(i64, i64)>> {
+    let Ok(Value::Table(items)) = t.get::<Value>("items") else { return None };
+    let mut out = std::collections::BTreeMap::new();
+    for pair in items.pairs::<Value, Value>() {
+        let (key, count) = pair.ok()?;
+        let count = match count {
+            Value::Integer(i) => i,
+            Value::Number(n) if n.fract() == 0.0 && n.abs() <= MAX_COUNT as f64 => n as i64,
+            _ => return None,
+        };
+        if !(1..=MAX_COUNT).contains(&count) {
+            return None;
+        }
+        out.insert(crate::forever::item_id(&key)?, count);
+    }
+    Some(out.into_iter().collect())
+}
+
+fn read_at(t: &Table) -> Option<i64> {
+    opt_exact_int(t, "at").filter(|at| *at > 0)
+}
+
+fn place_reading(t: &Table, holder: &str, place: &str, region: Option<String>) -> Option<HoldingReading> {
+    Some(HoldingReading {
+        holder: holder.to_string(),
+        place: place.to_string(),
+        region,
+        read_at: read_at(t)?,
+        full: flag(t, "full"),
+        items: holding_items(t)?,
+    })
+}
+
+/// A guild bank as one reading: its tabs' items summed, dated by its oldest tab.
+fn guild_reading(t: &Table, guild: &str) -> Option<HoldingReading> {
+    let Ok(Value::Table(tabs)) = t.get::<Value>("tabs") else { return None };
+    let mut items = std::collections::BTreeMap::<i64, i64>::new();
+    let mut oldest: Option<i64> = None;
+    for tab in tabs.pairs::<Value, Value>() {
+        let (_, Value::Table(tab)) = tab.ok()? else { return None };
+        let at = read_at(&tab)?;
+        oldest = Some(oldest.map_or(at, |o| o.min(at)));
+        for (id, count) in holding_items(&tab)? {
+            let sum = items.entry(id).or_insert(0);
+            *sum = sum.checked_add(count).filter(|s| *s <= MAX_COUNT)?;
+        }
+    }
+    Some(HoldingReading {
+        holder: guild.to_string(),
+        place: "guild".into(),
+        region: opt_string(t, "region"),
+        read_at: oldest?,
+        full: flag(t, "full"),
+        items: items.into_iter().collect(),
+    })
+}
+
+fn mail_send(t: &Table) -> Option<MailSend> {
+    let (from, to) = (opt_string(t, "from")?, opt_string(t, "to")?);
+    let items = holding_items(t)?;
+    if !(holder_name(&from) && holder_name(&to) && (1..=MAX_SEND_ITEMS).contains(&items.len())) {
+        return None;
+    }
+    Some(MailSend { from, to, region: opt_string(t, "region"), at: read_at(t)?, items })
+}
+
+/// Every (key, table) of a `{ [name] = { ... } }` map whose key is a holder name the site takes.
+fn named_tables(t: &Table, key: &str) -> Vec<(String, Table)> {
+    let Ok(Value::Table(map)) = t.get::<Value>(key) else { return Vec::new() };
+    map.pairs::<String, Table>().flatten().filter(|(name, _)| holder_name(name)).collect()
+}
+
+/// `GoldCapDB.holdings` as the site's rows, read in the same sealed VM as `parse_saved_variables`.
+/// None without the section, or with a store version other than 1.
+pub fn parse_holdings(lua_source: &str) -> Result<Option<Holdings>, String> {
+    let lua = Lua::new_with(StdLib::NONE, LuaOptions::default()).map_err(|e| e.to_string())?;
+    lua.load(lua_source).exec().map_err(|e| e.to_string())?;
+    let Ok(Value::Table(db)) = lua.globals().get::<Value>("GoldCapDB") else { return Ok(None) };
+    let Ok(Value::Table(store)) = db.get::<Value>("holdings") else { return Ok(None) };
+    if opt_exact_int(&store, "v") != Some(1) {
+        return Ok(None);
+    }
+
+    let mut readings = Vec::new();
+    for (name, character) in named_tables(&store, "chars") {
+        let region = opt_string(&character, "region");
+        for place in CHARACTER_PLACES {
+            if let Ok(Value::Table(t)) = character.get::<Value>(place) {
+                readings.extend(place_reading(&t, &name, place, region.clone()));
+            }
+        }
+    }
+    // `warband = { [region] = P }`: one warband bank per region, its region the key.
+    if let Ok(Value::Table(banks)) = store.get::<Value>("warband") {
+        for (region, t) in banks.pairs::<String, Table>().flatten() {
+            readings.extend(place_reading(&t, "warband", "warband", Some(region)));
+        }
+    }
+    for (name, guild) in named_tables(&store, "guilds") {
+        readings.extend(guild_reading(&guild, &name));
+    }
+    readings.sort_by(|a, b| (&a.holder, &a.place, &a.region).cmp(&(&b.holder, &b.place, &b.region)));
+
+    let mut sends: Vec<MailSend> = match store.get::<Value>("sends") {
+        Ok(Value::Table(list)) => list.sequence_values::<Table>().flatten().filter_map(|t| mail_send(&t)).collect(),
+        _ => Vec::new(),
+    };
+    sends.sort_by(|a, b| (a.at, &a.from, &a.to).cmp(&(b.at, &b.from, &b.to)));
+
+    Ok(Some(Holdings { readings, sends, client: read_client(&db) }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const HOLDINGS_FILE: &str = include_str!("../tests/fixtures/GoldCap-holdings.lua");
+
+    #[test]
+    fn holdings_flatten_places_warband_and_guild() {
+        let h = parse_holdings(HOLDINGS_FILE).unwrap().expect("a holdings section");
+        let keys: Vec<(&str, &str)> = h.readings.iter().map(|r| (r.holder.as_str(), r.place.as_str())).collect();
+        assert_eq!(
+            keys,
+            vec![
+                ("Aiyana-Dentarg", "auctions"),
+                ("Aiyana-Dentarg", "bags"),
+                ("Aiyana-Dentarg", "bank"),
+                ("Aiyana-Dentarg", "mail"),
+                ("Bjorn-Dentarg", "auctions"),
+                ("Bjorn-Dentarg", "bags"),
+                ("Bjorn-Dentarg", "bank"),
+                ("Bjorn-Dentarg", "mail"),
+                ("Goldmakers-Dentarg", "guild"),
+                ("warband", "warband"),
+            ]
+        );
+        let bags = &h.readings[1];
+        assert_eq!(bags.region.as_deref(), Some("eu"));
+        assert_eq!((bags.read_at, bags.full), (1794600000, true));
+        assert_eq!(bags.items, vec![(2589, 40), (190320, 12)]);
+        assert!(h.readings[0].items.is_empty(), "an empty place is a reading too");
+
+        let guild = &h.readings[8];
+        assert_eq!(guild.items, vec![(2589, 150), (7676, 1)], "summed over its tabs");
+        assert_eq!((guild.read_at, guild.full), (1794580000, false), "its oldest tab's time");
+        // The addon keys the warband bank by region; the row carries that region.
+        assert_eq!(
+            serde_json::to_value(&h.readings[9]).unwrap(),
+            serde_json::json!({ "holder": "warband", "place": "warband", "region": "eu", "readAt": 1794599000, "full": true, "items": [[2589, 60], [190320, 1000]] })
+        );
+
+        assert_eq!(h.sends.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&h.sends[0]).unwrap(),
+            serde_json::json!({ "from": "Aiyana-Dentarg", "to": "Bjorn-Dentarg", "region": "eu", "at": 1794597000, "items": [[190320, 20]] })
+        );
+        assert_eq!(
+            serde_json::to_value(bags).unwrap(),
+            serde_json::json!({ "holder": "Aiyana-Dentarg", "place": "bags", "region": "eu", "readAt": 1794600000, "full": true, "items": [[2589, 40], [190320, 12]] })
+        );
+        assert!(h.client.unwrap().is_retail());
+    }
+
+    #[test]
+    fn a_reading_with_one_bad_item_is_dropped_whole() {
+        for bad in ["[190320] = 0", "[190320] = 1.5", "[190320] = \"x\"", "[0] = 4", "[\"x\"] = 4", "[190320] = 2147483648"] {
+            let src = HOLDINGS_FILE.replacen("[190320] = 12", bad, 1);
+            let h = parse_holdings(&src).unwrap().unwrap();
+            assert_eq!(h.readings.len(), 9, "{bad}");
+            assert!(!h.readings.iter().any(|r| r.holder == "Aiyana-Dentarg" && r.place == "bags"), "{bad}");
+        }
+        // One bad tab drops the whole guild; one bad item the warband of its region; one bad
+        // attachment the whole send.
+        let src = HOLDINGS_FILE.replacen("[7676] = 1,", "[7676] = -1,", 1);
+        assert_ne!(src, HOLDINGS_FILE);
+        assert!(!parse_holdings(&src).unwrap().unwrap().readings.iter().any(|r| r.place == "guild"));
+        let src = HOLDINGS_FILE.replacen("[2589] = 60,", "[2589] = 0,", 1);
+        assert_ne!(src, HOLDINGS_FILE);
+        assert!(!parse_holdings(&src).unwrap().unwrap().readings.iter().any(|r| r.place == "warband"));
+        let src = HOLDINGS_FILE.replacen("[190320] = 20,", "[190320] = 0,", 1);
+        assert_ne!(src, HOLDINGS_FILE);
+        assert!(parse_holdings(&src).unwrap().unwrap().sends.is_empty());
+    }
+
+    #[test]
+    fn no_holdings_section_is_none() {
+        assert_eq!(parse_holdings(REAL_FILE).unwrap(), None);
+        assert_eq!(parse_holdings("SomethingElse = {}").unwrap(), None);
+        assert!(parse_holdings("GoldCapDB = {{{").is_err());
+    }
+
+    #[test]
+    fn a_newer_store_is_none() {
+        assert_eq!(parse_holdings(&HOLDINGS_FILE.replacen("[\"v\"] = 1,", "[\"v\"] = 2,", 1)).unwrap(), None);
+        assert_eq!(parse_holdings(&HOLDINGS_FILE.replacen("[\"v\"] = 1,", "", 1)).unwrap(), None);
+    }
 
     /// A real SavedVariables file written by the live game, with the character
     /// name and balances swapped out. Structure — key order, nesting, the

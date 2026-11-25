@@ -4,6 +4,12 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
+## 1.25.0 (2026-11-25)
+
+- The Companion now sends goldcap.gg what your characters hold, so stock you no
+  longer have leaves your ledger by itself. Needs the matching addon release;
+  an older addon sends nothing new.
+
 ## 1.24.0 (2026-11-23)
 
 - WoW: Forever: your own auctions now go up to goldcap.gg, for My auctions on the site and its alerts when one is undercut, sold or expired. They are sent after you log out or type /reload, when the game saves them.

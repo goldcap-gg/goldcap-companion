@@ -510,6 +510,13 @@ pub struct ForeverState {
     /// SavedVariables path → the file's (mtime, length) when every auction in it had been sent.
     #[serde(default)]
     pub owned_lots_stamps: BTreeMap<String, (i64, u64)>,
+    /// SavedVariables path → the holdings goldcap.gg has taken from that file: each place's readAt
+    /// and the newest send time. Only places still in the file are kept.
+    #[serde(default)]
+    pub holdings_sent: BTreeMap<String, crate::holdings::HoldingsSent>,
+    /// SavedVariables path → the file's (mtime, length) when all its holdings had been sent.
+    #[serde(default)]
+    pub holdings_stamps: BTreeMap<String, (i64, u64)>,
     /// SavedVariables path → the fold `at` the site has had its say about.
     pub sent: BTreeMap<String, i64>,
     /// SavedVariables path → the `at` of the skipped fold already logged, so the log says why
@@ -946,6 +953,33 @@ pub async fn sync_forever_at_root(
                     crate::forever_runs::PurchasePass::Complete => {
                         if let Some(s) = stamp {
                             state.owned_lots_stamps.insert(file_key, s);
+                        }
+                    }
+                    crate::forever_runs::PurchasePass::Incomplete => {}
+                    crate::forever_runs::PurchasePass::Unauthorized => {
+                        state.installs.entry(key.clone()).or_default().unauthorized = true;
+                        break;
+                    }
+                }
+            }
+        }
+        // What the characters hold, after the ledger, to the Forever holdings route.
+        if !token.is_empty() && !state.installs.get(&key).is_some_and(|e| e.unauthorized) {
+            for file in &game.saved_vars {
+                let file_key = file.to_string_lossy().into_owned();
+                let stamp = file_stamp(file);
+                if stamp.is_some() && state.holdings_stamps.get(&file_key).copied() == stamp {
+                    continue;
+                }
+                let mut sent = state.holdings_sent.remove(&file_key).unwrap_or_default();
+                let pass = crate::forever_holdings::send_holdings(client, base, &token, file, &mut sent, logger).await;
+                if sent != crate::holdings::HoldingsSent::default() {
+                    state.holdings_sent.insert(file_key.clone(), sent);
+                }
+                match pass {
+                    crate::forever_runs::PurchasePass::Complete => {
+                        if let Some(s) = stamp {
+                            state.holdings_stamps.insert(file_key, s);
                         }
                     }
                     crate::forever_runs::PurchasePass::Incomplete => {}
@@ -1941,6 +1975,18 @@ pub(crate) mod tests {
         let text = serde_json::to_string(&new).unwrap();
         assert_eq!(serde_json::from_str::<ForeverState>(&text).unwrap(), new);
         assert!(text.contains(r#""owned_lots_sent":{"/a":["owned|101|1794653802|0"]}"#), "{text}");
+
+        // And for the holdings.
+        assert!(loaded.holdings_sent.is_empty() && loaded.holdings_stamps.is_empty());
+        let readings = [("Alice-Realm|bags".to_string(), 1794600000)].into();
+        new.holdings_sent.insert("/a".into(), crate::holdings::HoldingsSent { readings, sends_at: 1794597000 });
+        new.holdings_stamps.insert("/a".into(), (7, 42));
+        let text = serde_json::to_string(&new).unwrap();
+        assert_eq!(serde_json::from_str::<ForeverState>(&text).unwrap(), new);
+        assert!(text.contains(r#""holdings_sent":{"/a":{"readings":{"Alice-Realm|bags":1794600000},"sends_at":1794597000}}"#), "{text}");
+        assert!(text.contains(r#""holdings_stamps":{"/a":[7,42]}"#), "{text}");
+        let older: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(older.get("holdings_sent").is_some(), "unknown keys are ignored by older builds");
     }
 
     #[tokio::test]
@@ -1966,6 +2012,36 @@ pub(crate) mod tests {
         // Same file next tick: not re-read, not re-sent (nothing listens on port 9 anyway).
         let again = sync_forever_at_root(&crate::sync::build_client(), "http://127.0.0.1:9", &root, &config, &logger, &root.join("s.json"), &store, 2).await;
         assert_eq!(again.owned_lots_sent.get(&key).map(|s| s.len()), Some(1));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn forever_holdings_are_retried_after_a_404_and_stamped_after_a_200() {
+        let root = machine("forever-holdings");
+        let lua = include_str!("../tests/fixtures/GoldCap-holdings.lua")
+            .replacen("[\"interface\"] = 120100,", "[\"interface\"] = 16001, [\"regionId\"] = 3,", 1)
+            .replacen("12.1.0.69933", "1.60.1.70938", 1);
+        let sv = put(&root, "_forever_", &lua);
+        let key = sv.to_string_lossy().into_owned();
+        let config = crate::config::Config { companion_token: "tok".into(), ..crate::config::Config::default() };
+        let logger = crate::logging::Logger::new(&root.join("logs")).unwrap();
+        let store = std::sync::Mutex::new(std::collections::HashMap::new());
+        let runs = r#"{"v":3,"generatedAt":"2026-10-01T10:00:00.000Z","plan":"free","freeLines":5,"game":"forever","runs":[]}"#;
+
+        // An older site: nothing marked, so the unchanged file is read again on the next tick.
+        let (base, seen) = serve_forever(vec![answer("404 Not Found", "{}"), answer("200 OK", runs)]);
+        let state = sync_forever_at_root(&crate::sync::build_client(), &base, &root, &config, &logger, &root.join("s.json"), &store, 1).await;
+        let first: Vec<String> = seen.try_iter().collect();
+        assert!(first[0].starts_with("POST /v1/forever/ledger/holdings "), "{first:?}");
+        assert!(state.holdings_sent.is_empty() && state.holdings_stamps.is_empty());
+
+        let (base, seen) = serve_forever(vec![answer("200 OK", r#"{"accepted":10,"skipped":0,"sends":1}"#), answer("200 OK", runs)]);
+        let state = sync_forever_at_root(&crate::sync::build_client(), &base, &root, &config, &logger, &root.join("s.json"), &store, 2).await;
+        let second: Vec<String> = seen.try_iter().collect();
+        assert!(second[0].starts_with("POST /v1/forever/ledger/holdings "), "{second:?}");
+        assert!(!second.iter().any(|r| r.starts_with("POST /v1/ledger/holdings")), "{second:?}");
+        assert_eq!(state.holdings_sent[&key].readings.len(), 10);
+        assert!(state.holdings_stamps.contains_key(&key));
         std::fs::remove_dir_all(&root).ok();
     }
 
