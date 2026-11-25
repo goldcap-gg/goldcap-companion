@@ -4,7 +4,7 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
-## 1.26.0 (unreleased)
+## 1.26.0 (2026-11-25)
 
 - WoW: Forever: goldcap.gg now learns where your own auctions stand in line from what the addon saw on the auction house: behind cheaper listings, tied with others at your price, or first in line. Needs the matching addon release.
 
