@@ -904,6 +904,7 @@ mod tests {
             region: "eu".into(),
             seen_at,
             cancelled_at,
+            rivals: None,
         }
     }
 
@@ -913,6 +914,19 @@ mod tests {
         assert_eq!(a, "owned|1|1000|0");
         assert_ne!(a, owned_lot_fingerprint(&owned_lot(1, 1100, None)));
         assert_ne!(a, owned_lot_fingerprint(&owned_lot(1, 1000, Some(1050))));
+    }
+
+    #[test]
+    fn a_retail_lot_sends_no_rival_facts_and_keeps_its_print() {
+        let lot = OwnedLot {
+            rivals: Some(crate::savedvars::LotRivals { at: 1001, unit: Some(90), ahead: 1, tied: 2 }),
+            ..owned_lot(1, 1000, None)
+        };
+        let json = serde_json::to_value(&lot).unwrap();
+        for key in ["rivalAt", "rivalUnit", "rivalAhead", "rivalTied", "rivals"] {
+            assert!(json.get(key).is_none(), "{key}");
+        }
+        assert_eq!(owned_lot_fingerprint(&lot), "owned|1|1000|0");
     }
 
     #[test]

@@ -1,0 +1,68 @@
+-- Test fixture: a WoW: Forever save as addon 0.39.0 writes it. Lots carry the rival facts the
+-- addon read from the auction house (all four, all but rivalUnit, none), and a mail sale row
+-- carries its itemID. Built on the shape of GoldCap-forever-lots.lua; the character is made up.
+GoldCapDB = {
+["client"] = {
+["regionId"] = 3,
+["build"] = "1.60.1.70938",
+["interface"] = 16001,
+},
+["ledger"] = {
+{
+["key"] = "mail-sale-1794912000-4461",
+["kind"] = "sale",
+["source"] = "mail",
+["itemID"] = 4461,
+["itemName"] = "Raptor Hide",
+["qty"] = 20,
+["total"] = 4420,
+["cut"] = 221,
+["deposit"] = 60,
+["at"] = 1794912000,
+["char"] = "Tester-CAMWOW EU5 Realm 7 PvE",
+["region"] = "eu",
+},
+},
+["ownedLots"] = {
+{
+["isCommodity"] = true,
+["region"] = "eu",
+["seenAt"] = 1794912889,
+["char"] = "Tester-CAMWOW EU5 Realm 7 PvE",
+["quantity"] = 11,
+["itemID"] = 248693,
+["unitPrice"] = 446,
+["expiresAt"] = 1794928118,
+["auctionID"] = 133284802,
+["rivalAt"] = 1794912901,
+["rivalUnit"] = 440,
+["rivalAhead"] = 7,
+["rivalTied"] = 3,
+},
+{
+["isCommodity"] = false,
+["region"] = "eu",
+["seenAt"] = 1794912889,
+["char"] = "Tester-CAMWOW EU5 Realm 7 PvE",
+["quantity"] = 1,
+["itemID"] = 4564,
+["unitPrice"] = 900,
+["expiresAt"] = 1794929880,
+["auctionID"] = 134181993,
+["rivalAt"] = 1794912950,
+["rivalAhead"] = 0,
+["rivalTied"] = 0,
+},
+{
+["isCommodity"] = true,
+["region"] = "eu",
+["seenAt"] = 1794912889,
+["char"] = "Tester-CAMWOW EU5 Realm 7 PvE",
+["quantity"] = 10,
+["itemID"] = 17031,
+["unitPrice"] = 1043,
+["expiresAt"] = 1794999282,
+["auctionID"] = 134961330,
+},
+},
+}

@@ -319,6 +319,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_mail_sale_from_addon_0_39_goes_up_with_its_item_id() {
+        let dir = std::env::temp_dir().join(format!("goldcap-forever-ledger-sale-id-{}", std::process::id()));
+        let file = write(&dir, include_str!("../tests/fixtures/GoldCap-forever-rivals.lua"));
+        let logger = crate::logging::Logger::new(&dir.join("logs")).unwrap();
+        let mut sent = BTreeSet::new();
+        let (base, seen) = serve_once(answer("200 OK", "{}"));
+        send_ledger(&crate::sync::build_client(), &base, "tok", &file, &mut sent, &logger).await;
+        let rows = body_of(&seen.recv().unwrap());
+        assert_eq!(rows["entries"][0]["kind"], "sale");
+        assert_eq!(rows["entries"][0]["itemID"], 4461);
+        assert_eq!(rows["entries"][0]["itemName"], "Raptor Hide");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
     async fn run_code_rides_with_a_buy_tab_row() {
         let dir = std::env::temp_dir().join(format!("goldcap-forever-ledger-run-{}", std::process::id()));
         let lua = r#"GoldCapDB = { client = { interface = 16001, build = "1.60.1.70790", regionId = 3 }, ledger = {

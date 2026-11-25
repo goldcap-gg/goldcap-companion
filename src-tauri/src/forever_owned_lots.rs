@@ -3,18 +3,23 @@
 //! the retail route (`/v1/owned-lots`, which refuses a Forever passport with 409, and the two
 //! games' item ids overlap).
 //!
-//! "Already sent" works like the retail upload: a per-file set of `upload::owned_lot_fingerprint`
-//! prints (auction id, seenAt, cancelledAt), so a lot the addon saw again, or saw cancelled, goes
-//! up again. The site reads every character's newest seenAt in a batch as its roster time, so a
-//! lot left out of a later roster is marked gone there.
+//! "Already sent" works like the retail upload: a per-file set of prints (auction id, seenAt,
+//! cancelledAt, and the rivalAt of the lot's rival facts when it has them), so a lot the addon saw
+//! again, saw cancelled, or saw other sellers' listings beside again, goes up again. The site reads
+//! every character's newest seenAt in a batch as its roster time, so a lot left out of a later
+//! roster is marked gone there.
 //!
 //! Each lot carries its character's faction when the same file knows it (the newest of the
 //! character's gold readings and ledger rows that names one), so the site can match the lot to its
 //! market even before it holds a reading of that character. Never on retail's lot body.
+//!
+//! Each lot also carries its rival facts (`rivalAt`, `rivalUnit`, `rivalAhead`, `rivalTied`) when
+//! the addon read the item's listings while the lot was up, so the site can say where the lot
+//! stands in line. Also never on retail's lot body.
 
 use crate::forever_ledger::PassportBody;
 use crate::forever_runs::PurchasePass;
-use crate::savedvars::{ClientPassport, LedgerData, OwnedLot};
+use crate::savedvars::{ClientPassport, LedgerData, LotRivals, OwnedLot};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -35,11 +40,14 @@ struct UploadBody<'a> {
     lots: Vec<WireLot>,
 }
 
-/// Retail's lot plus the character's faction, only when the file names one.
+/// Retail's lot plus the character's faction, only when the file names one, and the lot's rival
+/// facts, only when the addon read them.
 #[derive(Serialize)]
 struct WireLot {
     #[serde(flatten)]
     lot: OwnedLot,
+    #[serde(flatten)]
+    rivals: Option<LotRivals>,
     #[serde(skip_serializing_if = "Option::is_none")]
     faction: Option<String>,
 }
@@ -66,7 +74,8 @@ fn readable_character(c: &str) -> bool {
 }
 
 /// The lot as the site will take it, or None when the site would refuse it (and with it the batch).
-/// A time that is not a positive number is left out rather than costing the lot.
+/// A time that is not a positive number is left out rather than costing the lot, and so are rival
+/// facts out of bounds: all four when their time or a count is, only rivalUnit when the price is.
 fn wire_lot(l: &OwnedLot) -> Option<OwnedLot> {
     let ok = (1..=MAX_SAFE_ID).contains(&l.auction_id)
         && (1..=MAX_ITEM_ID).contains(&l.item_id)
@@ -77,8 +86,27 @@ fn wire_lot(l: &OwnedLot) -> Option<OwnedLot> {
     ok.then(|| OwnedLot {
         expires_at: l.expires_at.filter(|t| *t > 0),
         cancelled_at: l.cancelled_at.filter(|t| *t > 0),
+        rivals: l.rivals.as_ref().filter(|r| readable_rivals(r)).map(|r| LotRivals {
+            unit: r.unit.filter(|u| (1..=MAX_UNIT_PRICE).contains(u)),
+            ..r.clone()
+        }),
         ..l.clone()
     })
+}
+
+fn readable_rivals(r: &LotRivals) -> bool {
+    (1..=MAX_SAFE_ID).contains(&r.at) && (0..=MAX_SAFE_ID).contains(&r.ahead) && (0..=MAX_SAFE_ID).contains(&r.tied)
+}
+
+/// Retail's print, plus the time of the lot's rival reading when it has one: a new reading is a new
+/// fact for the site even when seenAt has not moved. A lot with no reading keeps retail's print, so
+/// the prints kept before rival facts existed still count as sent.
+fn lot_print(l: &OwnedLot) -> String {
+    let print = crate::upload::owned_lot_fingerprint(l);
+    match &l.rivals {
+        Some(r) => format!("{print}|rival{}", r.at),
+        None => print,
+    }
 }
 
 /// What goes up from one file: one row per auction id (the newest seenAt; the site refuses a batch
@@ -95,7 +123,7 @@ fn pending_lots<'a>(lots: &'a [OwnedLot], sent: &BTreeSet<String>) -> Vec<&'a Ow
         }
     }
     let mut out: Vec<&OwnedLot> =
-        by_id.into_values().filter(|l| !sent.contains(&crate::upload::owned_lot_fingerprint(l))).collect();
+        by_id.into_values().filter(|l| !sent.contains(&lot_print(l))).collect();
     out.sort_by_key(|l| (l.seen_at, l.auction_id));
     out
 }
@@ -127,7 +155,7 @@ pub async fn upload_lots(
         lots: lots
             .iter()
             .filter_map(|l| wire_lot(l))
-            .map(|lot| WireLot { faction: factions.get(&lot.character).cloned(), lot })
+            .map(|lot| WireLot { faction: factions.get(&lot.character).cloned(), rivals: lot.rivals.clone(), lot })
             .collect(),
     };
     let sent = client
@@ -190,7 +218,7 @@ pub async fn send_owned_lots(
     else {
         return PurchasePass::Complete;
     };
-    let present: BTreeSet<String> = data.owned_lots.iter().map(crate::upload::owned_lot_fingerprint).collect();
+    let present: BTreeSet<String> = data.owned_lots.iter().map(lot_print).collect();
     sent.retain(|p| present.contains(p));
 
     let pending = pending_lots(&data.owned_lots, sent);
@@ -199,7 +227,7 @@ pub async fn send_owned_lots(
     for batch in pending.chunks(MAX_BATCH) {
         match upload_lots(client, base, token, passport, region_id, batch, &factions).await {
             LotsOutcome::Taken => {
-                sent.extend(batch.iter().map(|l| crate::upload::owned_lot_fingerprint(l)));
+                sent.extend(batch.iter().map(|l| lot_print(l)));
                 taken += batch.len();
             }
             LotsOutcome::Early => {
@@ -440,6 +468,81 @@ mod tests {
         let factions: Vec<(i64, Option<&str>)> =
             body["lots"].as_array().unwrap().iter().map(|l| (l["auctionID"].as_i64().unwrap(), l.get("faction").and_then(|f| f.as_str()))).collect();
         assert_eq!(factions, vec![(101, Some("Horde")), (102, Some("Horde")), (103, None)]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    const RIVALS: &str = include_str!("../tests/fixtures/GoldCap-forever-rivals.lua");
+
+    #[tokio::test]
+    async fn rival_facts_go_up_under_the_addons_names_and_absent_stays_absent() {
+        let (dir, file, logger) = setup("rivals", RIVALS);
+        let mut sent = BTreeSet::new();
+        let (base, seen) = serve_once(answer("200 OK", "{}"));
+        send_owned_lots(&crate::sync::build_client(), &base, "tok", &file, &mut sent, &logger).await;
+        let body = body_of(&seen.recv().unwrap());
+        let ch = "Tester-CAMWOW EU5 Realm 7 PvE";
+        assert_eq!(
+            body["lots"],
+            serde_json::json!([
+                { "auctionID": 133284802, "itemID": 248693, "isCommodity": true, "quantity": 11, "unitPrice": 446, "expiresAt": 1794928118,
+                  "char": ch, "seenAt": 1794912889, "rivalAt": 1794912901, "rivalUnit": 440, "rivalAhead": 7, "rivalTied": 3 },
+                { "auctionID": 134181993, "itemID": 4564, "isCommodity": false, "quantity": 1, "unitPrice": 900, "expiresAt": 1794929880,
+                  "char": ch, "seenAt": 1794912889, "rivalAt": 1794912950, "rivalAhead": 0, "rivalTied": 0 },
+                { "auctionID": 134961330, "itemID": 17031, "isCommodity": true, "quantity": 10, "unitPrice": 1043, "expiresAt": 1794999282,
+                  "char": ch, "seenAt": 1794912889 }
+            ])
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_lot_goes_again_when_only_its_rival_reading_changed() {
+        let (dir, file, logger) = setup("rival-again", RIVALS);
+        let mut sent = BTreeSet::new();
+        let (base, _seen) = serve_once(answer("200 OK", "{}"));
+        send_owned_lots(&crate::sync::build_client(), &base, "tok", &file, &mut sent, &logger).await;
+        assert_eq!(sent.len(), 3);
+
+        // A new reading of the same item: seenAt has not moved, rivalAt has.
+        write(&dir, &RIVALS.replacen(r#"["rivalAt"] = 1794912901,"#, r#"["rivalAt"] = 1794913500,"#, 1));
+        let (base, seen) = serve_once(answer("200 OK", "{}"));
+        send_owned_lots(&crate::sync::build_client(), &base, "tok", &file, &mut sent, &logger).await;
+        let lots = body_of(&seen.recv().unwrap())["lots"].clone();
+        assert_eq!(lots.as_array().unwrap().len(), 1);
+        assert_eq!(lots[0]["auctionID"], 133284802);
+        assert_eq!(lots[0]["rivalAt"], 1794913500);
+        assert_eq!(sent.len(), 3, "the old print is forgotten, the new one kept");
+
+        // Nothing new after that: no request at all (nothing listens on port 9).
+        let pass = send_owned_lots(&crate::sync::build_client(), "http://127.0.0.1:9", "tok", &file, &mut sent, &logger).await;
+        assert!(matches!(pass, PurchasePass::Complete));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_lot_without_a_rival_reading_keeps_the_print_it_was_sent_under() {
+        let data = crate::savedvars::parse_saved_variables(RIVALS).unwrap();
+        let plain = &data.owned_lots[2];
+        assert_eq!(lot_print(plain), crate::upload::owned_lot_fingerprint(plain));
+        assert_eq!(lot_print(&data.owned_lots[0]), "owned|133284802|1794912889|0|rival1794912901");
+    }
+
+    #[tokio::test]
+    async fn a_rival_fact_the_site_would_refuse_is_left_out_not_the_lot() {
+        let lua = FILE
+            .replacen("seenAt = 1794653802, expiresAt = 1794680006", "seenAt = 1794653802, expiresAt = 1794680006, rivalAt = 0, rivalAhead = 1, rivalTied = 0", 1)
+            .replacen("seenAt = 1794667452", "seenAt = 1794667452, rivalAt = 1794667460, rivalUnit = 0, rivalAhead = 2, rivalTied = 1", 1);
+        let (dir, file, logger) = setup("rival-bad", &lua);
+        let mut sent = BTreeSet::new();
+        let (base, seen) = serve_once(answer("200 OK", "{}"));
+        send_owned_lots(&crate::sync::build_client(), &base, "tok", &file, &mut sent, &logger).await;
+        let body = body_of(&seen.recv().unwrap());
+        let lots = body["lots"].as_array().unwrap();
+        assert_eq!(lots.len(), 3);
+        assert!(lots[0].get("rivalAt").is_none() && lots[0].get("rivalAhead").is_none(), "no time: none of the four");
+        assert_eq!(lots[2]["rivalAt"], 1794667460);
+        assert!(lots[2].get("rivalUnit").is_none(), "a zero price is left out, the reading kept");
+        assert_eq!((lots[2]["rivalAhead"].as_i64(), lots[2]["rivalTied"].as_i64()), (Some(2), Some(1)));
         std::fs::remove_dir_all(&dir).ok();
     }
 
