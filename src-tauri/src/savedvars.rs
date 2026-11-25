@@ -112,6 +112,34 @@ pub struct OwnedLot {
     pub seen_at: i64,
     #[serde(rename = "cancelledAt", skip_serializing_if = "Option::is_none")]
     pub cancelled_at: Option<i64>,
+    /// Not part of the retail upload body; the Forever owned-lots upload sends it in its own wire type.
+    #[serde(skip_serializing)]
+    pub rivals: Option<LotRivals>,
+}
+
+/// What the addon last read of other sellers' listings of the lot's item (addon 0.39.0): when,
+/// their cheapest unit price (none when only the player's own listings were there), and their
+/// units priced below and exactly at the lot's own unit price.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct LotRivals {
+    #[serde(rename = "rivalAt")]
+    pub at: i64,
+    #[serde(rename = "rivalUnit", skip_serializing_if = "Option::is_none")]
+    pub unit: Option<i64>,
+    #[serde(rename = "rivalAhead")]
+    pub ahead: i64,
+    #[serde(rename = "rivalTied")]
+    pub tied: i64,
+}
+
+/// A reading needs its time and both counts; a part one cannot do without leaves out all of it.
+fn lot_rivals(row: &Table) -> Option<LotRivals> {
+    Some(LotRivals {
+        at: opt_exact_int(row, "rivalAt")?,
+        unit: opt_exact_int(row, "rivalUnit"),
+        ahead: opt_exact_int(row, "rivalAhead")?,
+        tied: opt_exact_int(row, "rivalTied")?,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -508,6 +536,7 @@ pub fn parse_saved_variables(lua_source: &str) -> Result<LedgerData, String> {
                 region,
                 seen_at,
                 cancelled_at: opt_exact_int(&row, "cancelledAt"),
+                rivals: lot_rivals(&row),
             });
         }
     }
@@ -1397,6 +1426,47 @@ GoldCapDB = { ["ledger"] = {
         let data = parse_saved_variables(src).unwrap();
         assert_eq!(data.owned_lots.len(), 1);
         assert_eq!(data.owned_lots[0].auction_id, 5);
+    }
+
+    const RIVALS_FILE: &str = include_str!("../tests/fixtures/GoldCap-forever-rivals.lua");
+
+    #[test]
+    fn a_lot_reads_its_rival_facts_and_a_lot_without_them_reads_none() {
+        let data = parse_saved_variables(RIVALS_FILE).unwrap();
+        let rivals: Vec<Option<LotRivals>> = data.owned_lots.iter().map(|l| l.rivals.clone()).collect();
+        assert_eq!(
+            rivals,
+            vec![
+                Some(LotRivals { at: 1794912901, unit: Some(440), ahead: 7, tied: 3 }),
+                Some(LotRivals { at: 1794912950, unit: None, ahead: 0, tied: 0 }),
+                None,
+            ]
+        );
+    }
+
+    #[test]
+    fn rival_facts_need_a_time_and_both_counts() {
+        let src = r#"GoldCapDB = { ownedLots = {
+            { auctionID = 1, itemID = 42, quantity = 1, unitPrice = 100, char = "A-R", region = "eu", seenAt = 1000,
+              rivalUnit = 90, rivalAhead = 1, rivalTied = 0 },
+            { auctionID = 2, itemID = 42, quantity = 1, unitPrice = 100, char = "A-R", region = "eu", seenAt = 1000,
+              rivalAt = 1001, rivalTied = 0 },
+            { auctionID = 3, itemID = 42, quantity = 1, unitPrice = 100, char = "A-R", region = "eu", seenAt = 1000,
+              rivalAt = 1001, rivalAhead = 1.5, rivalTied = 0 },
+        } }"#;
+        let data = parse_saved_variables(src).unwrap();
+        assert_eq!(data.owned_lots.len(), 3, "the lot stays either way");
+        assert!(data.owned_lots.iter().all(|l| l.rivals.is_none()));
+    }
+
+    #[test]
+    fn a_sale_row_with_an_item_id_keeps_it_on_the_retail_body() {
+        let data = parse_saved_variables(RIVALS_FILE).unwrap();
+        let sale = data.entries.iter().find(|e| e.kind == "sale").unwrap();
+        assert_eq!(sale.item_id, Some(4461));
+        let json = serde_json::to_value(sale).unwrap();
+        assert_eq!(json["itemID"], 4461);
+        assert_eq!(json["itemName"], "Raptor Hide");
     }
 
     #[test]

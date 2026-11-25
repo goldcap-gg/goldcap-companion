@@ -503,7 +503,7 @@ pub struct ForeverState {
     /// been sent.
     #[serde(default)]
     pub sources_stamps: BTreeMap<String, (i64, u64)>,
-    /// SavedVariables path → the prints (`upload::owned_lot_fingerprint`) of the auctions
+    /// SavedVariables path → the prints (`forever_owned_lots::lot_print`) of the auctions
     /// goldcap.gg has taken from that file. Only prints still in the file are kept.
     #[serde(default)]
     pub owned_lots_sent: BTreeMap<String, std::collections::BTreeSet<String>>,
