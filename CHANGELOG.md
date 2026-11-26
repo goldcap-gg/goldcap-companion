@@ -4,6 +4,19 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
+## Unreleased
+
+- Retail: the Companion no longer assumes EU. It takes your region from the game's own
+  settings, and when those do not say, from the realm you played last. If that realm
+  name exists in more than one region, setup asks you instead of guessing. Korean and
+  Taiwanese realms are told apart by the realm.
+- Retail: if the Companion is set to one region but your game files point at another,
+  the status window says so, with a "Switch to" button. Nothing changes until you
+  press it.
+- WoW: Forever: every player's prices now come back without pairing, after your first
+  auction house scan. Pairing also shares your own scans with goldcap.gg. Until
+  goldcap.gg knows your auction house, nothing changes.
+
 ## 1.26.0 (2026-11-25)
 
 - WoW: Forever: goldcap.gg now learns where your own auctions stand in line from what the addon saw on the auction house: behind cheaper listings, tied with others at your price, or first in line. Needs the matching addon release.

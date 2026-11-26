@@ -37,7 +37,8 @@ The complete list. Every address is ours, and nothing else is contacted.
 | --- | --- |
 | `GET api.goldcap.gg/v1/addon/import-string` | the price string for your realm |
 | `GET api.goldcap.gg/v1/addon/region-data` | region-wide market facts for every commodity, written beside the price string |
-| `GET api.goldcap.gg/v1/addon/realms`, `/v1/addon/resolve-realm` | realm names |
+| `GET api.goldcap.gg/v1/addon/realms`, `/v1/addon/resolve-realm` | realm names, and which region the realm you played last is on when your game's `Config.wtf` does not say |
+| `GET api.goldcap.gg/v1/addon/forever-market` | WoW: Forever only, while no scan of yours has gone up: which auction house your newest scan is from (region, server number, realm and faction from that scan, nothing else), so every player's prices come back without pairing |
 | `GET api.goldcap.gg/v1/forever/addon-data` | WoW: Forever only: every player's prices for your auction house |
 | `POST /v1/forever/scans` | WoW: Forever only: your auction house scan (realm, faction, game build and the price of each item, no names) |
 | `POST /v1/forever/run-purchases` | WoW: Forever only: what you bought in the addon's BUY tab from a list made on goldcap.gg (item, amount, price, time, character), so the list on the site shows what is done |
@@ -87,7 +88,7 @@ that shows tray icons; on GNOME that is the AppIndicator extension. If the file
 does not start and the error mentions FUSE, install `libfuse2` (`libfuse2t64` on
 Ubuntu 24.04 and later).
 
-**WoW: Forever.** If you also play WoW: Forever, the Companion finds that install next to retail. Once paired, after each /reload it sends your Forever auction house scan to goldcap.gg, and what you bought in the BUY tab from a list made on goldcap.gg, so that list shows what is done; never the rest of your ledger. It writes every player's Forever prices into the Forever install's `GoldCap_AppData`. It tells the two games apart by what the addon writes into its own save file, not by folder names. Retail works exactly as before.
+**WoW: Forever.** If you also play WoW: Forever, the Companion finds that install next to retail. After your first auction house scan there it writes every player's Forever prices into the Forever install's `GoldCap_AppData`, paired or not: unpaired, it asks goldcap.gg which auction house that scan is from and sends nothing of the scan itself. Once paired, after each /reload it also sends your Forever auction house scan to goldcap.gg, and what you bought in the BUY tab from a list made on goldcap.gg, so that list shows what is done; never the rest of your ledger. It tells the two games apart by what the addon writes into its own save file, not by folder names. Retail works exactly as before.
 
 ## Checking the file you downloaded
 
