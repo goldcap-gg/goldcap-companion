@@ -346,7 +346,7 @@ export const FIXTURES = {
   },
 
   // The player who scanned the auction house, logged out, and pressed Later at Connect: the scan
-  // sits on disk and goes nowhere until the app is paired.
+  // stays on disk, and goldcap.gg has not named its market yet (or has not been asked).
   "forever-only, not paired, scans on disk": {
     config: {
       region: "eu",
@@ -472,6 +472,53 @@ export const FIXTURES = {
       addon: stage("notConnected", null, "No price file written yet"),
       ledger: stage("notConnected", null, "Not paired, nothing is uploaded"),
     },
+  },
+};
+
+// Unpaired, and goldcap.gg named the market of the scan on disk: everyone's prices come back,
+// the player's own scan stays home.
+{
+  const base = FIXTURES["forever-only, not paired, scans on disk"];
+  FIXTURES["forever-only, not paired, everyone's prices"] = {
+    config: base.config,
+    status: {
+      ...base.status,
+      games: [{
+        folder: "_classic_beta_", game: "forever", lastScanAt: NOW - 900,
+        market: "us-beta-classic-beta-pve-2-horde", realm: "Classic Beta PvE 2", faction: "Horde",
+        crowdItems: 1974, crowdTs: NOW - 600, crowdWrittenAt: NOW - 300,
+      }],
+    },
+  };
+}
+
+// Region: every fixture above is an EU player whose Config.wtf names EU. These are the others.
+const wizardRetail = (game, detectedRegion) => ({
+  ...FIXTURES["unconfigured (wizard)"],
+  game,
+  detectedRegion,
+});
+FIXTURES["wizard: US portal"] = wizardRetail({ region: "us", realmNames: ["Stormrage", "Area 52"] }, "us");
+FIXTURES["wizard: no portal, realm only on US"] = wizardRetail({ region: null, realmNames: ["Area 52"] }, "us");
+FIXTURES["wizard: KR portal, realm on TW"] = wizardRetail({ region: "kr", realmNames: ["Shadowmoon"] }, "tw");
+// Stormrage is a realm name on both US and EU: the wizard asks instead of guessing.
+FIXTURES["wizard: no portal, region unknown"] = wizardRetail({ region: null, realmNames: ["Stormrage"] }, null);
+
+const usConfigured = { ...configured, region: "us", realmSlug: "stormrage", realmAuto: true };
+FIXTURES["retail-only: US status"] = {
+  config: usConfigured,
+  status: { ...FIXTURES["retail-only: status"].status, region: "us", realmSlug: "stormrage" },
+};
+// An install from before region detection: saved EU (the old default), plays on a US-only realm.
+FIXTURES["retail: set to EU, plays on US"] = {
+  config: { ...configured, realmSlug: "", realmAuto: true },
+  detectedRegion: "us",
+  status: {
+    ...FIXTURES["retail-only: status"].status,
+    realmSlug: "",
+    regionHint: "us",
+    prices: stage("broken", null, "Could not reach goldcap.gg", "not configured (realm or WoW path missing)"),
+    addon: stage("notConnected", null, "No price file written yet"),
   },
 };
 

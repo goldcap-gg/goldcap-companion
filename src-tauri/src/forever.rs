@@ -413,10 +413,112 @@ pub async fn upload_fold(client: &reqwest::Client, base: &str, token: &str, up: 
     }
 }
 
+/// What `GET /v1/addon/forever-market` is asked about: the newest fold's own market facts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketKey {
+    pub region: i64,
+    pub server: Option<String>,
+    pub realm: String,
+    pub faction: Option<String>,
+}
+
+impl MarketKey {
+    fn of(fold: &ForeverFold) -> Self {
+        MarketKey { region: fold.region, server: fold.server.clone(), realm: fold.realm.clone(), faction: fold.faction.clone() }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum MarketLookup {
+    Found { market: String, realm: Option<String> },
+    /// 404 `unknown_market`, 400 `bad_request` or another answer that would come out the same:
+    /// asked again only when the fold changes or the app starts again.
+    Unknown(String),
+    /// goldcap.gg was not reached, or was briefly unwell (5xx, 429): asked again next tick.
+    Failed(String),
+}
+
+/// Everyone's market for a fold, without a token: `GET {base}/v1/addon/forever-market`.
+pub async fn lookup_market(client: &reqwest::Client, base: &str, key: &MarketKey) -> MarketLookup {
+    let mut query = vec![("region", key.region.to_string())];
+    query.extend(key.server.clone().map(|v| ("server", v)));
+    query.extend(key.faction.clone().map(|v| ("faction", v)));
+    if !key.realm.is_empty() {
+        query.push(("realm", key.realm.clone()));
+    }
+    let resp = match client.get(format!("{base}/v1/addon/forever-market")).query(&query).send().await {
+        Ok(r) => r,
+        Err(e) => return MarketLookup::Failed(crate::sync::describe_err(&e, crate::sync::CLIENT_TIMEOUT)),
+    };
+    let code = resp.status().as_u16();
+    if code >= 500 || code == 429 {
+        return MarketLookup::Failed(format!("status {code}"));
+    }
+    let body: serde_json::Value = resp.json().await.unwrap_or_default();
+    match (code, body["market"].as_str().filter(|m| !m.is_empty())) {
+        (200, Some(market)) => MarketLookup::Found { market: market.to_string(), realm: answer_realm(&body) },
+        (200, None) => MarketLookup::Unknown("200 without a market".into()),
+        _ => MarketLookup::Unknown(format!("status {code} {}", body["error"].as_str().unwrap_or(""))),
+    }
+}
+
+/// Install dir → the fold key asked this process without a market for it.
+fn unanswered() -> &'static std::sync::Mutex<std::collections::HashMap<String, MarketKey>> {
+    static ASKED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, MarketKey>>> = std::sync::OnceLock::new();
+    ASKED.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// An install with no market from an upload answer (unpaired, or nothing accepted yet) learns it
+/// from its newest fold, so everyone's prices come back without pairing. An upload answer always
+/// wins; a looked-up market is asked for again only when the fold's market facts change, or on
+/// the next app start after goldcap.gg could not name one.
+async fn learn_market(
+    client: &reqwest::Client,
+    base: &str,
+    entry: &mut InstallState,
+    install_key: &str,
+    key: &MarketKey,
+    logger: &crate::logging::Logger,
+) {
+    let from_upload = entry.market.is_some() && entry.market_lookup.is_none();
+    if from_upload || entry.market_lookup.as_ref() == Some(key) {
+        return;
+    }
+    if unanswered().lock().unwrap_or_else(|p| p.into_inner()).get(install_key) == Some(key) {
+        return;
+    }
+    let found = lookup_market(client, base, key).await;
+    if !matches!(found, MarketLookup::Found { .. }) && entry.market_lookup.take().is_some() {
+        // Looked up for another fold (another server or faction): not this one's prices.
+        entry.market = None;
+        entry.realm = None;
+        entry.faction = None;
+    }
+    match found {
+        MarketLookup::Found { market, realm } => {
+            logger.info(&format!("forever market for {install_key}: {market}"));
+            unanswered().lock().unwrap_or_else(|p| p.into_inner()).remove(install_key);
+            entry.realm = realm.or_else(|| Some(key.realm.clone()).filter(|r| !r.is_empty()));
+            entry.market = Some(market);
+            entry.faction = key.faction.clone();
+            entry.market_lookup = Some(key.clone());
+        }
+        MarketLookup::Unknown(why) => {
+            logger.info(&format!("forever market for {install_key}: not known yet ({why})"));
+            unanswered().lock().unwrap_or_else(|p| p.into_inner()).insert(install_key.to_string(), key.clone());
+        }
+        MarketLookup::Failed(why) => logger.error(&format!("forever market for {install_key}: will retry ({why})")),
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct InstallState {
     pub market: Option<String>,
+    /// The fold `market` was looked up for (`learn_market`); `None` when `market` came from an
+    /// upload answer, which always wins, or there is none.
+    pub market_lookup: Option<MarketKey>,
     /// The realm and faction the last *accepted or duplicate* fold named — same rule as
     /// `market` (fix round 1 M7): a quarantined or rejected answer can carry a stale fold's
     /// realm and must not overwrite what a good fold last said. For the Status screen's
@@ -761,6 +863,8 @@ pub async fn sync_forever_at_root(
         // hide another's good ones.
         let mut newest_ok: Option<i64> = None;
         let mut newest_skip: Option<(i64, &'static str)> = None;
+        // The newest good fold's market facts, for `learn_market`.
+        let mut newest_key: Option<(i64, MarketKey)> = None;
         for file in &game.saved_vars {
             let file_key = file.to_string_lossy().into_owned();
             let up = match parse_forever_fold_cached(file, logger) {
@@ -787,6 +891,9 @@ pub async fn sync_forever_at_root(
             };
             interface = interface.max(up.client.interface);
             newest_ok = newest_ok.max(Some(up.fold.at));
+            if newest_key.as_ref().map_or(true, |(at, _)| up.fold.at >= *at) {
+                newest_key = Some((up.fold.at, MarketKey::of(&up.fold)));
+            }
             let entry = state.installs.entry(key.clone()).or_default();
             entry.last_scan_at = entry.last_scan_at.max(Some(up.fold.at));
             if token.is_empty() || state.sent.get(&file_key) == Some(&up.fold.at) {
@@ -848,6 +955,7 @@ pub async fn sync_forever_at_root(
                     entry.sent_items = Some(up.fold.items.len() as u32);
                     if market.is_some() {
                         entry.market = market;
+                        entry.market_lookup = None;
                         entry.realm = realm;
                         entry.faction = up.fold.faction.clone();
                     }
@@ -993,6 +1101,10 @@ pub async fn sync_forever_at_root(
         let skipped = newest_skip.filter(|(at, _)| newest_ok.map_or(true, |ok| *at > ok)).map(|(_, text)| text.to_string());
         if skipped.is_some() || state.installs.contains_key(&key) {
             state.installs.entry(key.clone()).or_default().skipped = skipped;
+        }
+        if let Some((_, fold_key)) = &newest_key {
+            let entry = state.installs.entry(key.clone()).or_default();
+            learn_market(client, base, entry, &key, fold_key, logger).await;
         }
         let market = state.installs.get(&key).and_then(|e| e.market.clone());
         let crowd = match &market {
@@ -1987,6 +2099,14 @@ pub(crate) mod tests {
         assert!(text.contains(r#""holdings_stamps":{"/a":[7,42]}"#), "{text}");
         let older: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert!(older.get("holdings_sent").is_some(), "unknown keys are ignored by older builds");
+
+        // And for a market looked up from the fold: a file from before it has none.
+        assert_eq!(loaded.installs["/w"].market_lookup, None);
+        let key = MarketKey { region: 3, server: Some("6949".into()), realm: String::new(), faction: Some("Horde".into()) };
+        new.installs.get_mut("/w").unwrap().market_lookup = Some(key);
+        let text = serde_json::to_string(&new).unwrap();
+        assert_eq!(serde_json::from_str::<ForeverState>(&text).unwrap(), new);
+        assert!(text.contains(r#""marketLookup":{"region":3,"server":"6949","realm":"","faction":"Horde"}"#), "{text}");
     }
 
     #[tokio::test]
@@ -2059,6 +2179,226 @@ pub(crate) mod tests {
         let lua = std::fs::read_to_string(root.join("_classic_beta_/Interface/AddOns/GoldCap_AppData/AppData.lua")).unwrap();
         assert_eq!(lua, "GoldCap_AppData = { writtenAt = 1 }\n", "no foreverUpload: the addon must not promise sharing");
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A goldcap.gg stand answering by path: the first route whose prefix the request line
+    /// starts with, else a 404. Hands back the base URL and every request line it saw.
+    fn serve_routes(routes: Vec<(&'static str, String)>) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut request = Vec::new();
+                let mut buf = [0u8; 65536];
+                loop {
+                    let n = stream.read(&mut buf).unwrap_or(0);
+                    if n == 0 { break; }
+                    request.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&request);
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let len = text[..end].lines()
+                            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0)))
+                            .unwrap_or(0);
+                        if request.len() >= end + 4 + len { break; }
+                    }
+                }
+                let line = String::from_utf8_lossy(&request).lines().next().unwrap_or("").to_string();
+                let reply = routes.iter().find(|(p, _)| line.starts_with(p)).map(|(_, a)| a.clone())
+                    .unwrap_or_else(|| answer("404 Not Found", r#"{"error":"not_found"}"#));
+                log.lock().unwrap().push(line);
+                let _ = stream.write_all(reply.as_bytes());
+            }
+        });
+        (base, seen)
+    }
+
+    const LOOKUP: &str = "GET /v1/addon/forever-market?";
+    const CROWD: &str = "GET /v1/forever/addon-data?";
+    const SCAN: &str = "POST /v1/forever/scans";
+    const NOW_MARKET: i64 = 1_790_464_500;
+
+    fn market_found(slug: &str) -> String {
+        answer("200 OK", &format!(r#"{{"market":"{slug}","realm":"Classic Beta PvE 2"}}"#))
+    }
+    fn market_unknown() -> String {
+        answer("404 Not Found", r#"{"error":"unknown_market"}"#)
+    }
+    fn crowd_body(slug: &str) -> String {
+        format!("GCF1;{slug};3;Classic Beta PvE 2;Horde;{};I:1=2=2===3=1=0", NOW_MARKET - 60)
+    }
+    fn crowd_found(slug: &str) -> String {
+        let body = crowd_body(slug);
+        format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+    }
+    fn horde_fold(at: i64, faction: &str) -> String {
+        fold_file(CLIENT, &format!("{}, faction = \"{faction}\"", good_fold(at)))
+    }
+
+    /// One machine with one Forever install holding `lua`, ticked against stands of its own.
+    struct Market {
+        root: std::path::PathBuf,
+        file: std::path::PathBuf,
+        config: crate::config::Config,
+        logger: crate::logging::Logger,
+        store: std::sync::Mutex<std::collections::HashMap<String, KeptCrowd>>,
+    }
+
+    impl Market {
+        fn new(label: &str, lua: &str, token: &str) -> Self {
+            let root = machine(label);
+            let file = put(&root, "_classic_beta_", lua);
+            let logger = crate::logging::Logger::new(&root.join("logs")).unwrap();
+            let config = crate::config::Config { companion_token: token.into(), ..crate::config::Config::default() };
+            Market { root, file, config, logger, store: std::sync::Mutex::new(std::collections::HashMap::new()) }
+        }
+        fn install_key(&self) -> String {
+            self.root.join("_classic_beta_").to_string_lossy().into_owned()
+        }
+        async fn tick(&self, routes: Vec<(&'static str, String)>) -> (ForeverState, Vec<String>) {
+            let (base, seen) = serve_routes(routes);
+            let state = sync_forever_at_root(&crate::sync::build_client(), &base, &self.root, &self.config, &self.logger, &self.root.join("s.json"), &self.store, NOW_MARKET).await;
+            let seen = seen.lock().unwrap().clone();
+            (state, seen)
+        }
+        /// The game rewrites the file: a new mtime even within the same second, as a /reload has.
+        fn rewrite(&self, lua: &str) {
+            let before = std::fs::metadata(&self.file).unwrap().modified().unwrap();
+            std::fs::write(&self.file, lua).unwrap();
+            let f = std::fs::File::options().write(true).open(&self.file).unwrap();
+            f.set_modified(before + std::time::Duration::from_secs(10)).unwrap();
+        }
+        fn app_data(&self) -> String {
+            std::fs::read_to_string(self.root.join("_classic_beta_/Interface/AddOns/GoldCap_AppData/AppData.lua")).unwrap()
+        }
+        /// What the next app start sees: nothing remembered in the process.
+        fn restart(&self) {
+            unanswered().lock().unwrap().remove(&self.install_key());
+            self.store.lock().unwrap().clear();
+        }
+    }
+
+    impl Drop for Market {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.root).ok();
+        }
+    }
+
+    fn asked(seen: &[String]) -> Vec<&String> {
+        seen.iter().filter(|l| l.starts_with(LOOKUP)).collect()
+    }
+
+    #[tokio::test]
+    async fn an_unpaired_install_learns_its_market_from_its_fold_and_gets_everyones_prices() {
+        let m = Market::new("market-unpaired", &horde_fold(1_790_464_249, "Horde"), "");
+        let (state, seen) = m.tick(vec![(LOOKUP, market_found("us-x-horde")), (CROWD, crowd_found("us-x-horde"))]).await;
+        assert_eq!(asked(&seen).len(), 1, "{seen:?}");
+        assert!(seen[0].starts_with("GET /v1/addon/forever-market?region=3&faction=Horde&realm=R "), "{seen:?}");
+        assert!(seen.iter().any(|l| l.starts_with("GET /v1/forever/addon-data?market=us-x-horde ")), "{seen:?}");
+        assert!(!seen.iter().any(|l| l.starts_with(SCAN)), "unpaired: nothing is uploaded");
+        let entry = &state.installs[&m.install_key()];
+        assert_eq!(entry.market.as_deref(), Some("us-x-horde"));
+        assert_eq!((entry.realm.as_deref(), entry.faction.as_deref()), (Some("Classic Beta PvE 2"), Some("Horde")));
+        assert!(entry.crowd_written_at.is_some());
+        let lua = m.app_data();
+        assert!(lua.contains(&format!("foreverString = '{}'", crowd_body("us-x-horde"))), "{lua}");
+        assert!(!lua.contains("foreverUpload"), "unpaired: the addon must not promise sharing: {lua}");
+
+        // The next tick, and the next app start: the same fold is not asked about again.
+        let (_, seen) = m.tick(vec![(CROWD, crowd_found("us-x-horde"))]).await;
+        assert!(asked(&seen).is_empty(), "{seen:?}");
+        m.restart();
+        let (state, seen) = m.tick(vec![(CROWD, crowd_found("us-x-horde"))]).await;
+        assert!(asked(&seen).is_empty(), "{seen:?}");
+        assert_eq!(state.installs[&m.install_key()].market.as_deref(), Some("us-x-horde"));
+    }
+
+    #[tokio::test]
+    async fn a_market_the_site_cannot_name_yet_changes_nothing_and_is_asked_again_only_after_a_restart() {
+        let m = Market::new("market-404", &horde_fold(1_790_464_249, "Horde"), "");
+        let (state, seen) = m.tick(vec![(LOOKUP, market_unknown())]).await;
+        assert_eq!(seen.len(), 1, "the lookup and nothing else: {seen:?}");
+        assert_eq!(state.installs[&m.install_key()].market, None);
+        assert_eq!(m.app_data(), format!("GoldCap_AppData = {{ writtenAt = {NOW_MARKET} }}\n"), "exactly as before the lookup existed");
+
+        // Every later tick of this run: not asked.
+        let (_, seen) = m.tick(vec![(LOOKUP, market_found("us-x-horde"))]).await;
+        assert!(seen.is_empty(), "{seen:?}");
+
+        // A 400 is remembered the same way.
+        m.restart();
+        let (_, seen) = m.tick(vec![(LOOKUP, answer("400 Bad Request", r#"{"error":"bad_request"}"#))]).await;
+        assert_eq!(asked(&seen).len(), 1);
+        let (_, seen) = m.tick(vec![(LOOKUP, market_found("us-x-horde"))]).await;
+        assert!(seen.is_empty(), "{seen:?}");
+
+        // The next app start asks again, and this time the site knows it.
+        m.restart();
+        let (state, seen) = m.tick(vec![(LOOKUP, market_found("us-x-horde")), (CROWD, crowd_found("us-x-horde"))]).await;
+        assert_eq!(asked(&seen).len(), 1);
+        assert_eq!(state.installs[&m.install_key()].market.as_deref(), Some("us-x-horde"));
+    }
+
+    #[tokio::test]
+    async fn a_site_that_is_down_is_asked_again_next_tick() {
+        let m = Market::new("market-5xx", &horde_fold(1_790_464_249, "Horde"), "");
+        let (state, seen) = m.tick(vec![(LOOKUP, answer("503 Service Unavailable", "{}"))]).await;
+        assert_eq!(asked(&seen).len(), 1);
+        assert_eq!(state.installs[&m.install_key()].market, None);
+        let (state, seen) = m.tick(vec![(LOOKUP, market_found("us-x-horde"))]).await;
+        assert_eq!(asked(&seen).len(), 1);
+        assert_eq!(state.installs[&m.install_key()].market.as_deref(), Some("us-x-horde"));
+    }
+
+    #[tokio::test]
+    async fn another_faction_or_server_asks_again_and_never_keeps_the_old_markets_prices() {
+        let m = Market::new("market-faction", &horde_fold(1_790_464_249, "Horde"), "");
+        let (state, _) = m.tick(vec![(LOOKUP, market_found("us-x-horde"))]).await;
+        assert_eq!(state.installs[&m.install_key()].market.as_deref(), Some("us-x-horde"));
+
+        // The player scans on an Alliance character: a new fold, another market.
+        m.rewrite(&horde_fold(1_790_464_300, "Alliance"));
+        let (state, seen) = m.tick(vec![(LOOKUP, market_unknown())]).await;
+        assert_eq!(asked(&seen).len(), 1, "{seen:?}");
+        assert!(asked(&seen)[0].contains("faction=Alliance"), "{seen:?}");
+        let entry = &state.installs[&m.install_key()];
+        assert_eq!((&entry.market, &entry.realm, &entry.faction, &entry.market_lookup), (&None, &None, &None, &None));
+        assert!(!seen.iter().any(|l| l.starts_with(CROWD)), "the Horde market's prices are not fetched: {seen:?}");
+
+        // A realm-less fold goes by its server, and the realm is left out of the question.
+        let by_server = fold_file(CLIENT, &good_fold(1_790_464_400).replace(r#"realm = "R""#, r#"server = "6949", faction = "Horde""#));
+        m.rewrite(&by_server);
+        let (_, seen) = m.tick(vec![(LOOKUP, market_found("us-x-horde"))]).await;
+        assert!(seen[0].starts_with("GET /v1/addon/forever-market?region=3&server=6949&faction=Horde "), "{seen:?}");
+    }
+
+    #[tokio::test]
+    async fn an_upload_answer_wins_over_a_looked_up_market() {
+        let m = Market::new("market-upload", &horde_fold(1_790_464_249, "Horde"), "tok");
+        // Paired, but the scan is waiting for its market: the lookup fills the gap.
+        let pending = answer("200 OK", r#"{"status":"pending_market","items":1,"dropped":0}"#);
+        let (state, seen) = m.tick(vec![(SCAN, pending), (LOOKUP, market_found("us-x-horde"))]).await;
+        assert_eq!(asked(&seen).len(), 1, "{seen:?}");
+        assert_eq!(state.installs[&m.install_key()].market.as_deref(), Some("us-x-horde"));
+
+        // The next scan is accepted and the answer names the market: it replaces the looked-up one.
+        m.rewrite(&horde_fold(1_790_464_300, "Horde"));
+        let accepted = answer("200 OK", r#"{"status":"accepted","market":"us-y-horde","items":1,"dropped":0}"#);
+        let (state, seen) = m.tick(vec![(SCAN, accepted), (LOOKUP, market_found("us-x-horde"))]).await;
+        assert!(asked(&seen).is_empty(), "{seen:?}");
+        let entry = &state.installs[&m.install_key()];
+        assert_eq!((entry.market.as_deref(), &entry.market_lookup), (Some("us-y-horde"), &None));
+
+        // From now on nothing is looked up, a restart included, even for another faction.
+        m.restart();
+        m.rewrite(&horde_fold(1_790_464_400, "Alliance"));
+        let quarantined = answer("200 OK", r#"{"status":"quarantined","market":"q","items":1,"dropped":0,"reason":"unlinked"}"#);
+        let (state, seen) = m.tick(vec![(SCAN, quarantined), (LOOKUP, market_found("us-x-alliance"))]).await;
+        assert!(asked(&seen).is_empty(), "{seen:?}");
+        assert_eq!(state.installs[&m.install_key()].market.as_deref(), Some("us-y-horde"));
     }
 
     /// Run by hand against plan 2a's local stand (Task 12: API on :8093, token

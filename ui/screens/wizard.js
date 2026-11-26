@@ -1,4 +1,4 @@
-import { formatPairCode, addonInstalledSince, connectSubtitle, canSkipPairing } from "../lib/format.js";
+import { formatPairCode, addonInstalledSince, connectSubtitle } from "../lib/format.js";
 
 // The install path and, when the game folders resolve to exactly one, the
 // realm all come out of the game's own files — see detect() below. Step 0
@@ -18,7 +18,8 @@ export function render(el, ctx) {
   // behind. Nothing here should be read as "the default a fresh wizard
   // writes" — a fresh wizard writes whatever was already on disk.
   const draft = {
-    region: "eu",
+    // Empty until the game's files name it or the player picks it: never EU as a guess.
+    region: "",
     realmSlug: "",
     wowRetailPath: "",
     foreverRootPath: "",
@@ -32,6 +33,11 @@ export function render(el, ctx) {
   // omitted, so a player who has it knows GoldCap saw it and left it alone on purpose.
   let classicEraFound = false;
   let realmNames = [];
+  // The player picked the Region by hand: detection, which reruns on every visit to Setup,
+  // must not undo that.
+  let regionByHand = false;
+  // The saved region, kept only so a config with Retail off still saves a valid one. Never shown.
+  let savedRegion = "eu";
   let step = 0;
 
   const progress = document.createElement("div");
@@ -133,7 +139,9 @@ export function render(el, ctx) {
       draft.intervalMinutes = config.intervalMinutes;
       draft.launchAtStartup = config.launchAtStartup;
       draft.companionToken = config.companionToken;
-      draft.region = config.region;
+      savedRegion = config.region;
+      // Not the saved region: a config never asked about it says EU all the same. loadRealms
+      // takes the one the game's own files name, or leaves the choice to the player.
       draft.realmSlug = config.realmSlug;
       draft.wowRetailPath = config.wowRetailPath;
       draft.foreverRootPath = config.foreverRootPath;
@@ -278,7 +286,7 @@ export function render(el, ctx) {
       list.append(
         gameFolderRow({
           title: "WoW: Forever",
-          subtitle: "Uploads your scans, brings back crowd prices",
+          subtitle: "Everyone's prices after your first scan; paired, it shares yours too",
           path: draft.foreverRootPath,
           checked: draft.foreverEnabled,
           onToggle: (checked) => {
@@ -350,7 +358,7 @@ export function render(el, ctx) {
     next.textContent = "Connect to goldcap.gg →";
 
     function paintNext() {
-      next.disabled = draft.retailEnabled && draft.realmSlug.trim() === "";
+      next.disabled = draft.retailEnabled && (!draft.region || draft.realmSlug.trim() === "");
     }
     next.disabled = true;
 
@@ -377,11 +385,17 @@ export function render(el, ctx) {
       const region = document.createElement("select");
       region.className = "field";
       region.id = "wizard-region";
+      region.add(new Option("Pick your region", ""));
       region.add(new Option("EU", "eu"));
       region.add(new Option("US", "us"));
       region.add(new Option("KR", "kr"));
       region.add(new Option("TW", "tw"));
       region.value = draft.region;
+
+      const regionHint = document.createElement("p");
+      regionHint.className = "muted wizard-hint";
+      regionHint.textContent = "Your game files do not say which region you play on. Pick it here.";
+      regionHint.hidden = true;
 
       const realmLabel = document.createElement("label");
       realmLabel.className = "label";
@@ -419,7 +433,10 @@ export function render(el, ctx) {
 
       async function resolveSelected() {
         const name = realm.value;
-        if (!name) return;
+        if (!name || !region.value) {
+          paintResolved();
+          return;
+        }
         const request = ++realmRequest;
         try {
           const r = await ctx.api.resolveRealm(region.value, name);
@@ -436,18 +453,17 @@ export function render(el, ctx) {
       async function loadRealms() {
         const request = ++realmRequest;
         realm.replaceChildren(new Option("Pick a realm", ""));
-        try {
-          const game = await ctx.api.detectGame(draft.wowRetailPath);
-          if (request !== realmRequest) return;
-          if (game.region === "eu" || game.region === "us") {
-            draft.region = game.region;
-            region.value = game.region;
-          }
-          realmNames = game.realmNames ?? [];
-        } catch {
-          if (request !== realmRequest) return;
-          realmNames = [];
+        const [game, detected] = await Promise.all([
+          ctx.api.detectGame(draft.wowRetailPath).catch(() => null),
+          regionByHand ? null : ctx.api.detectRegion(draft.wowRetailPath).catch(() => null),
+        ]);
+        if (request !== realmRequest) return;
+        if (!regionByHand) {
+          draft.region = detected ?? "";
+          region.value = draft.region;
         }
+        regionHint.hidden = Boolean(draft.region);
+        realmNames = game?.realmNames ?? [];
         for (const name of realmNames) realm.add(new Option(name, name));
         if (realmNames.length > 0 && !draft.realmSlug) {
           realm.value = realmNames[0];
@@ -462,7 +478,9 @@ export function render(el, ctx) {
       }
 
       region.addEventListener("change", () => {
+        regionByHand = true;
         draft.region = region.value;
+        regionHint.hidden = Boolean(draft.region);
         resolveSelected();
       });
       realm.addEventListener("change", resolveSelected);
@@ -477,7 +495,7 @@ export function render(el, ctx) {
         manual.focus();
       });
 
-      card.append(head, regionLabel, region, realmLabel, realm, resolved, manualToggle, manual);
+      card.append(head, regionLabel, region, regionHint, realmLabel, realm, resolved, manualToggle, manual);
       bodyEl.append(card);
       loadRealms();
     }
@@ -506,7 +524,7 @@ export function render(el, ctx) {
     next.addEventListener("click", async () => {
       next.disabled = true;
       try {
-        await ctx.api.saveConfig({ ...draft });
+        await ctx.api.saveConfig({ ...draft, region: draft.region || savedRegion });
       } catch (e) {
         ctx.toast(String(e), true);
         paintNext();
@@ -522,8 +540,7 @@ export function render(el, ctx) {
   // ---- step 2: connect ----------------------------------------------------
 
   function stepConnect() {
-    // A question where it may wait (Retail alone), an instruction where it may not (WoW: Forever).
-    setHead(canSkipPairing(draft) ? "Connect to goldcap.gg?" : "Pair with goldcap.gg", connectSubtitle(draft));
+    setHead("Connect to goldcap.gg?", connectSubtitle(draft));
     bodyEl.replaceChildren();
 
     // Whichever way this step was reached, draft is already saved (Setup's
@@ -616,10 +633,9 @@ export function render(el, ctx) {
     later.addEventListener("click", finish);
 
     bodyEl.append(open, label, code, hint);
-    // With WoW: Forever on there is no "Later": unpaired, Forever gets nothing at all (no scan goes
-    // up, no prices come back), and a player who skipped it waited for a first scan that never came.
-    const spacer = Object.assign(document.createElement("div"), { className: "spacer" });
-    nav.replaceChildren(...(canSkipPairing(draft) ? [back, later, spacer, pair] : [back, spacer, pair]));
+    // "Later" in either game: unpaired, prices still come (WoW: Forever's after the first auction
+    // house scan); pairing adds the player's own scans and sales.
+    nav.replaceChildren(back, later, Object.assign(document.createElement("div"), { className: "spacer" }), pair);
   }
 
   function render_step() {

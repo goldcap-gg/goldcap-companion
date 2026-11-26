@@ -51,50 +51,50 @@ export function foreverScanLine(g, now) {
   return `Scan uploaded ${relativeTime(g.lastSentAt, now)}${items}`;
 }
 
-// The Forever card's pairing line: scans go up only with a pairing token (forever.rs skips the
-// upload without one), so an unpaired card says so instead of waiting for a scan that never goes.
-// Null once paired. A scan already on disk (`lastScanAt`) is named: it goes up at the next sync after
-// pairing, with nothing to redo in the game.
+// The Forever card's pairing line: everyone's prices come back without pairing (forever.rs asks
+// goldcap.gg for the market of the install's newest scan), but the player's own scans go up only
+// with a pairing token. Null once paired.
 export function foreverPairLine(g, paired) {
   if (paired) return null;
-  return g.lastScanAt
-    ? "Your scan is ready, but it reaches goldcap.gg only once this app is paired with your GoldCap account. Pair it and the scan goes up at the next sync."
-    : "Scans reach goldcap.gg only once this app is paired with your GoldCap account.";
+  const share = "Pair this app with your GoldCap account to also share your own scans.";
+  return g.lastScanAt && !g.market
+    ? `goldcap.gg does not know your auction house yet, so no prices from other players have come back. They come once it does. ${share}`
+    : `Everyone's prices come without pairing, after your first auction house scan. ${share}`;
 }
 
-// The Forever card's next step once paired and before the first scan has gone up: the one thing
-// to do in the game. Null when unpaired (foreverPairLine says what to do) and after the first send.
-// Null too when the last scan was not sent (`g.skipped` says why and what to do instead).
+// The Forever card's next step before anything has happened yet: the one thing to do in the game.
+// Paired, that is until the first scan has gone up; unpaired, until there is a scan on disk to
+// learn the market from. Null when the last scan was not sent (`g.skipped` says why and what to
+// do instead).
 export function foreverNextStep(g, paired) {
-  if (!paired || g.lastSentAt || g.skipped) return null;
+  if (g.skipped || (paired ? g.lastSentAt : g.lastScanAt)) return null;
   return "Next: open the auction house in WoW: Forever (GoldCap scans it), then type /reload.";
 }
 
 // The Status hero once Retail's own stages have had their say. A Forever scan the Companion did
 // not send (`g.skipped`, the reason in the player's words, shown on the card) outranks "waiting"
-// and "everything works": another scan alone will not fix it.
-export function foreverHeroPhrase(games, { paired, retailEnabled }) {
+// and "everything works": another scan alone will not fix it. Everyone's prices written to the
+// addon count as working, paired or not.
+export function foreverHeroPhrase(games, { retailEnabled }) {
   if (games.some((g) => g.unauthorized)) return "WoW: Forever needs attention";
-  if (!retailEnabled && !paired && games.length > 0) return "Pair to send your scans";
   if (games.some((g) => g.skipped)) return "Your last WoW: Forever scan was not sent";
-  if (retailEnabled || games.some((g) => g.lastSentAt)) return "Everything works";
+  if (retailEnabled || games.some((g) => g.lastSentAt || g.crowdWrittenAt)) return "Everything works";
+  if (games.some((g) => g.lastScanAt)) return "Waiting for prices for your auction house";
   return "Waiting for your first scan";
 }
 
-// The wizard's Connect step: WoW: Forever gets nothing without pairing, so with it on the step
-// cannot be skipped; Retail alone still gets realm prices unpaired, so it keeps "Later".
-export function canSkipPairing(draft) {
-  return !draft.foreverEnabled;
+// The Retail card's line when the game's own files point at another region than the saved one.
+export function regionHintLine(hint, region) {
+  return `Your game files say you play on ${hint.toUpperCase()}, but GoldCap is set to ${region.toUpperCase()}.`;
 }
 
 // How to get the code, the same words on the Status card and in Settings.
 export const PAIR_HOW = "On goldcap.gg, sign in and open Account, press Show pairing code, and type the code in Settings here within 15 minutes.";
 
-// The wizard's Connect step: with WoW: Forever on, pairing is what sends the scans, not only the
-// sales, so "Later" must not read as harmless.
+// The wizard's Connect step: what pairing adds. Prices come without it, in either game.
 export function connectSubtitle(draft) {
   return draft.foreverEnabled
-    ? "Your WoW: Forever scans and your sales reach goldcap.gg only once this app is paired with your account."
+    ? "Pairing shares your WoW: Forever scans and shows your sales as profit on the site. Everyone's prices come without it."
     : "So your sales show up as profit on the site.";
 }
 
