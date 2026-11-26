@@ -223,7 +223,7 @@ export function render(el, ctx) {
 
     const paintForever = folderRow(games, {
       title: "WoW: Forever",
-      sub: "uploads scans",
+      sub: "everyone's prices, your scans when paired",
       enabledKey: "foreverEnabled",
       pathKeyOf: (c) => c.foreverRootPath,
       onChange: async () => {
@@ -628,7 +628,7 @@ export function render(el, ctx) {
       state.tabIndex = -1;
       state.textContent = paired
         ? "Paired. Your ledger uploads on every sync."
-        : `Not paired. Nothing is uploaded: no WoW: Forever scans, no ledger. ${PAIR_HOW.replace(" in Settings here", " below")}`;
+        : `Not paired. Nothing is uploaded: no WoW: Forever scans, no ledger. Prices still come, WoW: Forever's after your first auction house scan. ${PAIR_HOW.replace(" in Settings here", " below")}`;
       accountBody.append(state);
 
       if (paired) {

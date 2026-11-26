@@ -1,4 +1,4 @@
-import { formatPairCode, addonInstalledSince, connectSubtitle, canSkipPairing } from "../lib/format.js";
+import { formatPairCode, addonInstalledSince, connectSubtitle } from "../lib/format.js";
 
 // The install path and, when the game folders resolve to exactly one, the
 // realm all come out of the game's own files — see detect() below. Step 0
@@ -283,7 +283,7 @@ export function render(el, ctx) {
       list.append(
         gameFolderRow({
           title: "WoW: Forever",
-          subtitle: "Uploads your scans, brings back crowd prices",
+          subtitle: "Everyone's prices after your first scan; paired, it shares yours too",
           path: draft.foreverRootPath,
           checked: draft.foreverEnabled,
           onToggle: (checked) => {
@@ -542,8 +542,7 @@ export function render(el, ctx) {
   // ---- step 2: connect ----------------------------------------------------
 
   function stepConnect() {
-    // A question where it may wait (Retail alone), an instruction where it may not (WoW: Forever).
-    setHead(canSkipPairing(draft) ? "Connect to goldcap.gg?" : "Pair with goldcap.gg", connectSubtitle(draft));
+    setHead("Connect to goldcap.gg?", connectSubtitle(draft));
     bodyEl.replaceChildren();
 
     // Whichever way this step was reached, draft is already saved (Setup's
@@ -636,10 +635,9 @@ export function render(el, ctx) {
     later.addEventListener("click", finish);
 
     bodyEl.append(open, label, code, hint);
-    // With WoW: Forever on there is no "Later": unpaired, Forever gets nothing at all (no scan goes
-    // up, no prices come back), and a player who skipped it waited for a first scan that never came.
-    const spacer = Object.assign(document.createElement("div"), { className: "spacer" });
-    nav.replaceChildren(...(canSkipPairing(draft) ? [back, later, spacer, pair] : [back, spacer, pair]));
+    // "Later" in either game: unpaired, prices still come (WoW: Forever's after the first auction
+    // house scan); pairing adds the player's own scans and sales.
+    nav.replaceChildren(back, later, Object.assign(document.createElement("div"), { className: "spacer" }), pair);
   }
 
   function render_step() {

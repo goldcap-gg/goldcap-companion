@@ -60,7 +60,7 @@ function heroPhrase(s) {
 function heroState(s) {
   const games = foreverGames(s);
   if (foreverBroken(games)) return "broken";
-  if (!s.retailEnabled) return games.some((g) => g.lastSentAt) ? "ok" : "notConnected";
+  if (!s.retailEnabled) return games.some((g) => g.lastSentAt || g.crowdWrittenAt) ? "ok" : "notConnected";
   const stages = [s.prices, s.addon, s.ledger];
   if (stages.some((st) => st.state === "broken")) return "broken";
   if (stages.every((st) => st.state === "ok")) return "ok";
@@ -166,11 +166,12 @@ function foreverCard(g, paired, onPair) {
     card.append(skipped);
   }
 
-  // Not paired: the scan goes nowhere, and the card says so with the way to fix it.
+  // Not paired: everyone's prices still come, the player's own scans stay home. Said, with the way
+  // to share them.
   const pairLine = foreverPairLine(g, paired);
   if (pairLine) {
     const why = document.createElement("p");
-    why.className = "stage-error";
+    why.className = "stage-detail";
     why.textContent = pairLine;
     const how = document.createElement("p");
     how.className = "stage-detail";
@@ -183,7 +184,7 @@ function foreverCard(g, paired, onPair) {
     card.append(why, how, pair);
   }
 
-  // Paired, nothing sent yet: the one thing left to do, in the game.
+  // Nothing scanned (or, paired, nothing sent) yet: the one thing left to do, in the game.
   const next = foreverNextStep(g, paired);
   if (next) {
     const step = document.createElement("p");
@@ -210,8 +211,7 @@ function foreverCard(g, paired, onPair) {
 
   const hint = document.createElement("p");
   hint.className = "muted";
-  hint.textContent =
-    "A new scan uploads after /reload or logging out: that is when WoW writes it to disk.";
+  hint.textContent = `A new scan ${paired ? "uploads" : "is read"} after /reload or logging out: that is when WoW writes it to disk.`;
   card.append(hint);
 
   return { card, scanEl: scan, crowdEl: crowd };
