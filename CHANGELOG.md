@@ -4,7 +4,7 @@ Release notes for the desktop companion. Written for the person running it,
 not for the repository: what changed on screen, and what it means for your
 data.
 
-## Unreleased
+## 1.27.0 (2026-11-26)
 
 - Retail: the Companion no longer assumes EU. It takes your region from the game's own
   settings, and when those do not say, from the realm you played last. If that realm
