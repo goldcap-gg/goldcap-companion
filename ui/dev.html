@@ -60,7 +60,13 @@
           (!c.foreverEnabled || Boolean(c.foreverRootPath?.trim()));
         return {
           getConfig: () => delay(f.config),
-          saveConfig: (config) => { Object.assign(f.config, config); return delay(); },
+          saveConfig: (config) => {
+            Object.assign(f.config, config);
+            // The next tick's verdict, for the Switch button: the saved region now matches.
+            if (f.status.regionHint === config.region) f.status.regionHint = null;
+            if (config.region) f.status.region = config.region;
+            return delay();
+          },
           getStatus: () => delay(f.status),
           syncNow: () => delay(),
           setupComplete: () => delay(isComplete(f.config)),
@@ -74,7 +80,8 @@
             }),
           pickForeverRoot: () => delay(f.foreverRoot ?? ""),
           detectGames: () => delay(f.detectedGames ?? []),
-          detectGame: () => delay(f.game ?? { region: "eu", realmNames: [] }),
+          detectGame: () => delay(f.game ?? { region: null, realmNames: [] }),
+          detectRegion: () => delay("detectedRegion" in f ? f.detectedRegion : (f.game?.region ?? null)),
           resolveRealm: (region, name) =>
             delay({ slug: name.toLowerCase().replace(/\s+/g, "-"), nameEn: name }),
           pairWithCode: (code) => {

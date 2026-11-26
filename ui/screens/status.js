@@ -1,4 +1,4 @@
-import { relativeTime, nextSyncLine, groupDigits, foreverScanLine, foreverCrowdLine, foreverMarketLine, foreverImpactLines, foreverPairLine, foreverNextStep, foreverHeroPhrase, PAIR_HOW, addonCard } from "../lib/format.js";
+import { relativeTime, nextSyncLine, groupDigits, foreverScanLine, foreverCrowdLine, foreverMarketLine, foreverImpactLines, foreverPairLine, foreverNextStep, foreverHeroPhrase, PAIR_HOW, addonCard, regionHintLine } from "../lib/format.js";
 import { brandMarkSvg } from "../lib/brandMark.js";
 
 const POLL_MS = 5000;
@@ -287,9 +287,13 @@ export function render(el, ctx) {
   const retailWhere = document.createElement("span");
   retailWhere.className = "muted mono";
   retailHead.append(retailTitle, retailWhere);
+  // The player's own files point at another region than the saved one: said, with the one
+  // click that fixes it. Never switched without that click.
+  const regionBox = document.createElement("div");
+  regionBox.className = "stack";
   const stages = document.createElement("div");
   stages.className = "stages";
-  retailCard.append(retailHead, stages);
+  retailCard.append(retailHead, regionBox, stages);
 
   // One card per Forever install currently enabled — rebuilt on every structural repaint
   // (installs can appear/disappear between polls), unlike the Retail card above which is
@@ -367,6 +371,18 @@ export function render(el, ctx) {
     retailCard.hidden = !snapshot.retailEnabled;
     if (snapshot.retailEnabled) {
       retailWhere.textContent = `${snapshot.realmSlug} · ${snapshot.region.toUpperCase()}`;
+      regionBox.replaceChildren();
+      if (snapshot.regionHint) {
+        const why = document.createElement("p");
+        why.className = "stage-error";
+        why.textContent = regionHintLine(snapshot.regionHint, snapshot.region);
+        const sw = document.createElement("button");
+        sw.className = "btn btn-primary btn-sm";
+        sw.type = "button";
+        sw.textContent = `Switch to ${snapshot.regionHint.toUpperCase()}`;
+        sw.addEventListener("click", () => switchRegion(snapshot.regionHint, sw));
+        regionBox.append(why, sw);
+      }
       // Pairing is only offered once there is a realm to pair against — an
       // unconfigured companion routes to the wizard, not to Settings.
       const canPair = snapshot.configured && !snapshot.paired;
@@ -429,6 +445,23 @@ export function render(el, ctx) {
     meta.textContent = snapshot.syncing
       ? "Syncing now…"
       : nextSyncLine(snapshot.nextTickAt, now);
+  }
+
+  // Saved like any Settings change, then synced right away. The pinned realm belonged to the
+  // old region, so it goes too: auto mode follows the last played realm on the new one.
+  async function switchRegion(region, button) {
+    button.disabled = true;
+    try {
+      const config = await ctx.api.getConfig();
+      await ctx.api.saveConfig({ ...config, region, realmSlug: "" });
+      await ctx.api.syncNow();
+      if (disposed) return;
+      setTimeout(refresh, 1200);
+    } catch (e) {
+      if (disposed) return;
+      ctx.toast(String(e), true);
+      button.disabled = false;
+    }
   }
 
   async function takeOver(dir, button) {

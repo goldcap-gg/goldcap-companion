@@ -24,6 +24,7 @@ mod linux_env;
 mod logging;
 mod luafile;
 mod notify_feed;
+mod realm_region;
 mod region;
 mod runs;
 mod savedvars;
@@ -82,6 +83,7 @@ fn main() {
             commands::detect_games,
             commands::detect_game,
             commands::resolve_realm,
+            commands::detect_region,
             commands::pair_with_code,
             commands::unpair,
             commands::open_account_page,

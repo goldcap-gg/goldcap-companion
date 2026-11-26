@@ -23,6 +23,8 @@ export const pickForeverRoot = () => invoke("pick_forever_root");
 /** Which games exist under one already-known root. */
 export const detectGames = (root) => invoke("detect_games", { root });
 export const detectGame = (wowRetailPath) => invoke("detect_game", { wowRetailPath });
+/** The Retail region from the game's own files, or null when the player has to pick it. */
+export const detectRegion = (wowRetailPath) => invoke("detect_region", { wowRetailPath });
 export const resolveRealm = (region, name) => invoke("resolve_realm", { region, name });
 /** Every realm in a region, so the settings screen can offer the list. */
 export const listRegionRealms = (region) => invoke("list_region_realms", { region });

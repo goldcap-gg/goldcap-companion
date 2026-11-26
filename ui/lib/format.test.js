@@ -15,6 +15,7 @@ import {
   foreverNextStep,
   foreverHeroPhrase,
   canSkipPairing,
+  regionHintLine,
   connectSubtitle,
   addonCard,
   addonInstalledSince,
@@ -339,4 +340,8 @@ test("an overdue schedule reads as syncing soon, not as due", () => {
   assert.equal(nextSyncLine(NOW, NOW), "Syncing soon");
   assert.equal(nextSyncLine(NOW + 61, NOW), "Next sync in 2 min");
   assert.equal(nextSyncLine(null, NOW), "");
+});
+
+test("regionHintLine names both regions in capitals", () => {
+  assert.equal(regionHintLine("us", "eu"), "Your game files say you play on US, but GoldCap is set to EU.");
 });

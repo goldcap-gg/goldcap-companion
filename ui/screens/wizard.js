@@ -18,7 +18,8 @@ export function render(el, ctx) {
   // behind. Nothing here should be read as "the default a fresh wizard
   // writes" — a fresh wizard writes whatever was already on disk.
   const draft = {
-    region: "eu",
+    // Empty until the game's files name it or the player picks it: never EU as a guess.
+    region: "",
     realmSlug: "",
     wowRetailPath: "",
     foreverRootPath: "",
@@ -32,6 +33,9 @@ export function render(el, ctx) {
   // omitted, so a player who has it knows GoldCap saw it and left it alone on purpose.
   let classicEraFound = false;
   let realmNames = [];
+  // The player picked the Region by hand: detection, which reruns on every visit to Setup,
+  // must not undo that.
+  let regionByHand = false;
   let step = 0;
 
   const progress = document.createElement("div");
@@ -133,7 +137,8 @@ export function render(el, ctx) {
       draft.intervalMinutes = config.intervalMinutes;
       draft.launchAtStartup = config.launchAtStartup;
       draft.companionToken = config.companionToken;
-      draft.region = config.region;
+      // Not the saved region: a config never asked about it says EU all the same. loadRealms
+      // takes the one the game's own files name, or leaves the choice to the player.
       draft.realmSlug = config.realmSlug;
       draft.wowRetailPath = config.wowRetailPath;
       draft.foreverRootPath = config.foreverRootPath;
@@ -350,7 +355,7 @@ export function render(el, ctx) {
     next.textContent = "Connect to goldcap.gg →";
 
     function paintNext() {
-      next.disabled = draft.retailEnabled && draft.realmSlug.trim() === "";
+      next.disabled = draft.retailEnabled && (!draft.region || draft.realmSlug.trim() === "");
     }
     next.disabled = true;
 
@@ -377,11 +382,17 @@ export function render(el, ctx) {
       const region = document.createElement("select");
       region.className = "field";
       region.id = "wizard-region";
+      region.add(new Option("Pick your region", ""));
       region.add(new Option("EU", "eu"));
       region.add(new Option("US", "us"));
       region.add(new Option("KR", "kr"));
       region.add(new Option("TW", "tw"));
       region.value = draft.region;
+
+      const regionHint = document.createElement("p");
+      regionHint.className = "muted wizard-hint";
+      regionHint.textContent = "Your game files do not say which region you play on. Pick it here.";
+      regionHint.hidden = true;
 
       const realmLabel = document.createElement("label");
       realmLabel.className = "label";
@@ -419,7 +430,10 @@ export function render(el, ctx) {
 
       async function resolveSelected() {
         const name = realm.value;
-        if (!name) return;
+        if (!name || !region.value) {
+          paintResolved();
+          return;
+        }
         const request = ++realmRequest;
         try {
           const r = await ctx.api.resolveRealm(region.value, name);
@@ -437,11 +451,15 @@ export function render(el, ctx) {
         const request = ++realmRequest;
         realm.replaceChildren(new Option("Pick a realm", ""));
         try {
-          const game = await ctx.api.detectGame(draft.wowRetailPath);
+          const [game, detected] = await Promise.all([
+            ctx.api.detectGame(draft.wowRetailPath),
+            regionByHand ? null : ctx.api.detectRegion(draft.wowRetailPath).catch(() => null),
+          ]);
           if (request !== realmRequest) return;
-          if (game.region === "eu" || game.region === "us") {
-            draft.region = game.region;
-            region.value = game.region;
+          if (!regionByHand) {
+            draft.region = detected ?? "";
+            region.value = draft.region;
+            regionHint.hidden = Boolean(draft.region);
           }
           realmNames = game.realmNames ?? [];
         } catch {
@@ -462,7 +480,9 @@ export function render(el, ctx) {
       }
 
       region.addEventListener("change", () => {
+        regionByHand = true;
         draft.region = region.value;
+        regionHint.hidden = Boolean(draft.region);
         resolveSelected();
       });
       realm.addEventListener("change", resolveSelected);
@@ -477,7 +497,7 @@ export function render(el, ctx) {
         manual.focus();
       });
 
-      card.append(head, regionLabel, region, realmLabel, realm, resolved, manualToggle, manual);
+      card.append(head, regionLabel, region, regionHint, realmLabel, realm, resolved, manualToggle, manual);
       bodyEl.append(card);
       loadRealms();
     }

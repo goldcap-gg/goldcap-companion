@@ -52,6 +52,10 @@ pub struct StatusSnapshot {
     /// time (unix seconds). The UI dates it itself, like the stage times.
     pub market_items: Option<u32>,
     pub market_ts: Option<i64>,
+    /// The region the player's own files say they play on, when the saved one differs (auto
+    /// realm mode, Retail on). The Status screen offers "Switch to <REGION>"; nothing switches
+    /// by itself.
+    pub region_hint: Option<String>,
     pub version: String,
     pub games: Vec<crate::forever::GameStatus>,
     /// Who looks after the GoldCap addon in each game install; filled from the
@@ -189,6 +193,12 @@ pub fn build(
         ledger,
         market_items: status.region.map(|r| r.items),
         market_ts: status.region.map(|r| r.ts),
+        // Dropped once it matches the saved region: the switch is saved before the next tick
+        // has had its say.
+        region_hint: status
+            .region_hint
+            .filter(|r| config.retail_enabled && config.realm_auto && *r != config.region)
+            .map(|r| r.to_string()),
         version: env!("CARGO_PKG_VERSION").to_string(),
         games: Vec::new(),
         addons: Vec::new(),
@@ -223,6 +233,20 @@ mod tests {
             app_data_written_at: Some(NOW - 240),
             saved_vars_written_at: Some(NOW - 3600),
         }
+    }
+
+    #[test]
+    fn the_region_hint_shows_only_in_auto_mode_and_only_while_it_differs() {
+        let status = SyncStatus { region_hint: Some(Region::Us), ..SyncStatus::default() };
+        let auto = Config { realm_auto: true, ..configured() };
+        assert_eq!(build(&auto, &status, &healthy(), NOW).region_hint.as_deref(), Some("us"));
+        // Switched, and the next tick has not run yet.
+        let switched = Config { region: Region::Us, ..auto.clone() };
+        assert_eq!(build(&switched, &status, &healthy(), NOW).region_hint, None);
+        let pinned = Config { realm_auto: false, ..auto.clone() };
+        assert_eq!(build(&pinned, &status, &healthy(), NOW).region_hint, None);
+        let retail_off = Config { retail_enabled: false, ..auto };
+        assert_eq!(build(&retail_off, &status, &healthy(), NOW).region_hint, None);
     }
 
     #[test]

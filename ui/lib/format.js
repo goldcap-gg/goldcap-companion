@@ -87,6 +87,11 @@ export function canSkipPairing(draft) {
   return !draft.foreverEnabled;
 }
 
+// The Retail card's line when the game's own files point at another region than the saved one.
+export function regionHintLine(hint, region) {
+  return `Your game files say you play on ${hint.toUpperCase()}, but GoldCap is set to ${region.toUpperCase()}.`;
+}
+
 // How to get the code, the same words on the Status card and in Settings.
 export const PAIR_HOW = "On goldcap.gg, sign in and open Account, press Show pairing code, and type the code in Settings here within 15 minutes.";
 

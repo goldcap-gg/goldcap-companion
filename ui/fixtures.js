@@ -475,6 +475,36 @@ export const FIXTURES = {
   },
 };
 
+// Region: every fixture above is an EU player whose Config.wtf names EU. These are the others.
+const wizardRetail = (game, detectedRegion) => ({
+  ...FIXTURES["unconfigured (wizard)"],
+  game,
+  detectedRegion,
+});
+FIXTURES["wizard: US portal"] = wizardRetail({ region: "us", realmNames: ["Stormrage", "Area 52"] }, "us");
+FIXTURES["wizard: no portal, realm only on US"] = wizardRetail({ region: null, realmNames: ["Area 52"] }, "us");
+FIXTURES["wizard: KR portal, realm on TW"] = wizardRetail({ region: "kr", realmNames: ["Shadowmoon"] }, "tw");
+// Stormrage is a realm name on both US and EU: the wizard asks instead of guessing.
+FIXTURES["wizard: no portal, region unknown"] = wizardRetail({ region: null, realmNames: ["Stormrage"] }, null);
+
+const usConfigured = { ...configured, region: "us", realmSlug: "stormrage", realmAuto: true };
+FIXTURES["retail-only: US status"] = {
+  config: usConfigured,
+  status: { ...FIXTURES["retail-only: status"].status, region: "us", realmSlug: "stormrage" },
+};
+// An install from before region detection: saved EU (the old default), plays on a US-only realm.
+FIXTURES["retail: set to EU, plays on US"] = {
+  config: { ...configured, realmSlug: "", realmAuto: true },
+  detectedRegion: "us",
+  status: {
+    ...FIXTURES["retail-only: status"].status,
+    realmSlug: "",
+    regionHint: "us",
+    prices: stage("broken", null, "Could not reach goldcap.gg", "not configured (realm or WoW path missing)"),
+    addon: stage("notConnected", null, "No price file written yet"),
+  },
+};
+
 // One snapshot per kind of addon card, on top of the retail-only player.
 const addonLine = (over) => ({
   dir: "C:\\Program Files (x86)\\World of Warcraft\\_retail_\\Interface\\AddOns",

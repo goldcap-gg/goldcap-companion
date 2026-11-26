@@ -112,6 +112,16 @@ pub fn detect_game(wow_retail_path: String) -> wtf::GameSettings {
     wtf::read_game_settings(Path::new(&wow_retail_path))
 }
 
+/// The wizard's Region: the portal in Config.wtf, else the one region that knows the realm
+/// played last (`realm_region::detect_at`). `None` means ask the player, never a guess.
+#[tauri::command]
+pub async fn detect_region(wow_retail_path: String) -> Option<String> {
+    let client = crate::sync::build_client();
+    crate::realm_region::detect_at(&client, crate::sync::API_BASE, Path::new(&wow_retail_path))
+        .await
+        .map(|r| r.to_string())
+}
+
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolvedRealm {

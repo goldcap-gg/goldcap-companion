@@ -92,6 +92,10 @@ pub struct SyncStatus {
     /// The whole-market payload written with the last successful tick: how many items
     /// it carried and its snapshot time. `None` when none was written.
     pub region: Option<crate::region::RegionSummary>,
+    /// Auto realm mode only: the region the player's own files say they play on, when it is not
+    /// the saved one (`realm_region::hint`). The Status screen offers the switch; nothing
+    /// switches by itself.
+    pub region_hint: Option<crate::config::Region>,
 }
 
 impl SyncStatus {
@@ -397,10 +401,12 @@ pub fn write_prices(
 /// Realm display name -> connected-realm slug, remembered for the process's
 /// lifetime. Auto-follow re-reads the game's folders every tick, but the name
 /// it finds almost never changes, and resolving it is a network call.
-fn slug_cache() -> &'static Mutex<HashMap<(String, String), String>> {
-    static CACHE: OnceLock<Mutex<HashMap<(String, String), String>>> = OnceLock::new();
+fn slug_cache() -> &'static Mutex<HashMap<(String, String, String), String>> {
+    static CACHE: OnceLock<Mutex<HashMap<(String, String, String), String>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
+
+pub const API_BASE: &str = "https://api.goldcap.gg";
 
 /// Resolve a realm display name (any locale, member or leader name) to the
 /// connected-realm slug the API expects. Shared with the `resolve_realm`
@@ -410,14 +416,27 @@ pub async fn resolve_realm_slug(
     region: &str,
     name: &str,
 ) -> Result<String, String> {
-    let key = (region.to_string(), name.to_ascii_lowercase());
+    resolve_realm_at(client, API_BASE, region, name)
+        .await?
+        .ok_or_else(|| format!("realm \"{name}\" not found on {region}"))
+}
+
+/// `resolve_realm_slug` against `base`, with "this region has no such realm" (a 404) kept
+/// apart from "could not tell" (any other failure): only the first is an answer.
+pub async fn resolve_realm_at(
+    client: &reqwest::Client,
+    base: &str,
+    region: &str,
+    name: &str,
+) -> Result<Option<String>, String> {
+    let key = (base.to_string(), region.to_string(), name.to_ascii_lowercase());
     if let Some(hit) = slug_cache()
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .get(&key)
         .cloned()
     {
-        return Ok(hit);
+        return Ok(Some(hit));
     }
 
     #[derive(serde::Deserialize)]
@@ -425,7 +444,7 @@ pub async fn resolve_realm_slug(
         slug: String,
     }
     let resp = client
-        .get("https://api.goldcap.gg/v1/addon/resolve-realm")
+        .get(format!("{base}/v1/addon/resolve-realm"))
         .query(&[("region", region), ("name", name)])
         .send()
         .await
@@ -436,17 +455,18 @@ pub async fn resolve_realm_slug(
             .await
             .map_err(|e| describe_err(&e, CLIENT_TIMEOUT))?
             .slug,
-        404 => return Err(format!("realm \"{name}\" not found on {region}")),
+        404 => return Ok(None),
         code => return Err(format!("resolve failed: HTTP {code}")),
     };
     slug_cache()
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .insert(key, slug.clone());
-    Ok(slug)
+    Ok(Some(slug))
 }
 
-/// Which realm this tick is for.
+/// Which realm this tick is for, and the region the player's own files point at when it is
+/// not the saved one (`realm_region::hint`, auto mode only).
 ///
 /// Pinned mode is the stored slug. Auto mode reads the realm folders WoW
 /// keeps under `WTF/Account/`, already sorted by when each was last played
@@ -457,24 +477,36 @@ pub async fn resolve_realm_slug(
 /// whichever realm they happened to configure once.
 async fn effective_realm(
     client: &reqwest::Client,
+    base: &str,
     config: &Config,
     logger: &Logger,
-) -> Option<String> {
+) -> (Option<String>, Option<crate::config::Region>) {
+    let pinned = config.realm_slug.trim();
+    let pinned = (!pinned.is_empty()).then(|| pinned.to_string());
     if !config.realm_auto {
-        let pinned = config.realm_slug.trim();
-        return (!pinned.is_empty()).then(|| pinned.to_string());
+        return (pinned, None);
     }
 
-    let names = crate::wtf::list_realm_names(Path::new(&config.wow_retail_path));
-    let newest = names.first()?;
-    match resolve_realm_slug(client, &config.region.to_string(), newest).await {
-        Ok(slug) => Some(slug),
-        Err(e) => {
-            logger.error(&format!("could not resolve last played realm \"{newest}\": {e}"));
+    let retail = Path::new(&config.wow_retail_path);
+    let portal = crate::wtf::read_game_settings(retail).region;
+    let names = crate::wtf::list_realm_names(retail);
+    let Some(newest) = names.first() else {
+        return (None, crate::realm_region::hint(config.region, portal.as_deref(), None));
+    };
+    let region = config.region.to_string();
+    let resolved = resolve_realm_at(client, base, &region, newest).await;
+    let hint = crate::realm_region::hint_at(client, base, config.region, portal.as_deref(), newest, resolved.as_ref().ok()).await;
+    match resolved {
+        Ok(Some(slug)) => (Some(slug), hint),
+        failed => {
+            let why = match failed {
+                Err(e) => e,
+                _ => format!("realm \"{newest}\" not found on {region}"),
+            };
+            logger.error(&format!("could not resolve last played realm \"{newest}\": {why}"));
             // Fall back to whatever was last pinned rather than syncing
             // nothing at all.
-            let pinned = config.realm_slug.trim();
-            (!pinned.is_empty()).then(|| pinned.to_string())
+            (pinned, hint)
         }
     }
 }
@@ -490,7 +522,11 @@ pub async fn sync_once(
 ) {
     set_syncing(status, true);
 
-    let realm_slug = effective_realm(client, config, logger).await.unwrap_or_default();
+    let (realm_slug, region_hint) = effective_realm(client, API_BASE, config, logger).await;
+    let realm_slug = realm_slug.unwrap_or_default();
+    if let Ok(mut s) = status.lock() {
+        s.region_hint = region_hint;
+    }
     if realm_slug.is_empty() || config.wow_retail_path.trim().is_empty() {
         let msg = "not configured (realm or WoW path missing)".to_string();
         logger.error(&format!("sync skipped: {msg}"));
@@ -964,6 +1000,57 @@ mod tests {
         let at = SystemTime::now() + std::time::Duration::from_secs(1800);
         schedule_next_tick(&status, at);
         assert_eq!(status.lock().unwrap().next_tick_at, Some(at));
+    }
+
+    /// Auto realm mode on a saved region, against a resolve-realm stand that knows the realm
+    /// in `knows`: the realm the tick syncs, the region hint, and the requests it made.
+    async fn auto_tick(label: &str, saved: crate::config::Region, portal: Option<&str>, realm: &str, knows: &[&str]) -> (Option<String>, Option<crate::config::Region>, usize) {
+        let dir = crate::realm_region::tests::retail_dir(&format!("sync-{label}"), portal, Some(realm));
+        let (base, seen) = crate::realm_region::tests::realm_stand(knows, &[]);
+        let config = Config {
+            region: saved,
+            realm_auto: true,
+            wow_retail_path: dir.to_string_lossy().into_owned(),
+            ..Config::default()
+        };
+        let logger = Logger::new(&dir.join("logs")).unwrap();
+        let (slug, hint) = effective_realm(&build_client(), &base, &config, &logger).await;
+        std::fs::remove_dir_all(&dir).ok();
+        let asked = seen.lock().unwrap().len();
+        (slug, hint, asked)
+    }
+
+    #[tokio::test]
+    async fn an_eu_install_playing_a_us_only_realm_is_told_to_switch_not_switched() {
+        use crate::config::Region::*;
+        let (slug, hint, _) = auto_tick("us-only", Eu, None, "Area 52", &["us"]).await;
+        assert_eq!((slug, hint), (None, Some(Us)));
+    }
+
+    #[tokio::test]
+    async fn a_realm_on_the_saved_region_needs_no_hint_even_when_another_region_has_it_too() {
+        use crate::config::Region::*;
+        // Stormrage is on both: the saved EU knows it, so nothing to say and nothing more asked.
+        let (slug, hint, asked) = auto_tick("both", Eu, None, "Stormrage", &["eu", "us"]).await;
+        assert_eq!((slug.as_deref(), hint, asked), (Some("stormrage"), None, 1));
+    }
+
+    #[tokio::test]
+    async fn a_realm_no_region_or_several_other_regions_know_brings_no_hint() {
+        use crate::config::Region::*;
+        assert_eq!(auto_tick("nowhere", Eu, None, "Nowhere", &[]).await.1, None);
+        assert_eq!(auto_tick("several", Eu, None, "Twice", &["us", "kr"]).await.1, None);
+    }
+
+    #[tokio::test]
+    async fn a_portal_for_another_region_brings_a_hint_even_when_the_realm_resolves() {
+        use crate::config::Region::*;
+        let (slug, hint, _) = auto_tick("portal-us", Eu, Some("US"), "Stormrage", &["eu", "us"]).await;
+        assert_eq!((slug.as_deref(), hint), (Some("stormrage"), Some(Us)));
+        // A Korean portal with a saved TW, the realm on TW: no mismatch.
+        assert_eq!(auto_tick("portal-kr-tw", Tw, Some("KR"), "Shadowmoon TW", &["tw"]).await.1, None);
+        // A Korean portal with a saved EU, the realm on TW: switch to TW.
+        assert_eq!(auto_tick("portal-kr-eu", Eu, Some("KR"), "Shadowmoon TW", &["tw"]).await.1, Some(Tw));
     }
 
     #[tokio::test]
