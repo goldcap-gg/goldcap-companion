@@ -56,7 +56,10 @@ export function foreverScanLine(g, now) {
 // with a pairing token. Null once paired.
 export function foreverPairLine(g, paired) {
   if (paired) return null;
-  return "Everyone's prices come without pairing, after your first auction house scan. Pair this app with your GoldCap account to also share your own scans.";
+  const share = "Pair this app with your GoldCap account to also share your own scans.";
+  return g.lastScanAt && !g.market
+    ? `goldcap.gg does not know your auction house yet, so no prices from other players have come back. They come once it does. ${share}`
+    : `Everyone's prices come without pairing, after your first auction house scan. ${share}`;
 }
 
 // The Forever card's next step before anything has happened yet: the one thing to do in the game.
@@ -76,6 +79,7 @@ export function foreverHeroPhrase(games, { retailEnabled }) {
   if (games.some((g) => g.unauthorized)) return "WoW: Forever needs attention";
   if (games.some((g) => g.skipped)) return "Your last WoW: Forever scan was not sent";
   if (retailEnabled || games.some((g) => g.lastSentAt || g.crowdWrittenAt)) return "Everything works";
+  if (games.some((g) => g.lastScanAt)) return "Waiting for prices for your auction house";
   return "Waiting for your first scan";
 }
 

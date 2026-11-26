@@ -36,6 +36,8 @@ export function render(el, ctx) {
   // The player picked the Region by hand: detection, which reruns on every visit to Setup,
   // must not undo that.
   let regionByHand = false;
+  // The saved region, kept only so a config with Retail off still saves a valid one. Never shown.
+  let savedRegion = "eu";
   let step = 0;
 
   const progress = document.createElement("div");
@@ -137,6 +139,7 @@ export function render(el, ctx) {
       draft.intervalMinutes = config.intervalMinutes;
       draft.launchAtStartup = config.launchAtStartup;
       draft.companionToken = config.companionToken;
+      savedRegion = config.region;
       // Not the saved region: a config never asked about it says EU all the same. loadRealms
       // takes the one the game's own files name, or leaves the choice to the player.
       draft.realmSlug = config.realmSlug;
@@ -450,22 +453,17 @@ export function render(el, ctx) {
       async function loadRealms() {
         const request = ++realmRequest;
         realm.replaceChildren(new Option("Pick a realm", ""));
-        try {
-          const [game, detected] = await Promise.all([
-            ctx.api.detectGame(draft.wowRetailPath),
-            regionByHand ? null : ctx.api.detectRegion(draft.wowRetailPath).catch(() => null),
-          ]);
-          if (request !== realmRequest) return;
-          if (!regionByHand) {
-            draft.region = detected ?? "";
-            region.value = draft.region;
-            regionHint.hidden = Boolean(draft.region);
-          }
-          realmNames = game.realmNames ?? [];
-        } catch {
-          if (request !== realmRequest) return;
-          realmNames = [];
+        const [game, detected] = await Promise.all([
+          ctx.api.detectGame(draft.wowRetailPath).catch(() => null),
+          regionByHand ? null : ctx.api.detectRegion(draft.wowRetailPath).catch(() => null),
+        ]);
+        if (request !== realmRequest) return;
+        if (!regionByHand) {
+          draft.region = detected ?? "";
+          region.value = draft.region;
         }
+        regionHint.hidden = Boolean(draft.region);
+        realmNames = game?.realmNames ?? [];
         for (const name of realmNames) realm.add(new Option(name, name));
         if (realmNames.length > 0 && !draft.realmSlug) {
           realm.value = realmNames[0];
@@ -526,7 +524,7 @@ export function render(el, ctx) {
     next.addEventListener("click", async () => {
       next.disabled = true;
       try {
-        await ctx.api.saveConfig({ ...draft });
+        await ctx.api.saveConfig({ ...draft, region: draft.region || savedRegion });
       } catch (e) {
         ctx.toast(String(e), true);
         paintNext();

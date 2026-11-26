@@ -300,7 +300,9 @@ test("foreverPairLine: nothing once paired; unpaired, prices still come and pair
   const line = foreverPairLine({}, false);
   assert.match(line, /^Everyone's prices come without pairing, after your first auction house scan\./);
   assert.match(line, /also share your own scans\.$/);
-  assert.equal(foreverPairLine({ lastScanAt: NOW - 600 }, false), line);
+  assert.equal(foreverPairLine({ lastScanAt: NOW - 600, market: "m" }, false), line);
+  // A scan on disk whose market goldcap.gg cannot name yet: why no prices came, no promise.
+  assert.match(foreverPairLine({ lastScanAt: NOW - 600 }, false), /^goldcap\.gg does not know your auction house yet/);
 });
 
 test("connectSubtitle: with WoW: Forever on, pairing shares the scans and prices come without it", () => {
@@ -334,6 +336,7 @@ test("foreverHeroPhrase: a scan that was not sent outranks waiting and everythin
   // Unpaired: everyone's prices in the addon is working, not "pair to send".
   assert.equal(foreverHeroPhrase([{}], unpaired), "Waiting for your first scan");
   assert.equal(foreverHeroPhrase([{ lastScanAt: NOW, crowdWrittenAt: NOW }], unpaired), "Everything works");
+  assert.equal(foreverHeroPhrase([{ lastScanAt: NOW }], unpaired), "Waiting for prices for your auction house");
   assert.equal(foreverHeroPhrase([skipped], unpaired), "Your last WoW: Forever scan was not sent");
 });
 

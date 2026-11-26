@@ -88,7 +88,7 @@ that shows tray icons; on GNOME that is the AppIndicator extension. If the file
 does not start and the error mentions FUSE, install `libfuse2` (`libfuse2t64` on
 Ubuntu 24.04 and later).
 
-**WoW: Forever.** If you also play WoW: Forever, the Companion finds that install next to retail. After your first auction house scan there it writes every player's Forever prices into the Forever install's `GoldCap_AppData`, paired or not: unpaired, it asks goldcap.gg which auction house that scan is from and sends nothing of the scan itself. Once paired, after each /reload it also sends your Forever auction house scan to goldcap.gg, and what you bought in the BUY tab from a list made on goldcap.gg, so that list shows what is done; never the rest of your ledger. It tells the two games apart by what the addon writes into its own save file, not by folder names. Retail works exactly as before.
+**WoW: Forever.** If you also play WoW: Forever, the Companion finds that install next to retail. After your first auction house scan there it writes every player's Forever prices into the Forever install's `GoldCap_AppData`, paired or not: unpaired, it asks goldcap.gg which auction house that scan is from, sending only the scan's region, server number, realm and faction, never its prices. Once paired, after each /reload it also sends your Forever auction house scan to goldcap.gg, and what you bought in the BUY tab from a list made on goldcap.gg, so that list shows what is done; never the rest of your ledger. It tells the two games apart by what the addon writes into its own save file, not by folder names. Retail works exactly as before.
 
 ## Checking the file you downloaded
 

@@ -61,6 +61,8 @@
         return {
           getConfig: () => delay(f.config),
           saveConfig: (config) => {
+            // config.rs's Region accepts nothing else; an empty one fails save_config.
+            if (!["eu", "us", "kr", "tw"].includes(config.region)) return Promise.reject(`unknown region: ${config.region}`);
             Object.assign(f.config, config);
             // The next tick's verdict, for the Switch button: the saved region now matches.
             if (f.status.regionHint === config.region) f.status.regionHint = null;
